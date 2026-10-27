@@ -27,12 +27,14 @@ session, `flock`, and outbound HTTPS. Start your OpenClaw Gateway before setup. 
 not validated for this release.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.3.1 --force --accept-capabilities
+openclaw plugins install clawhub:@pengying/clawser@0.3.2 --accept-capabilities
 openclaw clawser setup
 openclaw clawser doctor
 ```
 
 The install command explicitly accepts Clawser’s declared plugin capabilities.
+The versioned Git source is also available with
+`openclaw plugins install git:github.com/pengying/clawser@v0.3.2 --force --accept-capabilities`.
 
 Setup verifies prerequisites, downloads checksum-pinned cloudflared and noVNC,
 builds the browser image, installs a private user service and merges the required
@@ -47,9 +49,9 @@ Follow the activation/reload instructions printed by setup, then run `doctor`.
 See [installation and maintenance](docs/install.md) for release archives, custom
 ports, upgrades, disable/uninstall and recovery.
 
-The public project is **Clawser**. The plugin ID remains `browser-handoff`, the
-agent tool remains `browser_handoff`, and the package remains
-`openclaw-browser-handoff` for compatibility.
+The ClawHub package is **`@pengying/clawser`**. The plugin ID remains
+`browser-handoff` and the agent tool remains `browser_handoff`, preserving
+existing OpenClaw configuration.
 
 ## Use it
 

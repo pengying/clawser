@@ -14,10 +14,23 @@ and the Cloudflare tunnel. The browser runtime has a 3 GiB memory limit and a
 The first image build can take several minutes or longer on a slow host. Windows, macOS and ARM hosts are
 not supported by this first validated installer.
 
-## Tagged installation
+## ClawHub installation
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.3.1 --force --accept-capabilities
+openclaw plugins install clawhub:@pengying/clawser@0.3.2 --accept-capabilities
+openclaw clawser setup --dry-run
+openclaw clawser setup
+openclaw clawser doctor
+```
+
+The explicit `clawhub:` prefix works with the supported OpenClaw versions.
+ClawHub lists the package after its registry checks finish. The package uses the
+same setup and persistent browser as the GitHub distribution.
+
+## Tagged Git installation
+
+```sh
+openclaw plugins install git:github.com/pengying/clawser@v0.3.2 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup
 openclaw clawser doctor
@@ -25,7 +38,7 @@ openclaw clawser doctor
 
 The Git tag selects a release. `--force` confirms installation or replacement;
 review OpenClaw’s install output and any deployment-specific activation guidance.
-The package is named `openclaw-browser-handoff`, the plugin ID is
+The package is named `@pengying/clawser`, the plugin ID is
 `browser-handoff`, and the public command is `openclaw clawser`.
 
 Setup downloads cloudflared 2026.10.4 and noVNC 1.7.0 from their upstream projects,
@@ -64,13 +77,13 @@ installation is described in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Release archive alternative
 
-Download `openclaw-browser-handoff-0.3.1.tgz` and `SHA256SUMS` from the
-[v0.3.1 release](https://github.com/pengying/clawser/releases/tag/v0.3.1) into the
+Download `pengying-clawser-0.3.2.tgz` and `SHA256SUMS` from the
+[v0.3.2 release](https://github.com/pengying/clawser/releases/tag/v0.3.2) into the
 same directory, then:
 
 ```sh
 sha256sum --check SHA256SUMS
-openclaw plugins install ./openclaw-browser-handoff-0.3.1.tgz --force --accept-capabilities
+openclaw plugins install ./pengying-clawser-0.3.2.tgz --force --accept-capabilities
 openclaw clawser setup
 openclaw clawser doctor
 ```
@@ -139,9 +152,13 @@ it may not exist yet immediately after setup.
    ```
 
    Replace the unit placeholder with the exact name reported for your instance.
-3. Install the reviewed release tag with `openclaw plugins install
-   git:github.com/pengying/clawser@v0.3.1 --force --accept-capabilities --no-enable`, replacing the version
-   when upgrading to a later release. While the plugin is disabled, use its
+3. Keep the current installation source. For a ClawHub installation, install the
+   reviewed version with `openclaw plugins install
+   clawhub:@pengying/clawser@0.3.2 --force --accept-capabilities --no-enable`.
+   For a Git installation, use `openclaw plugins install
+   git:github.com/pengying/clawser@v0.3.2 --force --accept-capabilities --no-enable`.
+   Replace the version when upgrading. Changing installation source can change
+   durable paths and requires an operator migration. While disabled, use its
    standalone `bin/clawser.mjs` entry point shown above to run `setup --dry-run`
    and then `setup`. Use the **same state directory, profile, ports and container
    name** as the existing installation. Repeat `--no-default-profile` if you used

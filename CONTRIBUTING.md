@@ -74,7 +74,7 @@ npm ci --ignore-scripts
 npm test
 npm run test:runtime
 npm pack --ignore-scripts
-openclaw plugins install ./openclaw-browser-handoff-0.3.1.tgz --force
+openclaw plugins install ./pengying-clawser-0.3.2.tgz --force --accept-capabilities
 openclaw clawser setup --dry-run
 ```
 

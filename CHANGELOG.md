@@ -1,5 +1,11 @@
 # Changes
 
+## 0.3.2
+
+- Prepare the scoped `@pengying/clawser` package for ClawHub distribution.
+- Declare the tested OpenClaw build version required by registry validation.
+- Retain the `browser-handoff` runtime ID and `browser_handoff` tool for existing configuration.
+
 ## 0.3.1
 
 - Prepare Chrome program files before CI browser fixtures to handle slow file loading on fresh runners.

@@ -1,6 +1,6 @@
 {
-  "name": "openclaw-browser-handoff",
-  "version": "0.3.1",
+  "name": "@pengying/clawser",
+  "version": "0.3.2",
   "description": "Clawser: mobile browser takeover links and a persistent sandboxed browser for OpenClaw",
   "type": "module",
   "main": "./index.mjs",
@@ -46,6 +46,9 @@
     },
     "install": {
       "minHostVersion": ">=2026.10.4"
+    },
+    "build": {
+      "openclawVersion": "2026.10.4"
     }
   },
   "repository": {

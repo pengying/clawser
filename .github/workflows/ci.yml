@@ -122,6 +122,12 @@ jobs:
           for (const line of ['OK platform', 'OK node', 'OK source paths', 'OK openclaw']) assert.ok(output.includes(line), `Missing installed-host check: ${line}\n${output}`);
           assert.ok(output.includes('FAIL installation: No owned Clawser setup found'), output);
           NODE
+      - name: Check ClawHub package publication metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/clawser-registry" --ignore-scripts --no-audit --no-fund clawhub@0.23.3
+          "$RUNNER_TEMP/clawser-registry/node_modules/.bin/clawhub" package publish . --family code-plugin --dry-run --json
 
   # Docker builds and real desktop integration are intentionally opt-in local
   # checks; see CONTRIBUTING.md. This workflow never uses a signed-in profile.

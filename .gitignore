@@ -5,6 +5,9 @@ node_modules/
 !.env.example
 coverage/
 test-artifacts/
+.clawhub/
+.clawdhub/
+reports/
 artifacts/
 vendor/
 .cache/
