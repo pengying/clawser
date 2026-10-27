@@ -383,6 +383,34 @@ function unit(p, d) {
   return `# Managed by Clawser; ownership is recorded in ${p.marker.replace(/%/g, '%%')}\n[Unit]\nDescription=Clawser private browser handoff controller\nAfter=network-online.target docker.service\n\n[Service]\nType=simple\nExecStart=${[d.execPath, p.controllerScript, p.config].map(systemdArgument).join(' ')}\nUMask=0077\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=180\n\n[Install]\nWantedBy=default.target\n`;
 }
 
+async function reloadPlugin(d) {
+  const deadline = d.now() + 180_000;
+  let announced = false;
+  for (let attempt = 0; attempt < 90; attempt++) {
+    const remaining = deadline - d.now();
+    if (remaining <= 0) break;
+    try {
+      await d.run('openclaw', ['plugins', 'reload', 'browser-handoff', '--wait'], { timeoutMs: Math.min(180_000, remaining) });
+      return;
+    } catch (error) {
+      const stderr = typeof error.stderr === 'string' ? error.stderr : '';
+      const transient = /Couldn't connect to OpenClaw\.|\bGateway (?:is )?restarting\b|\bGateway restart (?:is )?in progress\b/i.test(stderr);
+      const unsafe = /permission|EACCES|EPERM|capabilit|schema|invalid config|unauthoriz|forbidden|authentication|ETIMEDOUT|timeout|timed out|uncertain|unknown outcome|outcome (?:is )?unknown/i.test(`${error.message}\n${stderr}`);
+      // Retry only failures known to precede a reload admission. A killed or
+      // timed-out command may have applied a reload and is never retried here.
+      if (error.code !== 1 || !transient || unsafe) throw error;
+      const waitBudget = deadline - d.now();
+      if (attempt === 89 || waitBudget <= 0) break;
+      if (!announced) {
+        d.log('Waiting for OpenClaw to finish restarting before reloading browser-handoff…');
+        announced = true;
+      }
+      await d.sleep(Math.min(attempt === 0 ? 1000 : 2000, waitBudget));
+    }
+  }
+  throw new Error('OpenClaw is still unavailable for plugin reload. Configuration is saved; rerun setup after the Gateway is ready.');
+}
+
 async function install(o, p, saved, service, d) {
   if (!saved) {
     await d.fs.mkdir(dirname(o.stateDir), { recursive: true, mode: 0o700 });
@@ -438,7 +466,7 @@ async function install(o, p, saved, service, d) {
     // changes made during a long Docker build are preserved.
     const patch = await configPatch(o, p, saved, d);
     await d.run('openclaw', ['config', 'patch', '--stdin'], { input: `${JSON.stringify(patch)}\n` });
-    await d.run('openclaw', ['plugins', 'reload', 'browser-handoff', '--wait'], { timeoutMs: 180_000 });
+    await reloadPlugin(d);
     return saved;
   } finally { await d.fs.rm(lock, { recursive: true }); }
 }
@@ -472,7 +500,7 @@ export async function runClawser(argv, deps = {}) {
     env: process.env, homeDir: homedir(), uid: process.getuid?.(), platform: process.platform,
     arch: process.arch, nodeVersion: process.versions.node, execPath: process.execPath,
     packageDir: resolve(dirname(fileURLToPath(import.meta.url)), '..'),
-    isPortFree: portFree, controllerHealth, sleep: ms => new Promise(accept => setTimeout(accept, ms)),
+    isPortFree: portFree, controllerHealth, now: Date.now, sleep: ms => new Promise(accept => setTimeout(accept, ms)),
     log: message => process.stdout.write(`${message}\n`), ...deps,
   };
   // OpenClaw executes plugin modules from temporary captures. Only its trusted

@@ -125,7 +125,7 @@ test('binds every nested OpenClaw command to the trusted current host entrypoint
   const patches = bound.filter(call => call.args[1] === 'config' && call.args[2] === 'patch');
   assert.equal(patches.length, 2);
   assert.ok(patches.every(call => JSON.parse(call.options.input).browser.profiles.handoff));
-  assert.ok(bound.some(call => call.args[1] === 'plugins' && call.args[2] === 'reload' && call.options.timeoutMs === 180_000));
+  assert.ok(bound.some(call => call.args[1] === 'plugins' && call.args[2] === 'reload' && call.options.timeoutMs > 0 && call.options.timeoutMs <= 180_000));
   assert.equal(invocations.some(call => ['/bin/sh', 'sh', 'bash'].includes(call.executable)), false);
   assert.ok(invocations.some(call => call.executable === 'docker' && call.args.includes('build') && call.options.timeoutMs === 45 * 60_000));
 });
@@ -398,6 +398,77 @@ test('an interrupted reload can be retried without replacing the owned browser p
   h.deps.run = run;
   await runClawser(h.args, h.deps);
   assert.deepEqual(h.config.browser.profiles.handoff, profile);
+});
+
+test('retries only final reload across a Gateway restart without repeating setup mutations', async t => {
+  const h = await harness(t);
+  const run = h.deps.run, sleeps = [], reloads = [];
+  let time = 0;
+  h.deps.now = () => time;
+  h.deps.sleep = async milliseconds => { sleeps.push(milliseconds); time += milliseconds; };
+  h.deps.run = (command, args, options) => {
+    if (command === 'openclaw' && args[0] === 'plugins' && args[1] === 'reload') {
+      reloads.push(options);
+      if (reloads.length <= 2) throw Object.assign(new Error('openclaw failed (1)'), { code: 1, stderr: reloads.length === 1 ? "Couldn't connect to OpenClaw. Check the Control UI or run openclaw gateway status." : 'Gateway is restarting; try again shortly.' });
+    }
+    return run(command, args, options);
+  };
+  assert.equal((await runClawser(h.args, h.deps)).ok, true);
+  assert.equal(reloads.length, 3);
+  assert.deepEqual(sleeps, [1000, 2000]);
+  assert.deepEqual(reloads.map(options => options.timeoutMs), [180_000, 179_000, 177_000]);
+  assert.equal(h.logs.filter(message => message.includes('Waiting for OpenClaw')).length, 1);
+  assert.equal(h.calls.filter(call => call.command === 'docker' && call.args.includes('build')).length, 1);
+  assert.equal(h.calls.filter(call => call.command === 'openclaw' && call.args.includes('patch') && !call.args.includes('--dry-run')).length, 1);
+  assert.deepEqual(Object.keys(h.config.browser.profiles), ['handoff']);
+  assert.deepEqual(h.config.tools.alsoAllow, ['browser_handoff']);
+});
+
+test('permission, capability, schema and uncertain timeout reload errors fail without retrying', async t => {
+  for (const stderr of [
+    "Couldn't connect to OpenClaw. Permission denied (EACCES).",
+    'Gateway is restarting; capability approval required.',
+    'Gateway is restarting; schema validation failed.',
+    "Couldn't connect to OpenClaw. Request timed out; outcome is unknown.",
+    'Gateway unavailable',
+  ]) {
+    await t.test(stderr, async subtest => {
+      const h = await harness(subtest);
+      const run = h.deps.run;
+      let attempts = 0, sleeps = 0;
+      h.deps.sleep = async () => { sleeps++; };
+      h.deps.run = (command, args, options) => {
+        if (command === 'openclaw' && args[0] === 'plugins' && args[1] === 'reload') { attempts++; throw Object.assign(new Error(stderr), { code: 1, stderr }); }
+        return run(command, args, options);
+      };
+      await assert.rejects(runClawser(h.args, h.deps), error => error.message === stderr);
+      assert.equal(attempts, 1);
+      assert.equal(sleeps, 0);
+    });
+  }
+});
+
+test('transient final reload failures exhaust a bounded shared deadline', async t => {
+  const h = await harness(t);
+  const run = h.deps.run, timeouts = [];
+  let time = 0, sleeps = 0;
+  h.deps.now = () => time;
+  h.deps.sleep = async milliseconds => { assert.ok(milliseconds > 0 && milliseconds <= 2000); sleeps++; time += milliseconds; };
+  h.deps.run = (command, args, options) => {
+    if (command === 'openclaw' && args[0] === 'plugins' && args[1] === 'reload') {
+      timeouts.push(options.timeoutMs);
+      throw Object.assign(new Error('connection failed'), { code: 1, stderr: "Couldn't connect to OpenClaw. Check the Control UI or run openclaw gateway status." });
+    }
+    return run(command, args, options);
+  };
+  await assert.rejects(runClawser(h.args, h.deps), /reload.*unavailable|unavailable.*reload|reload.*ready/i);
+  assert.ok(timeouts.length > 1 && timeouts.length <= 90);
+  assert.equal(sleeps, timeouts.length - 1);
+  assert.ok(time <= 180_000);
+  assert.ok(timeouts.every((value, index) => value > 0 && value <= 180_000 && (index === 0 || value < timeouts[index - 1])));
+  assert.equal(h.logs.filter(message => message.includes('Waiting for OpenClaw')).length, 1);
+  assert.equal(h.calls.filter(call => call.command === 'docker' && call.args.includes('build')).length, 1);
+  assert.equal(h.calls.filter(call => call.command === 'openclaw' && call.args.includes('patch') && !call.args.includes('--dry-run')).length, 1);
 });
 
 test('owned runtime ports and the persistent Docker profile survive repeated setup', async t => {
