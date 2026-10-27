@@ -169,12 +169,18 @@ test('watch Done retires read-only authority without draining an active automati
   await c.request('automationEnter',{callKey:'long-running'});
   const lease=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
   const viewer=await viewerClient(t,c,lease);
-  const finished=viewer.post('done').then(async response=>({kind:'done',response,result:await response.json()}));
-  const result=await Promise.race([finished,new Promise(resolve=>setTimeout(()=>resolve({kind:'blocked'}),100))]);
-  // Always release the fixture's call, including on the old broken path.
-  const stillActive=c.gate.active.has('long-running'),stillRegistered=!!c.ledger.calls['long-running'];
-  await c.request('automationLeave',{callKey:'long-running'});await finished;
-  assert.equal(result.kind,'done');assert.equal(result.response.status,200);assert.deepEqual(result.result,{mode:'ended',reason:'done',disposition:'retained'});assert.equal(stillActive,true);assert.equal(stillRegistered,true);
+  const persist=c.persist.bind(c);let slowWrite=true;
+  c.persist=async()=>{if(slowWrite){slowWrite=false;await new Promise(resolve=>setTimeout(resolve,150));}return persist();};
+  // Cleanup must not depend on automation leaving, regardless of disk latency.
+  const acquire=c.gate.acquire;let acquisitions=0;
+  c.gate.acquire=async()=>{acquisitions++;throw new Error('Read-only retirement must not drain automation');};
+  try{
+    const response=await viewer.post('done'),result=await response.json();
+    assert.equal(response.status,200);assert.deepEqual(result,{mode:'ended',reason:'done',disposition:'retained'});
+    assert.equal(acquisitions,0);assert.equal(c.gate.active.has('long-running'),true);assert.ok(c.ledger.calls['long-running']);
+  }finally{
+    c.gate.acquire=acquire;await c.request('automationLeave',{callKey:'long-running'});
+  }
   const status=await c.request('status',{owner,id:lease.id});assert.equal(status.resumeAllowed,true);assert.equal(status.snapshotObserved,false);assert.equal(status.inputFenced,true);assert.equal(status.recoveryRequired,false);assert.deepEqual(events,['watch','fence']);
 });
 
@@ -224,10 +230,19 @@ test('public Done cancels a draining takeover before writable dispatch',async t=
   const lease=await c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30}),viewer=await viewerClient(t,c,lease);
   const watching=await(await viewer.post('credentials')).json();await viewer.open(watching.generation);
   const taking=viewer.post('control');while(c.gate.holder!==lease.id)await new Promise(resolve=>setTimeout(resolve,1));
-  const done=viewer.post('done').then(async response=>({response,result:await response.json()}));
-  const result=await Promise.race([done,new Promise(resolve=>setTimeout(()=>resolve(null),100))]);
-  const stillActive=c.gate.active.has('draining');await c.request('automationLeave',{callKey:'draining'});await done;
-  assert.ok(result,'Done must cancel the pending acquisition');assert.equal(result.response.status,200);assert.equal(result.result.reason,'done');assert.equal((await taking).status,409);assert.equal(stillActive,true);
+  const persist=c.persist.bind(c);let slowWrite=true;
+  c.persist=async()=>{if(slowWrite){slowWrite=false;await new Promise(resolve=>setTimeout(resolve,150));}return persist();};
+  // The acquisition already in flight must be cancelled, never reacquired for cleanup.
+  const acquire=c.gate.acquire;let acquisitions=0;
+  c.gate.acquire=async()=>{acquisitions++;throw new Error('Cancelled takeover must not reacquire automation');};
+  try{
+    const response=await viewer.post('done'),result=await response.json();
+    assert.equal(response.status,200);assert.equal(result.reason,'done');assert.equal((await taking).status,409);
+    assert.equal(acquisitions,0);assert.equal(c.gate.holder,null);
+    assert.equal(c.gate.active.has('draining'),true);assert.ok(c.ledger.calls.draining);
+  }finally{
+    c.gate.acquire=acquire;await c.request('automationLeave',{callKey:'draining'});await taking;
+  }
   assert.deepEqual(events,['watch','fence']);assert.equal(c.ledger.leases[lease.id].mayBeWritable,false);assert.equal(c.ledger.leases[lease.id].reason,'done');
 });
 

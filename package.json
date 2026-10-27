@@ -1,6 +1,6 @@
 {
   "name": "@pengying/clawser",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Clawser: mobile browser takeover links and a persistent sandboxed browser for OpenClaw",
   "type": "module",
   "main": "./index.mjs",

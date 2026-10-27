@@ -17,7 +17,7 @@ not supported by this first validated installer.
 ## ClawHub installation
 
 ```sh
-openclaw plugins install clawhub:@pengying/clawser@0.3.3 --accept-capabilities
+openclaw plugins install clawhub:@pengying/clawser@0.3.4 --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup
 openclaw clawser doctor
@@ -30,7 +30,7 @@ same setup and persistent browser as the GitHub distribution.
 ## Tagged Git installation
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.3.3 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.3.4 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup
 openclaw clawser doctor
@@ -77,13 +77,13 @@ installation is described in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Release archive alternative
 
-Download `pengying-clawser-0.3.3.tgz` and `SHA256SUMS` from the
-[v0.3.3 release](https://github.com/pengying/clawser/releases/tag/v0.3.3) into the
+Download `pengying-clawser-0.3.4.tgz` and `SHA256SUMS` from the
+[v0.3.4 release](https://github.com/pengying/clawser/releases/tag/v0.3.4) into the
 same directory, then:
 
 ```sh
 sha256sum --check SHA256SUMS
-openclaw plugins install ./pengying-clawser-0.3.3.tgz --force --accept-capabilities
+openclaw plugins install ./pengying-clawser-0.3.4.tgz --force --accept-capabilities
 openclaw clawser setup
 openclaw clawser doctor
 ```
@@ -154,9 +154,9 @@ it may not exist yet immediately after setup.
    Replace the unit placeholder with the exact name reported for your instance.
 3. Keep the current installation source. For a ClawHub installation, install the
    reviewed version with `openclaw plugins install
-   clawhub:@pengying/clawser@0.3.3 --force --accept-capabilities --no-enable`.
+   clawhub:@pengying/clawser@0.3.4 --force --accept-capabilities --no-enable`.
    For a Git installation, use `openclaw plugins install
-   git:github.com/pengying/clawser@v0.3.3 --force --accept-capabilities --no-enable`.
+   git:github.com/pengying/clawser@v0.3.4 --force --accept-capabilities --no-enable`.
    Replace the version when upgrading. Changing installation source can change
    durable paths and requires an operator migration. While disabled, use its
    standalone `bin/clawser.mjs` entry point shown above to run `setup --dry-run`

@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.4
+
+- Verify read-only cleanup independence from active automation without assuming disk writes finish within 100 milliseconds.
+
 ## 0.3.3
 
 - Isolate browser-module loading from VNC readiness deadlines in the disposable CI fixtures.
