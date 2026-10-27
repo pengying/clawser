@@ -1,5 +1,12 @@
 # Changes
 
+## 0.3.0
+
+- Publish Clawser as a standalone OpenClaw plugin with versioned GitHub installs and release archives.
+- Add explicit setup and doctor commands, pinned dependency checksums, managed private service configuration, and ownership-aware repeat runs.
+- Preserve the active service lifecycle when OpenClaw cold-loads tool discovery.
+- Add package validation and automated CI/release checks.
+
 ## 0.2.0
 
 - Add persistent sandboxed Chromium/Xvfb with full browser chrome, tabs and native

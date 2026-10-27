@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24, 26]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Prepare disposable browser fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          chrome_bin=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          test -x "$chrome_bin"
+          printf 'CHROME_BIN=%s\n' "$chrome_bin" >> "$GITHUB_ENV"
+          novnc_archive="$RUNNER_TEMP/clawser-novnc-1.7.0.tar.gz"
+          novnc_dir="$RUNNER_TEMP/clawser-novnc-1.7.0"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --retry 3 --connect-timeout 20 --max-time 180 \
+            https://codeload.github.com/novnc/noVNC/tar.gz/refs/tags/v1.7.0 \
+            --output "$novnc_archive"
+          printf '%s  %s\n' \
+            b1003a11b6e6e8d8f7f5e5586daae7f8ca651d8aee0aa155ff9ac841c48f52c6 \
+            "$novnc_archive" | sha256sum --check
+          mkdir -p "$novnc_dir"
+          tar -xzf "$novnc_archive" --strip-components=1 -C "$novnc_dir"
+          test -f "$novnc_dir/core/rfb.js"
+          printf 'NOVNC_ASSETS_DIR=%s\n' "$novnc_dir" >> "$GITHUB_ENV"
+      - name: Unit and disposable browser tests
+        run: npm test
+      - name: Runtime adapter and readiness tests
+        run: npm run test:runtime
+      - name: Verify distributable package
+        run: npm run check:package
+
+  installed-plugin:
+    name: Stock OpenClaw install
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install pristine OpenClaw and package the plugin
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npm install --prefix "$RUNNER_TEMP/clawser-host" --ignore-scripts --no-audit --no-fund openclaw@2026.10.4
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP" --json > "$RUNNER_TEMP/clawser-pack.json"
+      - name: Verify the installed CLI without provisioning a desktop
+        shell: bash
+        env:
+          OPENCLAW_STATE_DIR: ${{ runner.temp }}/clawser-host-state
+          OPENCLAW_CONFIG_PATH: ${{ runner.temp }}/clawser-host-state/openclaw.json
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { mkdir, writeFile } from 'node:fs/promises';
+          import { randomBytes } from 'node:crypto';
+          await mkdir(process.env.OPENCLAW_STATE_DIR, { recursive: true, mode: 0o700 });
+          await writeFile(process.env.OPENCLAW_CONFIG_PATH, JSON.stringify({
+            gateway: { mode: 'local', port: 19889, bind: 'loopback', auth: { mode: 'token', token: randomBytes(32).toString('hex') } },
+          }), { mode: 0o600 });
+          NODE
+          clawser_cli="$RUNNER_TEMP/clawser-host/node_modules/.bin/openclaw"
+          clawser_archive=$(node -p "JSON.parse(require('node:fs').readFileSync(process.env.RUNNER_TEMP + '/clawser-pack.json', 'utf8'))[0].filename")
+          "$clawser_cli" plugins install "$RUNNER_TEMP/$clawser_archive" --force --accept-capabilities
+          "$clawser_cli" clawser --help
+          if "$clawser_cli" clawser doctor --state-dir "$RUNNER_TEMP/clawser-unconfigured" > "$RUNNER_TEMP/clawser-doctor.log" 2>&1; then
+            echo 'Doctor unexpectedly accepted an unconfigured desktop'
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFile } from 'node:fs/promises';
+          const output = await readFile(`${process.env.RUNNER_TEMP}/clawser-doctor.log`, 'utf8');
+          for (const line of ['OK platform', 'OK node', 'OK source paths', 'OK openclaw']) assert.ok(output.includes(line), `Missing installed-host check: ${line}\n${output}`);
+          assert.ok(output.includes('FAIL installation: No owned Clawser setup found'), output);
+          NODE
+
+  # Docker builds and real desktop integration are intentionally opt-in local
+  # checks; see CONTRIBUTING.md. This workflow never uses a signed-in profile.

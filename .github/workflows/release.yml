@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish GitHub release archive
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Verify tag and package
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFile } from 'node:fs/promises';
+          const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+          assert.equal(process.env.RELEASE_TAG, `v${pkg.version}`, 'tag must match package version');
+          NODE
+          npm ci --ignore-scripts
+          npm run check:package
+      - name: Pack archive and create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pack --ignore-scripts --json > "$RUNNER_TEMP/clawser-pack.json"
+          archive=$(node -p "JSON.parse(require('node:fs').readFileSync(process.env.RUNNER_TEMP + '/clawser-pack.json', 'utf8'))[0].filename")
+          test -f "$archive"
+          sha256sum "$archive" > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          gh release create "$RELEASE_TAG" "$archive" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Clawser $RELEASE_TAG" --generate-notes

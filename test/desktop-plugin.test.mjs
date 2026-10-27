@@ -1,15 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createPlugin } from '../index.mjs';
+import { registerDesktopPlugin } from '../src/desktop-plugin.mjs';
 
 const ownerContext = () => ({ senderIsOwner: true, sessionKey: 'agent:main:telegram:direct:1', sessionId: 'incarnation', assertInvocationCurrent() {} });
 const browserEvent = { toolName: 'browser', params: { action: 'snapshot', profile: 'handoff' } };
 const invocation = () => ({ ...ownerContext(), runId: 'run', toolCallId: 'call' });
-function setup({ request, runtime = {} } = {}) {
+function setup({ request, runtime = {}, registrationMode, configure, connect, register = registerDesktopPlugin } = {}) {
   const hooks = new Map(), tools = [], services = [], requests = [], clients = [];
   const api = {
     pluginConfig: { desktop: { enabled: true, profile: 'handoff', socketPath: '/tmp/browser-handoff/controller.sock' } },
-    config: { browser: { profiles: { handoff: { cdpUrl: 'http://127.0.0.1:19333', attachOnly: true, driver: 'openclaw' } } } }, runtime,
+    config: { browser: { profiles: { handoff: { cdpUrl: 'http://127.0.0.1:19333', attachOnly: true, driver: 'openclaw' } } } }, runtime, registrationMode,
     registerTool: value => tools.push(value), registerService: value => services.push(value),
     on: (name, fn) => hooks.set(name, fn), logger: { warn() {}, info() {} },
   };
@@ -26,9 +26,10 @@ function setup({ request, runtime = {} } = {}) {
       requests.push({ method, params, options, client });
       return request ? request(method, params, options, defaults, client) : defaults(method);
     }, close() { this.closed = true; } };
-    clients.push(client); return client;
+    clients.push(client); return connect ? connect(client) : client;
   };
-  createPlugin({ desktopRpcFactory: rpcFactory, backendFactory() { throw new Error('legacy backend selected'); }, serverFactory() { throw new Error('legacy server selected'); } }).register(api);
+  configure?.(api);
+  register(api, { desktopRpcFactory: rpcFactory });
   return { api, hooks, tools, services, requests, clients, tool: () => tools[0].create(ownerContext()) };
 }
 
@@ -451,4 +452,160 @@ test('production handback uses the SDK immediate wake contract through its legac
   assert.equal(runtime.wakes[0].source, 'background-task');
   assert.equal(runtime.wakes[0].intent, 'immediate', 'targeted background work must bypass optional heartbeat cadence');
   assert.equal(runtime.wakes[0].sessionKey, ownerContext().sessionKey);
+});
+
+test('production discovery registers only an owner-private V2 tool without runtime access', () => {
+  const f = setup({ registrationMode: 'tool-discovery', configure(api) {
+    Object.defineProperty(api, 'runtime', { get() { throw new Error('runtime accessed during discovery'); } });
+  } });
+  assert.equal(f.tools.length, 1);
+  assert.equal(f.tools[0].contextVersion, 2);
+  assert.equal(f.services.length, 0);
+  assert.equal(f.hooks.size, 0);
+  assert.equal(f.clients.length, 0);
+  for (const variation of [{ senderIsOwner: false }, { sandboxed: true }, { sessionKey: 'agent:main:telegram:group:1' }, { sessionId: undefined }, { assertInvocationCurrent: undefined }]) {
+    assert.equal(f.tools[0].create({ ...ownerContext(), ...variation }), null);
+  }
+  assert.equal(f.tool().name, 'browser_handoff');
+});
+
+test('production non-full registration avoids services, hooks, tools and runtime access', () => {
+  for (const registrationMode of ['cli-metadata', 'setup-only']) {
+    const f = setup({ registrationMode, configure(api) {
+      Object.defineProperty(api, 'runtime', { get() { throw new Error('runtime accessed outside full registration'); } });
+    } });
+    assert.equal(f.services.length, 0);
+    assert.equal(f.hooks.size, 0);
+    assert.equal(f.tools.length, 0);
+    assert.equal(f.clients.length, 0);
+  }
+});
+
+test('production cold discovery delegates to the healthy full instance with its original invocation and signal', async t => {
+  const full = setup({ request: async (method, params, options, defaults) => method === 'status'
+    ? { id: params.id, resumeAllowed: true } : defaults(method) });
+  await full.services[0].start(); t.after(() => full.services[0].stop());
+  const cold = await import(`../src/desktop-plugin.mjs?cold-discovery=${Date.now()}`);
+  const discovery = setup({ registrationMode: 'tool-discovery', register: cold.registerDesktopPlugin,
+    request() { throw new Error('discovery must use the live factory'); } });
+  let current = true, checks = 0;
+  const ctx = { ...ownerContext(), sessionId: 'discovered-incarnation', assertInvocationCurrent() {
+    checks++; if (!current) throw new Error('stale discovered invocation');
+  } };
+  const tool = discovery.tools[0].create(ctx), abort = new AbortController();
+  const result = await tool.execute('discovered-call', { action: 'status', id: 'lease' }, abort.signal);
+  assert.equal(result.details.resumeAllowed, true);
+  const status = full.requests.find(r => r.method === 'status');
+  assert.equal(status.params.owner, JSON.stringify([ctx.sessionKey, ctx.sessionId]));
+  assert.equal(status.options.signal, abort.signal);
+  assert.ok(checks >= 2);
+  assert.equal(discovery.clients.length, 0);
+  current = false;
+  await assert.rejects(tool.execute('stale', { action: 'status', id: 'lease' }), /stale discovered invocation/);
+});
+
+test('production discovery fails closed without a healthy matching live instance', async t => {
+  const discovery = setup({ registrationMode: 'tool-discovery' });
+  const tool = discovery.tool();
+  const unavailable = () => assert.rejects(tool.execute('status', { action: 'status', id: 'lease' }), /unavailable|active|live/i);
+  await unavailable();
+  const failed = setup({ request: async (method, params, options, defaults) => {
+    if (method === 'health') throw new Error('startup failed');
+    return defaults(method);
+  } });
+  await assert.rejects(failed.services[0].start(), /startup failed/);
+  await unavailable();
+  const full = setup();
+  await full.services[0].start(); t.after(() => full.services[0].stop());
+  assert.equal((await tool.execute('status', { action: 'status', id: 'lease' })).details.ok, true);
+  for (const mismatch of [
+    api => { api.pluginConfig.desktop.socketPath = '/tmp/another-controller.sock'; },
+    api => { api.pluginConfig.desktop.profile = 'another'; api.config.browser.profiles.another = { cdpUrl: 'http://127.0.0.1:19333', attachOnly: true }; },
+    api => { api.config.browser.profiles.handoff.cdpUrl = 'http://127.0.0.1:9222'; },
+  ]) {
+    const other = setup({ registrationMode: 'tool-discovery', configure: mismatch });
+    await assert.rejects(other.tool().execute('status', { action: 'status', id: 'lease' }), /unavailable|active|live/i);
+    assert.equal(other.clients.length, 0);
+  }
+  await full.services[0].stop();
+  await unavailable();
+});
+
+test('production discovery retains the live completion fault and continuation capability', async t => {
+  const full = setup({ runtime: wakeRuntime(), request: async (method, params, options, defaults) => {
+    if (method === 'automationLeave') return { released: false };
+    if (method === 'status') return { id: params.id, resumeAllowed: true };
+    return defaults(method);
+  } });
+  await full.services[0].start(); t.after(() => full.services[0].stop());
+  await full.hooks.get('before_tool_call')(browserEvent, invocation());
+  await full.hooks.get('after_tool_call')(browserEvent, invocation());
+  const discovery = setup({ registrationMode: 'tool-discovery' });
+  const result = await discovery.tool().execute('status', { action: 'status', id: 'lease' });
+  assert.equal(result.details.resumeAllowed, false);
+  assert.match(result.details.browserGateFault, /completion|recovery/i);
+  assert.equal(result.details.continuation, 'session-event');
+  assert.match(result.details.continuationNotice, /session incarnation/i);
+});
+
+test('production stop during discovery RPC startup rejects and closes the request connection', async t => {
+  let release;
+  const connecting = new Promise(resolve => { release = resolve; });
+  const full = setup({ connect: client => client === full.clients[0] ? client : connecting.then(() => client) });
+  await full.services[0].start(); t.after(() => full.services[0].stop());
+  const discovery = setup({ registrationMode: 'tool-discovery' });
+  const pending = discovery.tool().execute('status', { action: 'status', id: 'lease' });
+  await eventually(() => assert.equal(full.clients.length, 2));
+  const rejected = assert.rejects(pending, /service changed|stopped|unavailable/i);
+  await full.services[0].stop();
+  release();
+  await rejected;
+  assert.equal(full.clients[1].closed, true);
+  assert.equal(full.requests.some(r => r.method === 'status'), false);
+});
+
+test('production stop during full startup prevents late publication to discovery', async () => {
+  let release;
+  const health = new Promise(resolve => { release = resolve; });
+  const full = setup({ request: async (method, params, options, defaults) => method === 'health' ? health : defaults(method) });
+  const starting = full.services[0].start();
+  await eventually(() => assert.ok(full.requests.some(r => r.method === 'health')));
+  const rejected = assert.rejects(starting, /service changed|stopped/i);
+  await full.services[0].stop();
+  release({ profile: 'handoff', cdpUrl: 'http://127.0.0.1:19333' });
+  await rejected;
+  assert.equal(full.clients[0].closed, true);
+  const discovery = setup({ registrationMode: 'tool-discovery' });
+  await assert.rejects(discovery.tool().execute('status', { action: 'status', id: 'lease' }), /unavailable|active|live/i);
+});
+
+test('production stop before full RPC connection rejects and closes the late client', async () => {
+  let release;
+  const connecting = new Promise(resolve => { release = resolve; });
+  const full = setup({ connect: client => connecting.then(() => client) });
+  const starting = full.services[0].start();
+  const rejected = assert.rejects(starting, /service changed|stopped/i);
+  await full.services[0].stop();
+  release();
+  await rejected;
+  assert.equal(full.clients[0].closed, true);
+  assert.equal(full.requests.some(r => r.method === 'health'), false);
+});
+
+test('production replacement remains discoverable after old instance shutdown finishes', async t => {
+  let release;
+  const retirement = new Promise(resolve => { release = resolve; });
+  const old = setup({ request: async (method, params, options, defaults) => method === 'revokeAll' ? retirement : defaults(method) });
+  await old.services[0].start();
+  const discovery = setup({ registrationMode: 'tool-discovery' }), tool = discovery.tool();
+  assert.equal((await tool.execute('old-status', { action: 'status', id: 'lease' })).details.ok, true);
+  const stopping = old.services[0].stop();
+  await eventually(() => assert.ok(old.requests.some(r => r.method === 'revokeAll')));
+  await assert.rejects(tool.execute('stopped-status', { action: 'status', id: 'lease' }), /unavailable/i);
+  const replacement = setup({ request: async (method, params, options, defaults) => method === 'status' ? { instance: 'replacement' } : defaults(method) });
+  await replacement.services[0].start(); t.after(() => replacement.services[0].stop());
+  release({ allRetired: true, recoveryRequired: false });
+  await stopping;
+  await old.services[0].stop();
+  assert.equal((await tool.execute('replacement-status', { action: 'status', id: 'lease' })).details.instance, 'replacement');
 });

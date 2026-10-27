@@ -1,29 +1,88 @@
 {
   "id": "browser-handoff",
-  "name": "Browser Handoff",
-  "description": "Short-lived mobile browser viewing and takeover links",
-  "activation": { "onStartup": true },
-  "contracts": { "tools": ["browser_handoff"] },
-  "skills": ["./skills"],
+  "name": "Clawser",
+  "description": "Private full-browser viewing and human takeover links for OpenClaw",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "browser_handoff"
+    ]
+  },
+  "skills": [
+    "./skills"
+  ],
   "configSchema": {
-    "type": "object", "additionalProperties": false,
+    "type": "object",
+    "additionalProperties": false,
     "properties": {
-      "port": { "type": "integer", "minimum": 1024, "maximum": 65535, "default": 18796 },
-      "publicBaseUrl": { "type": "string", "description": "HTTPS origin reverse-proxied to this plugin sidecar; no path suffix" },
-      "comparisonProxyUrl": { "type": "string", "description": "Optional fixed loopback HTTP origin for the authenticated disposable noVNC comparison service; disabled when absent" },
-      "profiles": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Explicit shareable profile name to loopback CDP HTTP origin" },
-      "funnel": { "type": "object", "additionalProperties": false, "properties": {
-        "enabled": { "type": "boolean", "default": false },
-        "httpsPort": { "type": "integer", "enum": [443, 8443, 10000], "default": 10000 }
-      } },
-      "desktop": { "type": "object", "additionalProperties": false,
+      "port": {
+        "type": "integer",
+        "minimum": 1024,
+        "maximum": 65535,
+        "default": 18796
+      },
+      "publicBaseUrl": {
+        "type": "string",
+        "description": "HTTPS origin reverse-proxied to this plugin sidecar; no path suffix"
+      },
+      "comparisonProxyUrl": {
+        "type": "string",
+        "description": "Optional fixed loopback HTTP origin for the authenticated disposable noVNC comparison service; disabled when absent"
+      },
+      "profiles": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "description": "Explicit shareable profile name to loopback CDP HTTP origin"
+      },
+      "funnel": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "httpsPort": {
+            "type": "integer",
+            "enum": [
+              443,
+              8443,
+              10000
+            ],
+            "default": 10000
+          }
+        }
+      },
+      "desktop": {
+        "type": "object",
+        "additionalProperties": false,
         "description": "Production full-browser handoff through an operator-managed private Unix controller; ordinary Chromium CDP profile must match controller identity and set attachOnly=true with the openclaw driver. Legacy tab sharing is the default when disabled or absent.",
         "properties": {
-          "enabled": { "type": "boolean", "default": false },
-          "socketPath": { "type": "string", "description": "Required when enabled: absolute owner-only controller Unix socket path; never expose over the public viewer tunnel" },
-          "profile": { "type": "string", "description": "Required when enabled: dedicated ordinary OpenClaw browser profile shared with the controller; handoff includes all tabs" }
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "socketPath": {
+            "type": "string",
+            "description": "Required when enabled: absolute owner-only controller Unix socket path; never expose over the public viewer tunnel"
+          },
+          "profile": {
+            "type": "string",
+            "description": "Required when enabled: dedicated ordinary OpenClaw browser profile shared with the controller; handoff includes all tabs"
+          }
         }
       }
     }
-  }
+  },
+  "cliCommands": [
+    {
+      "name": "clawser",
+      "description": "Set up and check the Clawser browser handoff runtime",
+      "hasSubcommands": true
+    }
+  ]
 }

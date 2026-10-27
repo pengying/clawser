@@ -1,13 +1,13 @@
 {
   "name": "openclaw-browser-handoff",
-  "version": "0.2.0",
-  "description": "Temporary, mobile-friendly viewing and takeover of an OpenClaw browser",
+  "version": "0.3.0",
+  "description": "Clawser: mobile browser takeover links and a persistent sandboxed browser for OpenClaw",
   "type": "module",
   "main": "./index.mjs",
   "exports": "./index.mjs",
   "license": "MIT",
   "engines": {
-    "node": ">=22"
+    "node": ">=24.16.0 <25 || >=26.1.0"
   },
   "files": [
     "index.mjs",
@@ -18,14 +18,21 @@
     "README.md",
     "LICENSE",
     "bin",
-    "runtime"
+    "runtime",
+    "docs/install.md",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "scripts"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
     "test:live": "node test/live-browser.mjs",
     "demo": "node test/demo.mjs",
     "start": "node src/dev.mjs",
-    "test:runtime": "node --test runtime/desktop/test/*.test.mjs"
+    "test:runtime": "node --test runtime/desktop/test/*.test.mjs",
+    "setup": "node bin/clawser.mjs setup",
+    "doctor": "node bin/clawser.mjs doctor",
+    "check:package": "node scripts/check-package.mjs"
   },
   "dependencies": {
     "ws": "^8.18.3"
@@ -35,8 +42,28 @@
       "./index.mjs"
     ],
     "compat": {
-      "pluginApi": ">=2026.9.6",
-      "minGatewayVersion": "2026.9.6"
+      "pluginApi": ">=2026.9.6"
+    },
+    "install": {
+      "minHostVersion": ">=2026.10.4"
     }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pengying/clawser.git"
+  },
+  "homepage": "https://github.com/pengying/clawser#readme",
+  "bugs": {
+    "url": "https://github.com/pengying/clawser/issues"
+  },
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "browser",
+    "novnc",
+    "remote-desktop"
+  ],
+  "bin": {
+    "clawser": "./bin/clawser.mjs"
   }
 }

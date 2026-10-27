@@ -12,6 +12,22 @@ const callKey = (event, ctx) => {
   return values.every(value => typeof value === 'string' && value.trim()) ? JSON.stringify([...values, event.toolName]) : null;
 };
 const defaultRpcFactory = async (socketPath) => new (await import('./desktop-rpc.mjs')).DesktopRpcClient(socketPath);
+// Discovery registries may cold-load a separate module instance in this process.
+// Share only a healthy full instance's V2 factory, never an independent RPC path.
+const liveInstancesSymbol = Symbol.for('openclaw.browser-handoff.live-instances.v1');
+const liveInstances = () => globalThis[liveInstancesSymbol] ??= new Map();
+const toolOptions = { name: 'browser_handoff', optional: true };
+const toolDescriptor = {
+  name: 'browser_handoff', label: 'Browser Handoff',
+  description: 'Owner-private temporary full-browser viewing or human takeover links for the configured production profile. Includes all tabs, browser chrome, dialogs, and clipboard during control. Use for human CAPTCHA, passwords, 2FA, consent or forms needing human judgment. Share links only privately. Pause browser actions until resumeAllowed=true; then take a fresh normal browser snapshot.',
+  parameters: { type: 'object', additionalProperties: false, required: ['action'], properties: {
+    action: { type: 'string', enum: ['tabs', 'create', 'status', 'wait', 'revoke'] },
+    profile: { type: 'string' }, targetId: { type: 'string' }, id: { type: 'string' },
+    permission: { type: 'string', enum: ['watch', 'control'] }, reason: { type: 'string', maxLength: 500 },
+    ttlSeconds: { type: 'integer', minimum: 30, maximum: 1800 },
+    timeoutSeconds: { type: 'integer', minimum: 1, maximum: 60 },
+  } },
+};
 function cdpIdentity(value) {
   const url = new URL(value);
   if (url.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || url.username || url.password || url.pathname !== '/' || url.search || url.hash)
@@ -23,12 +39,37 @@ function duration(value, fallback, min, max, label) {
   if (!Number.isInteger(result) || result < min || result > max) throw new Error(`Invalid ${label}`);
   return result;
 }
+function liveInstanceKey(api) {
+  const { socketPath, profile } = api.pluginConfig.desktop;
+  return JSON.stringify(['browser-handoff', socketPath, profile, cdpIdentity(api.config?.browser?.profiles?.[profile]?.cdpUrl)]);
+}
 
 // Only private control-plane RPC runs in the Gateway. VNC, HTTP viewers, browser
 // supervision and the authoritative automation gate live in the controller.
 export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFactory } = {}) {
   const config = api.pluginConfig.desktop;
-  let client, running = false, fault, pollTimer, serviceEpoch;
+  if (api.registrationMode === 'tool-discovery') {
+    api.registerTool({ contextVersion: 2, create(ctx) {
+      if (!allowed(ctx)) return null;
+      return { ...toolDescriptor, async execute(callId, params, signal) {
+        ctx.assertInvocationCurrent();
+        if (!allowed(ctx)) throw new Error('Owner-private access required');
+        let instance;
+        try { instance = liveInstances().get(liveInstanceKey(api)); } catch { /* Invalid mappings cannot match a live instance. */ }
+        if (!instance) throw new Error('Browser Handoff production controller is unavailable');
+        const tool = instance.factory.create(ctx);
+        if (!tool) throw new Error('Owner-private access required');
+        return tool.execute(callId, params, signal);
+      } };
+    } }, toolOptions);
+    return;
+  }
+  if (api.registrationMode !== undefined && api.registrationMode !== 'full') return;
+  let client, running = false, fault, pollTimer, serviceEpoch, publication;
+  const unpublish = () => {
+    if (publication && liveInstances().get(publication.key) === publication) liveInstances().delete(publication.key);
+    publication = undefined;
+  };
   const calls = new Map(), notifications = new Map();
   const canceledOwners = new Set(), canceledSessions = new Set();
   const sessionRuntime = api.runtime?.agent?.session, system = api.runtime?.system;
@@ -121,27 +162,40 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
   api.registerService({
     id: 'browser-handoff',
     async start() {
-      running = false; fault = undefined; serviceEpoch = Symbol();
+      unpublish();
+      running = false; fault = undefined;
+      const epoch = serviceEpoch = Symbol();
       if (!isAbsolute(config.socketPath || '')) throw new Error('desktop.socketPath must be an absolute private Unix socket path');
       if (typeof config.profile !== 'string' || !config.profile.trim()) throw new Error('desktop.profile is required');
+      let rpc;
       try {
-        client = await desktopRpcFactory(config.socketPath);
-        validateIdentity(await client.request('health', {}, { timeoutMs: 10_000 }));
+        rpc = await desktopRpcFactory(config.socketPath);
+        if (serviceEpoch !== epoch) throw new Error('Browser Handoff service changed during controller startup');
+        client = rpc;
+        const identity = await rpc.request('health', {}, { timeoutMs: 10_000 });
+        if (serviceEpoch !== epoch || client !== rpc) throw new Error('Browser Handoff service changed during controller startup');
+        validateIdentity(identity);
         running = true;
+        publication = { key: liveInstanceKey(api), factory: toolFactory };
+        liveInstances().set(publication.key, publication);
         if (canWake) {
           pollTimer = setInterval(() => { void pollCompletions(); }, 1000);
           pollTimer.unref?.();
           void pollCompletions();
         } else api.logger.warn('Browser Handoff supports active waits only: session-incarnation reads and system-event wake APIs are required for dormant continuation.');
       } catch (error) {
-        client?.close(); client = undefined;
+        rpc?.close();
+        if (client === rpc) client = undefined;
+        if (serviceEpoch === epoch) { running = false; serviceEpoch = undefined; unpublish(); }
         throw error;
       }
     },
     async stop() {
+      unpublish();
       running = false; serviceEpoch = undefined;
       clearInterval(pollTimer); pollTimer = undefined;
       const rpc = client;
+      client = undefined; calls.clear();
       try {
         if (rpc) {
           // The dedicated controller survives Gateway restarts. Its ledger,
@@ -150,7 +204,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
           if (receipt?.allRetired !== true || receipt?.recoveryRequired !== false)
             throw new Error('Browser Handoff shutdown could not verify every viewer retirement; operator recovery is required');
         }
-      } finally { rpc?.close(); client = undefined; calls.clear(); }
+      } finally { rpc?.close(); }
     },
   });
   api.on('before_tool_call', async (event, ctx) => {
@@ -192,7 +246,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     try { await client.request('revokeOwner', { sessionKey, ...(typeof sessionId === 'string' && sessionId ? { sessionId } : {}) }, { timeoutMs: 120_000 }); }
     catch { api.logger.warn('Browser Handoff owner-session cleanup was not confirmed; controller must retain the gate until retirement is verified.'); }
   });
-  api.registerTool({ contextVersion: 2, create(ctx) {
+  const toolFactory = { contextVersion: 2, create(ctx) {
     if (!allowed(ctx)) return null;
     const owner = JSON.stringify([ctx.sessionKey, ctx.sessionId]);
     const current = () => {
@@ -200,15 +254,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
       if (!allowed(ctx)) throw new Error('Owner-private access required');
     };
     return {
-      name: 'browser_handoff', label: 'Browser Handoff',
-      description: 'Owner-private temporary full-browser viewing or human takeover links for the configured production profile. Includes all tabs, browser chrome, dialogs, and clipboard during control. Use for human CAPTCHA, passwords, 2FA, consent or forms needing human judgment. Share links only privately. Pause browser actions until resumeAllowed=true; then take a fresh normal browser snapshot.',
-      parameters: { type: 'object', additionalProperties: false, required: ['action'], properties: {
-        action: { type: 'string', enum: ['tabs', 'create', 'status', 'wait', 'revoke'] },
-        profile: { type: 'string' }, targetId: { type: 'string' }, id: { type: 'string' },
-        permission: { type: 'string', enum: ['watch', 'control'] }, reason: { type: 'string', maxLength: 500 },
-        ttlSeconds: { type: 'integer', minimum: 30, maximum: 1800 },
-        timeoutSeconds: { type: 'integer', minimum: 1, maximum: 60 },
-      } },
+      ...toolDescriptor,
       async execute(_callId, params, signal) {
         current();
         getClient();
@@ -255,5 +301,6 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
         } finally { rpc?.close(); }
       },
     };
-  } }, { name: 'browser_handoff', optional: true });
+  } };
+  api.registerTool(toolFactory, toolOptions);
 }

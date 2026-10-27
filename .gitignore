@@ -1,0 +1,12 @@
+node_modules/
+*.tgz
+.env
+.env.*
+!.env.example
+coverage/
+test-artifacts/
+artifacts/
+vendor/
+.cache/
+*.log
+.DS_Store

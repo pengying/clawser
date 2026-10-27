@@ -4,7 +4,7 @@
 
 **Architecture:** Keep the reviewed runtime and browser_handoff tool, retaining plugin ID browser-handoff for compatibility. Brand the public project Clawser. Install the plugin from a versioned Git reference or release archive. An explicit local setup command verifies prerequisites and pinned downloads, builds the sandboxed browser image, configures a private user service, and merges only owned OpenClaw settings. Chat tools cannot perform setup or acquire general shell/admin authority.
 
-**Tech stack:** Node22+, OpenClaw, Linux x86_64 Docker/systemd, pinned cloudflared/noVNC, GitHub Actions and Releases. Other platforms get clear unsupported-platform guidance rather than a partial install.
+**Tech stack:** Node 24.16+ or 26.1+, OpenClaw, Linux x86_64 Docker/systemd, pinned cloudflared/noVNC, GitHub Actions and Releases. Other platforms get clear unsupported-platform guidance rather than a partial install.
 
 1. Create a clean standalone repository from runtime/source/test files, excluding private artifacts and workspace history.
 2. Implement idempotent setup/doctor commands with dry-run, ownership/conflict checks, verified downloads, configuration merge, and shell-safe service rendering. Test downloads/checksums, preservation of unrelated config, conflicts and repeat runs with injectable system operations.
