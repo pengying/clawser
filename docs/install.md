@@ -17,7 +17,7 @@ not supported by this first validated installer.
 ## Tagged installation
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.3.0 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.3.1 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup
 openclaw clawser doctor
@@ -64,13 +64,13 @@ installation is described in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Release archive alternative
 
-Download `openclaw-browser-handoff-0.3.0.tgz` and `SHA256SUMS` from the
-[v0.3.0 release](https://github.com/pengying/clawser/releases/tag/v0.3.0) into the
+Download `openclaw-browser-handoff-0.3.1.tgz` and `SHA256SUMS` from the
+[v0.3.1 release](https://github.com/pengying/clawser/releases/tag/v0.3.1) into the
 same directory, then:
 
 ```sh
 sha256sum --check SHA256SUMS
-openclaw plugins install ./openclaw-browser-handoff-0.3.0.tgz --force --accept-capabilities
+openclaw plugins install ./openclaw-browser-handoff-0.3.1.tgz --force --accept-capabilities
 openclaw clawser setup
 openclaw clawser doctor
 ```
@@ -140,7 +140,7 @@ it may not exist yet immediately after setup.
 
    Replace the unit placeholder with the exact name reported for your instance.
 3. Install the reviewed release tag with `openclaw plugins install
-   git:github.com/pengying/clawser@v0.3.0 --force --accept-capabilities --no-enable`, replacing the version
+   git:github.com/pengying/clawser@v0.3.1 --force --accept-capabilities --no-enable`, replacing the version
    when upgrading to a later release. While the plugin is disabled, use its
    standalone `bin/clawser.mjs` entry point shown above to run `setup --dry-run`
    and then `setup`. Use the **same state directory, profile, ports and container

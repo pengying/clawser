@@ -1,5 +1,10 @@
 # Changes
 
+## 0.3.1
+
+- Prepare Chrome program files before CI browser fixtures to handle slow file loading on fresh runners.
+- Retain first-launch timing and bounded process diagnostics for CI investigations.
+
 ## 0.3.0
 
 - Publish Clawser as a standalone OpenClaw plugin with versioned GitHub installs and release archives.

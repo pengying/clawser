@@ -74,7 +74,7 @@ npm ci --ignore-scripts
 npm test
 npm run test:runtime
 npm pack --ignore-scripts
-openclaw plugins install ./openclaw-browser-handoff-0.3.0.tgz --force
+openclaw plugins install ./openclaw-browser-handoff-0.3.1.tgz --force
 openclaw clawser setup --dry-run
 ```
 
@@ -102,3 +102,7 @@ GitHub Actions are pinned to full commit SHAs. Update pins deliberately after
 checking the upstream release and the repository’s CI result. Changes to setup,
 authorization, handback, network exposure or persistent-data ownership need
 focused regression coverage and an independent review.
+
+## Browser checks in CI
+
+CI reads Chrome’s installed program files before starting browser fixtures. Fresh hosted runners can take several seconds to load those files; preparation is measured separately from viewer behavior. The tests retain their startup deadlines and cancellation checks. First-launch timing and process diagnostics are saved as workflow artifacts.
