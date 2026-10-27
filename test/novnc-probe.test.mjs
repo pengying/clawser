@@ -682,22 +682,40 @@ test('expiry during creation waits for owned identity and cannot publish a late 
 
 async function openProbeFixture(t, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'novnc-probe-ui-'));
+  let assetReleased = false, resumeImport;
+  const releaseImport = () => { assetReleased = true; resumeImport?.(); };
   const fixtureScript = String.raw`<script>
     (() => {
+      const config = ${JSON.stringify(options)};
       const realSetTimeout = window.setTimeout.bind(window);
-      window.setTimeout = (callback, delay, ...args) => realSetTimeout(callback, Math.min(delay, 70), ...args);
+      let apiBodyDeadline = false;
+      window.setTimeout = (callback, delay, ...args) => {
+        // probe.js uses 12s for API bodies, asset import, and VNC readiness.
+        // Ordinary module HTTP fetches retain that allowance. Only an explicit
+        // import stall accelerates it before the RFB constructor starts VNC.
+        const apiBody = delay === 12000 && apiBodyDeadline;
+        if (apiBody) apiBodyDeadline = false;
+        const normalImport = delay === 12000 && !apiBody && fixture.deadlinePhase === 'assets' && !config.stallImport;
+        return realSetTimeout(callback, normalImport ? delay : Math.min(delay, 70), ...args);
+      };
       AbortSignal.timeout = () => {
         const controller = new AbortController();
         realSetTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), 70);
         return controller.signal;
       };
-      const config = ${JSON.stringify(options)};
-      const response = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+      const response = (body, status = 200) => {
+        const result = new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+        const json = result.json.bind(result);
+        // withDeadline follows response.json() synchronously in post().
+        result.json = () => { apiBodyDeadline = true; return json(); };
+        return result;
+      };
       const hang = (init) => new Promise((resolve, reject) => {
         const abort = () => reject(init.signal?.reason || new DOMException('Aborted', 'AbortError'));
         if (init.signal?.aborted) abort(); else init.signal?.addEventListener('abort', abort, { once: true });
       });
-      window.fixture = { config, claimCalls: 0, credentialCalls: 0, controlCalls: 0, doneCalls: 0, rfbs: [] };
+      window.fixture = { config, deadlinePhase: 'assets', moduleLoaded: false,
+        claimCalls: 0, credentialCalls: 0, controlCalls: 0, doneCalls: 0, rfbs: [] };
       window.fetch = async (url, init = {}) => {
         const action = String(url).split('/').at(-1);
         if (action === 'claim') { fixture.claimCalls++; return response({ mode: 'watch' }); }
@@ -721,9 +739,11 @@ async function openProbeFixture(t, options = {}) {
     })();
   </script>`;
   const rfbModule = String.raw`
+    window.fixture.moduleLoaded = true;
     export default class FixtureRFB extends EventTarget {
       constructor() {
         super(); const index = window.fixture.rfbs.length; window.fixture.rfbs.push(this);
+        window.fixture.deadlinePhase = 'vnc';
         if (!window.fixture.config.stallConnect && !(window.fixture.config.stallReplacementConnect && index > 0)) setTimeout(() => this.dispatchEvent(new Event('connect')), 0);
       }
       disconnect() {
@@ -744,6 +764,8 @@ async function openProbeFixture(t, options = {}) {
       }
       if (request.url === '/probe/novnc/novnc/core/rfb.js') {
         if (options.failAsset) { response.statusCode = 404; return response.end('missing'); }
+        if (options.stallImport && !assetReleased) await new Promise(resolve => { resumeImport = resolve; });
+        if (options.assetDelayMs) await pause(options.assetDelayMs);
         response.setHeader('Content-Type', 'text/javascript'); return response.end(rfbModule);
       }
       response.setHeader('Content-Type', 'text/html');
@@ -760,6 +782,7 @@ async function openProbeFixture(t, options = {}) {
   ], { stdio: 'ignore' });
   let cdp;
   t.after(async () => {
+    releaseImport();
     cdp?.close(); chrome.kill('SIGTERM');
     await new Promise((resolve) => server.close(resolve));
     await pause(100);
@@ -787,7 +810,7 @@ async function openProbeFixture(t, options = {}) {
     }
     assert.fail(description);
   };
-  return { evaluate, waitFor };
+  return { evaluate, waitFor, releaseImport };
 }
 
 test('stalled bootstrap is bounded and failed cleanup remains manually retryable', { skip: !existsSync(chromePath) }, async (t) => {
@@ -806,6 +829,18 @@ test('failed noVNC import surfaces the error and verifies destructive cleanup', 
   assert.equal(await evaluate('fixture.rfbs.length'), 0);
 });
 
+test('stalled noVNC import is bounded and a late module cannot start VNC after cleanup', { skip: !existsSync(chromePath) }, async (t) => {
+  const { evaluate, waitFor, releaseImport } = await openProbeFixture(t, { stallImport: true });
+  await waitFor('fixture.doneCalls === 1 && /destroyed/i.test(document.querySelector("#status").textContent)', 'held module import triggered verified cleanup');
+  assert.match(await evaluate('document.querySelector("#status").textContent'), /assets did not load in time/i);
+  assert.equal(await evaluate('fixture.rfbs.length'), 0, 'the held import never constructed an RFB');
+  releaseImport();
+  await waitFor('fixture.moduleLoaded', 'the late module was delivered after cleanup');
+  await pause(150);
+  assert.deepEqual(await evaluate('({ rfbs: fixture.rfbs.length, cleanups: fixture.doneCalls })'),
+    { rfbs: 0, cleanups: 1 }, 'late import cannot reconnect or repeat destructive cleanup');
+});
+
 test('stalled promotion disconnect is bounded and destroys instead of reconnecting', { skip: !existsSync(chromePath) }, async (t) => {
   const { evaluate, waitFor } = await openProbeFixture(t, { stallDisconnect: true });
   await waitFor('fixture.rfbs.length === 1 && document.querySelector("#control").disabled === false', 'watch connection became ready');
@@ -815,9 +850,13 @@ test('stalled promotion disconnect is bounded and destroys instead of reconnecti
 });
 
 test('stalled initial VNC readiness is bounded and cleans up without reconnecting', { skip: !existsSync(chromePath) }, async (t) => {
-  const { evaluate, waitFor } = await openProbeFixture(t, { stallConnect: true });
+  const { evaluate, waitFor } = await openProbeFixture(t, { stallConnect: true, assetDelayMs: 150 });
   await waitFor('fixture.doneCalls === 1 && /destroyed/i.test(document.querySelector("#status").textContent)', 'late watch readiness triggered verified cleanup');
+  assert.match(await evaluate('document.querySelector("#status").textContent'), /VNC connection did not become ready/i);
   assert.equal(await evaluate('fixture.rfbs.length'), 1);
+  await pause(150);
+  assert.deepEqual(await evaluate('({ rfbs: fixture.rfbs.length, cleanups: fixture.doneCalls })'),
+    { rfbs: 1, cleanups: 1 }, 'readiness timeout cannot reconnect or repeat destructive cleanup');
 });
 
 test('stalled control VNC readiness is bounded after the one permitted replacement', { skip: !existsSync(chromePath) }, async (t) => {

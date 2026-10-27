@@ -1,5 +1,9 @@
 # Changes
 
+## 0.3.3
+
+- Isolate browser-module loading from VNC readiness deadlines in the disposable CI fixtures.
+
 ## 0.3.2
 
 - Prepare the scoped `@pengying/clawser` package for ClawHub distribution.

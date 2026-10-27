@@ -27,14 +27,14 @@ session, `flock`, and outbound HTTPS. Start your OpenClaw Gateway before setup. 
 not validated for this release.
 
 ```sh
-openclaw plugins install clawhub:@pengying/clawser@0.3.2 --accept-capabilities
+openclaw plugins install clawhub:@pengying/clawser@0.3.3 --accept-capabilities
 openclaw clawser setup
 openclaw clawser doctor
 ```
 
 The install command explicitly accepts Clawser’s declared plugin capabilities.
 The versioned Git source is also available with
-`openclaw plugins install git:github.com/pengying/clawser@v0.3.2 --force --accept-capabilities`.
+`openclaw plugins install git:github.com/pengying/clawser@v0.3.3 --force --accept-capabilities`.
 
 Setup verifies prerequisites, downloads checksum-pinned cloudflared and noVNC,
 builds the browser image, installs a private user service and merges the required
