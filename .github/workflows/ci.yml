@@ -51,6 +51,9 @@ jobs:
           tar -xzf "$novnc_archive" --strip-components=1 -C "$novnc_dir"
           test -f "$novnc_dir/core/rfb.js"
           printf 'NOVNC_ASSETS_DIR=%s\n' "$novnc_dir" >> "$GITHUB_ENV"
+      - name: Prepare installed browser files
+        timeout-minutes: 3
+        run: node .github/scripts/prepare-browser.mjs
       - name: Unit and disposable browser tests
         env:
           CLAWSER_BROWSER_DIAGNOSTICS_DIR: ${{ runner.temp }}/clawser-browser-diagnostics
