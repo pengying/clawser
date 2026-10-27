@@ -1,19 +1,126 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import test from 'node:test';
 import { CdpConnection } from '../src/cdp.mjs';
 
 const chromePath = process.env.CHROME_BIN || '/usr/bin/google-chrome-stable';
 const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+let firstChromeDiagnosed = false;
+
+async function diagnosticRead(path, limit = 4096) {
+  try {
+    const file = await open(path, 'r');
+    try {
+      const bytes = Buffer.alloc(limit);
+      const { bytesRead } = await file.read(bytes, 0, limit, 0);
+      return { text: bytes.toString('utf8', 0, bytesRead), truncated: bytesRead === limit };
+    } finally { await file.close(); }
+  } catch (error) { return { error: String(error.code || error.name).slice(0, 80) }; }
+}
+
+async function diagnosticProcess(pid, expectedParent) {
+  const stat = await diagnosticRead(`/proc/${pid}/stat`);
+  const parent = Number(stat.text?.slice(stat.text.lastIndexOf(')') + 2).split(' ')[1]);
+  // Check the parent before reading a discovered child: exited PIDs can be reused.
+  if (expectedParent !== undefined && parent !== expectedParent) return { pid, stat, error: 'parent_changed_or_process_exited' };
+  const names = ['io', 'status', 'wchan', `task/${pid}/children`];
+  const values = await Promise.all([
+    ...names.map(name => diagnosticRead(`/proc/${pid}/${name}`)),
+    realpath(`/proc/${pid}/exe`).then(text => ({ text }), error => ({ error: error.code })),
+  ]);
+  return { pid, stat, io: values[0], status: values[1], wchan: values[2], children: values[3], executable: values[4] };
+}
+
+async function diagnosticSnapshot(chromePid) {
+  const pending = [{ pid: chromePid, parent: process.pid }], seen = new Set(), processes = [];
+  while (pending.length && processes.length < 32) {
+    const { pid, parent } = pending.shift();
+    if (!Number.isSafeInteger(pid) || pid <= 0 || seen.has(pid)) continue;
+    seen.add(pid);
+    const entry = await diagnosticProcess(pid, parent);
+    processes.push(entry);
+    const children = entry.children?.truncated ? entry.children.text.replace(/\S+$/, '') : entry.children?.text;
+    for (const value of children?.trim().split(/\s+/) || []) {
+      if (pending.length + processes.length >= 32) break;
+      const child = Number(value);
+      if (Number.isSafeInteger(child) && child > 0 && !seen.has(child)) pending.push({ pid: child, parent: pid });
+    }
+  }
+  const paths = ['pressure/cpu', 'pressure/io', 'pressure/memory', 'loadavg', 'meminfo'];
+  const [parentNode, ...system] = await Promise.all([
+    diagnosticProcess(process.pid), ...paths.map(path => diagnosticRead(`/proc/${path}`, 8192)),
+  ]);
+  return { parentNode, processes, processLimit: 32, system: Object.fromEntries(paths.map((path, index) => [path, system[index]])) };
+}
+
+function firstChromeDiagnostics(profileDirectory) {
+  const destination = process.env.CLAWSER_BROWSER_DIAGNOSTICS_DIR;
+  if (!destination || firstChromeDiagnosed) return;
+  firstChromeDiagnosed = true;
+  const origin = performance.now(), records = [], timers = [], times = {};
+  let work = Promise.resolve(), ready = false;
+  const record = (event, details = {}) => {
+    const row = { event, monotonicMs: performance.now(), elapsedMs: performance.now() - origin, ...details };
+    records.push(row); times[event] = row.elapsedMs;
+    return row;
+  };
+  const enqueue = (row, collect) => {
+    work = work.then(async () => {
+      row.sampledAtElapsedMs = performance.now() - origin;
+      try { Object.assign(row, await collect()); }
+      catch (error) { row.diagnosticError = String(error.code || error.message || error).slice(0, 160); }
+    });
+  };
+  record('before-spawn', { nodeVersion: process.version, nodeExecutable: process.execPath, chromeExecutable: chromePath, parentNodePid: process.pid });
+  return {
+    attach(child) {
+      child.once('spawn', () => record('spawn', { pid: child.pid }));
+      child.stderr.once('data', bytes => record('first-stderr', { text: String(bytes).slice(0, 512) }));
+      child.once('error', error => record('spawn-error', { code: error.code }));
+      child.once('exit', (code, signal) => record('exit', { code, signal }));
+      enqueue(record('executable-paths'), async () => ({ chromeRealpath: await realpath(chromePath), nodeRealpath: await realpath(process.execPath) }));
+      for (const scheduledMs of [1000, 5000, 10_000]) timers.push(setTimeout(() => {
+        if (!ready && child.pid) enqueue(record('unready-snapshot', { scheduledMs }), () => diagnosticSnapshot(child.pid));
+      }, scheduledMs));
+    },
+    ready(port) {
+      ready = true;
+      timers.forEach(clearTimeout);
+      record('devtools-file-ready', { port });
+    },
+    async finish({ failure, stderr }) {
+      timers.forEach(clearTimeout);
+      try {
+        await work;
+        // Version probing happens after the original browser has been retired;
+        // it must never warm the wrapper before the first measured launch.
+        const version = await new Promise(resolveVersion => execFile(chromePath, ['--version'], { timeout: 2000, maxBuffer: 4096 }, (error, stdout) => {
+          resolveVersion(error ? { error: String(error.code || error.message).slice(0, 160) } : { text: stdout.trim() });
+        }));
+        record('chrome-version-after-teardown', { version });
+        record('teardown', { startupFailed: !ready, ...(!ready ? { failure } : {}), stderr });
+        await mkdir(destination, { recursive: true });
+        const target = await realpath(destination), profile = await realpath(profileDirectory);
+        const within = relative(profile, target);
+        if (within !== '..' && !within.startsWith(`..${sep}`) && !isAbsolute(within)) throw new Error('Diagnostics directory must be outside the disposable profile');
+        const artifact = join(resolve(target), `connection-ui-first-chrome-${process.pid}.jsonl`);
+        await writeFile(artifact, records.map(row => JSON.stringify(row)).join('\n') + '\n', { flag: 'wx', mode: 0o600 });
+        if (!ready) console.error(`Chromium startup diagnostics: ${JSON.stringify({ artifact, times })}`);
+      } catch (error) {
+        console.error(`Chromium diagnostics unavailable: ${String(error.code || error.message || error).slice(0, 160)}`);
+      }
+    },
+  };
+}
 
 async function openFixture(t, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'handoff-connection-ui-'));
-  let chrome, chromeClosed, cdp, server, chromeFailure, chromeStderr = '';
+  let chrome, chromeClosed, cdp, server, diagnostics, chromeFailure, chromeStderr = '';
   t.after(async () => {
     cdp?.close();
     if (chrome?.pid) {
@@ -30,6 +137,7 @@ async function openFixture(t, options = {}) {
       }
     }
     if (server?.listening) await new Promise((resolve) => server.close(resolve));
+    await diagnostics?.finish({ failure: chromeFailure, stderr: chromeStderr });
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   });
   const fixtureScript = String.raw`<script>
@@ -156,6 +264,7 @@ async function openFixture(t, options = {}) {
     }
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  diagnostics = firstChromeDiagnostics(directory);
   chrome = spawn(chromePath, [
     '--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--no-first-run',
     '--remote-debugging-port=0', `--user-data-dir=${directory}`, 'about:blank',
@@ -164,13 +273,14 @@ async function openFixture(t, options = {}) {
   chrome.on('error', error => { chromeFailure = error.message; });
   chrome.on('exit', (code, signal) => { chromeFailure = `exit ${signal || code}`; });
   chromeClosed = new Promise(resolve => chrome.once('close', resolve));
+  diagnostics?.attach(chrome);
   let port;
   const deadline = performance.now() + 15_000;
   while (!port && performance.now() < deadline) {
     if (chromeFailure) assert.fail(`Chromium failed before debugging was ready (${chromeFailure}): ${chromeStderr}`);
     try {
       const candidate = (await readFile(join(directory, 'DevToolsActivePort'), 'utf8')).split('\n')[0];
-      if (/^[1-9]\d{0,4}$/.test(candidate) && Number(candidate) <= 65535) port = candidate;
+      if (/^[1-9]\d{0,4}$/.test(candidate) && Number(candidate) <= 65535) { port = candidate; diagnostics?.ready(port); }
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
     if (!port) await Promise.race([pause(30), chromeClosed]);
   }

@@ -52,11 +52,21 @@ jobs:
           test -f "$novnc_dir/core/rfb.js"
           printf 'NOVNC_ASSETS_DIR=%s\n' "$novnc_dir" >> "$GITHUB_ENV"
       - name: Unit and disposable browser tests
+        env:
+          CLAWSER_BROWSER_DIAGNOSTICS_DIR: ${{ runner.temp }}/clawser-browser-diagnostics
         run: npm test
       - name: Runtime adapter and readiness tests
         run: npm run test:runtime
       - name: Verify distributable package
         run: npm run check:package
+      - name: Retain browser bootstrap diagnostics
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-bootstrap-node-${{ matrix.node }}
+          path: ${{ runner.temp }}/clawser-browser-diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
 
   installed-plugin:
     name: Stock OpenClaw install
