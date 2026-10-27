@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Browser handoff</title>
+  <link rel="stylesheet" href="/probe/novnc/assets/probe.css">
+  <script type="module" src="/probe/novnc/assets/probe.js"></script>
+</head>
+<body>
+  <main id="viewport" aria-label="Remote browser"><div id="stage"><section id="screen" aria-label="Browser display"></section></div></main>
+  <aside id="toolbar" class="controls" aria-label="Browser controls">
+    <div class="toolbar-top"><button id="drag-handle" aria-label="Move controls. Use arrow keys to reposition." title="Drag to move controls" type="button">⠿</button><span id="mode">Private watch session</span><button id="collapse" type="button" aria-label="Hide controls" title="Hide controls">‹</button></div>
+    <div class="actions"><button id="control" type="button" disabled>Take control</button><button id="done" type="button">Done</button></div>
+    <div class="actions zoom" aria-label="Display zoom"><button id="zoom-out" type="button" aria-label="Zoom out">−</button><output id="zoom-level" aria-live="polite">Fit</output><button id="zoom-in" type="button" aria-label="Zoom in">+</button><button id="zoom-fit" type="button">Fit</button><button id="zoom-actual" type="button">100%</button></div>
+    <div class="actions"><button id="keyboard" type="button" disabled aria-pressed="false">Keyboard</button><button id="copy" title="Copy the current selection from the browser to this device" type="button" disabled>Copy</button><button id="paste" title="Paste this device’s clipboard into the focused browser field" type="button" disabled>Paste</button><button id="drag-once" type="button" disabled aria-pressed="false" title="Use the next touch to drag a slider, selection, or puzzle. Returns to scrolling after release.">Drag once</button></div>
+    <p id="status" role="status" aria-live="polite">Authenticating…</p>
+    <p class="notice">Swipe to scroll. Pinch to zoom. Use Drag once for sliders and selections.</p>
+  </aside>
+  <button id="restore" type="button" aria-label="Show browser controls" hidden>Controls ›</button>
+  <dialog id="clipboard-dialog" aria-labelledby="clipboard-title"><form method="dialog"><div class="clipboard-content"><h2 id="clipboard-title">Clipboard</h2><p id="clipboard-help"></p><textarea id="clipboard-text" aria-label="Clipboard text" rows="6" spellcheck="false"></textarea></div><div class="actions clipboard-actions"><button id="clipboard-send" type="button">Paste into browser</button><button type="submit">Close</button></div></form></dialog>
+  <textarea id="keyboard-input" aria-label="Remote keyboard input" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" tabindex="-1"></textarea>
+</body>
+</html>

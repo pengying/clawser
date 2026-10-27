@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark"><title>Browser handoff</title>
+  <link rel="stylesheet" href="/assets/style.css"><script type="module" src="/assets/viewer.js"></script>
+</head>
+<body class="viewer-active">
+  <header class="topbar"><a class="brand" href="#">◉ <span>Browser handoff</span></a><span id="badge" class="badge">PRIVATE LINK</span></header>
+  <main>
+    <section id="viewer">
+      <div class="viewport"><canvas id="screen" width="1" height="1" role="img" aria-label="Live remote browser view"></canvas><p id="loading">Connecting to the browser…</p></div>
+      <div class="toolbar">
+        <button id="control" class="primary" disabled>Take control</button><button id="release" aria-label="Release control and watch" hidden>Watch</button>
+        <button id="keyboardButton" hidden>Keyboard</button>
+        <button id="menu" aria-controls="panel" aria-expanded="false">More</button>
+        <button id="done" class="quiet" aria-label="Done and close invitation">Done</button>
+      </div>
+      <section id="panel" class="card control-panel" aria-label="Browser controls" hidden>
+      <div class="sessionbar"><div><p class="eyebrow">REMOTE BROWSER</p><h1 id="title">Browser session</h1></div><span id="expiry" class="small"></span></div>
+      <p id="url" class="remote-url"></p>
+      <div class="zoom-controls" aria-label="View zoom"><button id="zoomOut" aria-label="Zoom out">−</button><button id="zoomReset">Fit width</button><button id="zoomIn" aria-label="Zoom in">+</button><button id="fullscreen" hidden>Full screen</button></div>
+      <p class="small">Swipe to scroll or move a slider. Pinch to zoom; use two fingers to pan the enlarged view.</p>
+      <div id="keyboard" class="keyboard" hidden>
+        <p class="small">Tap a text field to use your keyboard directly. Keyboard reopens the currently focused field. For a mouse-only draggable, enable Drag once before touching it.</p>
+        <button id="dragMode" aria-pressed="false">Drag once</button>
+        <div class="keys"><button data-key="Tab">Tab</button><button data-key="Enter">Enter ↵</button><button data-key="Backspace">⌫</button><button data-key="Escape">Esc</button><button data-key="Ctrl+A">Select all</button><button data-key="ArrowLeft">←</button><button data-key="ArrowRight">→</button></div>
+      </div>
+      </section>
+      <input id="text" class="keyboard-proxy" aria-label="Remote text input" type="text" tabindex="-1" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      <input id="passwordProxy" class="keyboard-proxy" aria-label="Remote password input" type="password" tabindex="-1" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      <textarea id="multilineProxy" class="keyboard-proxy" aria-label="Remote multiline input" tabindex="-1" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+    </section>
+    <section id="finished" class="card invitation" hidden><p class="eyebrow">CONNECTION CLOSED</p><h1 id="endTitle">Handed back.</h1><p id="endMessage">Your browser access has ended.</p><p class="small">You can close this tab. Ask your agent for a new link to reconnect.</p></section>
+    <p id="status" class="status" role="status" aria-live="polite">Connecting to the browser…</p>
+    <p class="footnote">The website runs on the remote machine. This viewer does not transfer its cookies or login to your phone.</p>
+  </main>
+  <dialog id="nativePicker" class="native-picker" aria-labelledby="nativePickerTitle">
+    <section class="picker-sheet">
+      <h2 id="nativePickerTitle" class="picker-title">Choose an option</h2>
+      <div class="picker-content"></div>
+      <div class="picker-actions">
+        <button type="button" class="picker-cancel">Cancel</button>
+        <button type="button" class="picker-apply primary">Apply</button>
+      </div>
+    </section>
+  </dialog>
+</body>
+</html>

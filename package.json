@@ -1,0 +1,42 @@
+{
+  "name": "openclaw-browser-handoff",
+  "version": "0.2.0",
+  "description": "Temporary, mobile-friendly viewing and takeover of an OpenClaw browser",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": "./index.mjs",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "index.mjs",
+    "src",
+    "public",
+    "skills",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE",
+    "bin",
+    "runtime"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:live": "node test/live-browser.mjs",
+    "demo": "node test/demo.mjs",
+    "start": "node src/dev.mjs",
+    "test:runtime": "node --test runtime/desktop/test/*.test.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.mjs"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.9.6",
+      "minGatewayVersion": "2026.9.6"
+    }
+  }
+}
