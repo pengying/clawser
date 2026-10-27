@@ -13,21 +13,45 @@ const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mil
 
 async function openFixture(t, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'handoff-connection-ui-'));
+  let chrome, chromeClosed, cdp, server, chromeFailure, chromeStderr = '';
+  t.after(async () => {
+    cdp?.close();
+    if (chrome?.pid) {
+      const waitForExit = async () => {
+        let timer;
+        try { await Promise.race([chromeClosed, new Promise(resolve => { timer = setTimeout(resolve, 1000); })]); }
+        finally { clearTimeout(timer); }
+      };
+      if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill('SIGTERM');
+      await waitForExit();
+      if (chrome.exitCode === null && chrome.signalCode === null) {
+        chrome.kill('SIGKILL');
+        await waitForExit();
+      }
+    }
+    if (server?.listening) await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
   const fixtureScript = String.raw`<script>
     (() => {
+      const config = ${JSON.stringify(options)};
       const realSetTimeout = window.setTimeout.bind(window);
       const realSetInterval = window.setInterval.bind(window);
       // Post-ready recovery tests keep the real startup allowance; unrelated
       // image scheduling must not retire their fixture before fault injection.
-      window.setTimeout = (callback, delay, ...args) => realSetTimeout(callback,
-        config.realStartupDeadline && delay === 12000 ? delay : Math.min(delay, 70), ...args);
+      window.setTimeout = (callback, delay, ...args) => {
+        // readDuringStartup uses a 10-second setTimeout for its state request.
+        // The Done test leaves only its first read pending until parent abort.
+        if (config.holdInitialStateDeadline && delay === 10000 && fixture.stateCalls === 0) return 0;
+        return realSetTimeout(callback,
+          config.realStartupDeadline && delay === 12000 ? delay : Math.min(delay, 70), ...args);
+      };
       window.setInterval = (callback, delay, ...args) => realSetInterval(callback, Math.min(delay, 20), ...args);
       AbortSignal.timeout = () => {
         const controller = new AbortController();
         realSetTimeout(() => controller.abort(new DOMException('Timed out', 'TimeoutError')), 70);
         return controller.signal;
       };
-      const config = ${JSON.stringify(options)};
       const state = { id: 'share', mode: 'watch', version: 1, permission: 'control', expiresAt: Date.now() + 60000, recoveryRequired: false };
       window.fixture = {
         state, sockets: [], socketPlans: config.socketPlans || ['healthy'], pollMode: config.pollMode || 'ok',
@@ -111,7 +135,7 @@ async function openFixture(t, options = {}) {
       window.WebSocket = FixtureSocket;
     })();
   </script>`;
-  const server = createServer(async (request, response) => {
+  server = createServer(async (request, response) => {
     try {
       if (request.url === '/assets/viewer.js' || request.url === '/assets/editing.js' || request.url === '/assets/picker.js') {
         response.setHeader('Content-Type', 'text/javascript');
@@ -132,23 +156,25 @@ async function openFixture(t, options = {}) {
     }
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const chrome = spawn(chromePath, [
+  chrome = spawn(chromePath, [
     '--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--no-first-run',
     '--remote-debugging-port=0', `--user-data-dir=${directory}`, 'about:blank',
-  ], { stdio: 'ignore' });
-  let cdp;
-  t.after(async () => {
-    cdp?.close(); chrome.kill('SIGTERM');
-    await new Promise((resolve) => server.close(resolve));
-    await pause(100);
-    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  });
+  ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  chrome.stderr.on('data', bytes => { chromeStderr = (chromeStderr + bytes).slice(-4096); });
+  chrome.on('error', error => { chromeFailure = error.message; });
+  chrome.on('exit', (code, signal) => { chromeFailure = `exit ${signal || code}`; });
+  chromeClosed = new Promise(resolve => chrome.once('close', resolve));
   let port;
-  for (let attempt = 0; attempt < 100 && !port; attempt++) {
-    try { port = (await readFile(join(directory, 'DevToolsActivePort'), 'utf8')).split('\n')[0]; }
-    catch { await pause(30); }
+  const deadline = performance.now() + 15_000;
+  while (!port && performance.now() < deadline) {
+    if (chromeFailure) assert.fail(`Chromium failed before debugging was ready (${chromeFailure}): ${chromeStderr}`);
+    try {
+      const candidate = (await readFile(join(directory, 'DevToolsActivePort'), 'utf8')).split('\n')[0];
+      if (/^[1-9]\d{0,4}$/.test(candidate) && Number(candidate) <= 65535) port = candidate;
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (!port) await Promise.race([pause(30), chromeClosed]);
   }
-  assert.ok(port, 'Chromium started');
+  assert.ok(port, `Chromium did not publish a debugging port within 15 seconds: ${chromeStderr}`);
   const fragment = options.invite ? '#invite=fixture-invite' : '';
   const page = await (await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(`http://127.0.0.1:${server.address().port}/${fragment}`)}`, { method: 'PUT' })).json();
   cdp = await new CdpConnection().connect(page.webSocketDebuggerUrl);
@@ -245,8 +271,12 @@ test('a lost claim response recovers through authenticated state without replayi
 });
 
 test('Done aborts a pending initial state request and prevents later startup', { skip: !existsSync(chromePath) }, async (t) => {
-  const { evaluate, waitFor } = await openFixture(t, { initialSequence: ['hang'] });
+  const { evaluate, waitFor } = await openFixture(t, { initialSequence: ['hang'], holdInitialStateDeadline: true });
   await waitFor('fixture.activeStateFetches === 1', 'initial state request is pending');
+  // CDP scheduling can take longer than the fixture's accelerated deadline.
+  await pause(150);
+  assert.deepEqual(await evaluate('({ active: fixture.activeStateFetches, aborted: fixture.abortedStateFetches, calls: fixture.stateCalls })'),
+    { active: 1, aborted: 0, calls: 1 }, 'the initial request remains pending until Done');
   await evaluate('document.querySelector("#done").click()');
   await waitFor('!document.querySelector("#finished").hidden && fixture.lastAbortName', 'Done canceled initial startup');
   assert.equal(await evaluate('fixture.lastAbortName'), 'AbortError');
