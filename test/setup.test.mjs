@@ -80,7 +80,7 @@ async function harness(t, config = {}) {
   };
   return {
     root, stateDir, packageDir, config, deps, calls, logs,
-    args: ['setup', '--state-dir', stateDir],
+    args: ['setup', '--novnc', '--state-dir', stateDir],
     corrupt: () => { failChecksum = true; },
     busy: ports => { busyPorts = ports; },
     resource: (name, value) => { dockerResources[name] = value; },
@@ -92,6 +92,63 @@ test('pins verified upstream downloads', () => {
   assert.equal(ARTIFACTS.cloudflared.sha256, 'ae5e8add7884b0531d66bbca4570d1de491ff6da51e4ebe7eb160cdf241d9e42');
   assert.equal(ARTIFACTS.noVnc.sha256, 'b1003a11b6e6e8d8f7f5e5586daae7f8ca651d8aee0aa155ff9ac841c48f52c6');
   assert.match(ARTIFACTS.noVnc.url, /\/refs\/tags\/v1\.7\.0$/);
+});
+
+test('desktop to CDP to explicit noVNC reuses the original desktop receipt, socket and browser identity', async t => {
+  const h = await harness(t, { browser: { defaultProfile: 'personal', profiles: { personal: { attachOnly: true, cdpUrl: 'http://127.0.0.1:9333' } } } });
+  const desktopArgs = [...h.args, '--no-default-profile'];
+  const first = await runClawser(desktopArgs, h.deps);
+  const original = await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8');
+  const desktop = structuredClone(h.config.plugins.entries['browser-handoff'].config.desktop);
+  const profile = structuredClone(h.config.browser.profiles.handoff);
+  const fetch = h.deps.fetch;
+  h.deps.fetch = (url, options) => url === 'http://127.0.0.1:9333/json/version' ? Response.json({ Browser: 'Chrome/149', webSocketDebuggerUrl: 'ws://127.0.0.1:9333/devtools/browser/test' }) : fetch(url, options);
+  assert.equal((await runClawser(['setup'], h.deps)).backend, 'cdp');
+  assert.equal(h.config.plugins.entries['browser-handoff'].config.desktop.enabled, false);
+  assert.equal(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8'), original);
+  h.calls.length = 0;
+  const result = await runClawser(['setup', '--novnc', '--state-dir', h.stateDir], h.deps);
+  assert.equal(result.servicePath, first.servicePath);
+  assert.deepEqual(h.config.plugins.entries['browser-handoff'].config.desktop, desktop);
+  assert.deepEqual(h.config.browser.profiles.handoff, profile);
+  assert.equal(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8'), original);
+  assert.equal(h.calls.some(call => call.command === 'fetch' || call.args.includes('build') || call.args.includes('enable')), false);
+  assert.equal((await runClawser(['doctor', '--state-dir', h.stateDir], h.deps)).ok, true);
+});
+
+test('first noVNC setup can replace inert CDP desktop disable config but cannot adopt identity fields', async t => {
+  for (const desktop of [{ enabled: false }, { enabled: false, socketPath: '/unowned/socket' }, { enabled: false, profile: 'unowned' }]) {
+    const h = await harness(t, { plugins: { entries: { 'browser-handoff': { config: { desktop } } } } });
+    if (Object.keys(desktop).length === 1) assert.equal((await runClawser(h.args, h.deps)).ok, true);
+    else {
+      await assert.rejects(runClawser(h.args, h.deps), /unowned/);
+      await assert.rejects(fs.stat(h.stateDir), { code: 'ENOENT' });
+    }
+  }
+});
+
+test('owned desktop reenable rejects a non-boolean enable flag even when identity matches', async t => {
+  const h = await harness(t);
+  await runClawser(h.args, h.deps);
+  h.config.plugins.entries['browser-handoff'].config.desktop.enabled = 'false';
+  await assert.rejects(runClawser(h.args, h.deps), /conflicts/);
+  h.config.plugins.entries['browser-handoff'].config.desktop = { enabled: false };
+  await assert.rejects(runClawser(h.args, h.deps), /conflicts/);
+});
+
+test('a first CDP installation can switch to its first explicit noVNC installation', async t => {
+  const h = await harness(t, { browser: { defaultProfile: 'personal', profiles: { personal: { attachOnly: true, cdpUrl: 'http://127.0.0.1:9333' } } } });
+  const run = h.deps.run, fetch = h.deps.fetch;
+  h.deps.fetch = (url, options) => url === 'http://127.0.0.1:9333/json/version' ? Response.json({ Browser: 'Chrome/149', webSocketDebuggerUrl: 'ws://127.0.0.1:9333/devtools/browser/test' }) : fetch(url, options);
+  h.deps.run = (command, args, options) => command === 'openclaw' && args[0] === 'plugins' && args[1] === 'reload' && h.config.plugins.entries['browser-handoff'].config.desktop.enabled === false ? '' : run(command, args, options);
+  const cdp = await runClawser(['setup'], h.deps);
+  const receipt = await fs.readFile(join(cdp.stateDir, 'setup.json'), 'utf8');
+  const result = await runClawser(h.args, h.deps);
+  assert.equal(result.ok, true);
+  assert.equal(h.config.browser.defaultProfile, 'handoff');
+  assert.equal(h.config.browser.profiles.personal.cdpUrl, 'http://127.0.0.1:9333');
+  assert.equal(h.config.plugins.entries['browser-handoff'].config.desktop.enabled, true);
+  assert.equal(await fs.readFile(join(cdp.stateDir, 'setup.json'), 'utf8'), receipt);
 });
 
 test('dry-run checks readiness and plans without downloads, writes, builds or config changes', async t => {
@@ -192,7 +249,7 @@ test('different execution captures preserve the trusted stable installation in r
   dependencies.packageDir = stableRoot;
   h.calls.length = 0;
   assert.equal((await secondModule.runClawser(h.args, dependencies)).ok, true);
-  assert.equal((await secondModule.runClawser(['doctor', '--state-dir', h.stateDir], dependencies)).ok, true);
+  assert.equal((await secondModule.runClawser(['doctor', '--novnc', '--state-dir', h.stateDir], dependencies)).ok, true);
   assert.equal(h.calls.some(call => call.command === 'fetch' || call.args.includes('build') || call.args.includes('restart')), false);
   assert.equal(await fs.readFile(first.servicePath, 'utf8'), service);
 });
@@ -350,7 +407,7 @@ test('refuses changed owned controller config and changed setup arguments', asyn
 
 test('doctor reports missing setup without changing the machine', async t => {
   const h = await harness(t);
-  const result = await runClawser(['doctor', '--state-dir', h.stateDir], h.deps);
+  const result = await runClawser(['doctor', '--novnc', '--state-dir', h.stateDir], h.deps);
   assert.equal(result.ok, false);
   assert.ok(result.checks.some(c => c.name === 'installation' && !c.ok));
   await assert.rejects(fs.lstat(h.stateDir), { code: 'ENOENT' });
@@ -361,7 +418,7 @@ test('doctor validates an owned installation without downloads or mutations', as
   const h = await harness(t);
   await runClawser(h.args, h.deps);
   h.calls.length = 0;
-  const result = await runClawser(['doctor', '--state-dir', h.stateDir], h.deps);
+  const result = await runClawser(['doctor', '--novnc', '--state-dir', h.stateDir], h.deps);
   assert.equal(result.ok, true);
   assert.equal(h.calls.some(c => c.command === 'fetch' || c.args.includes('patch') || c.args.includes('enable')), false);
 });
@@ -371,7 +428,7 @@ test('doctor uses saved custom setup options when only a state directory is supp
   const originalHealth = h.deps.controllerHealth;
   h.deps.controllerHealth = async () => ({ ...await originalHealth(), profile: 'dedicated', cdpUrl: 'http://127.0.0.1:28812' });
   await runClawser([...h.args, '--browser-profile', 'dedicated', '--port', '29410', '--cdp-port', '28812', '--vnc-port', '59093', '--container-name', 'isolated-desktop', '--no-default-profile'], h.deps);
-  const result = await runClawser(['doctor', '--state-dir', h.stateDir], h.deps);
+  const result = await runClawser(['doctor', '--novnc', '--state-dir', h.stateDir], h.deps);
   assert.equal(result.ok, true);
   assert.ok(h.logs.at(-1).includes('isolated-desktop'));
 });
@@ -391,7 +448,7 @@ test('doctor fails when the installed desktop configuration was removed', async 
   const h = await harness(t);
   await runClawser(h.args, h.deps);
   delete h.config.plugins.entries['browser-handoff'].config.desktop;
-  const result = await runClawser(['doctor', '--state-dir', h.stateDir], h.deps);
+  const result = await runClawser(['doctor', '--novnc', '--state-dir', h.stateDir], h.deps);
   assert.equal(result.ok, false);
   assert.ok(result.checks.some(row => row.name === 'configuration' && !row.ok));
 });
@@ -532,7 +589,7 @@ test('an old OpenClaw version fails before downloads or setup writes', async t =
 test('no-default-profile preserves the current default and state env selects default state path', async t => {
   const h = await harness(t, { browser: { defaultProfile: 'personal' } });
   h.deps.env.OPENCLAW_STATE_DIR = join(h.root, 'openclaw-state');
-  const result = await runClawser(['setup', '--no-default-profile'], h.deps);
+  const result = await runClawser(['setup', '--novnc', '--no-default-profile'], h.deps);
   assert.equal(result.stateDir, join(h.root, 'openclaw-state/clawser'));
   assert.equal(h.config.browser.defaultProfile, 'personal');
 });

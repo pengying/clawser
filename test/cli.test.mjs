@@ -21,8 +21,8 @@ test('CLI registration is inert and forwards setup options without shell parsing
   const program = new Command();
   await registrar({ program });
   const setup = program.children.get('clawser').children.get('setup');
-  await setup.callback({ stateDir: '/tmp/a directory', browserProfile: 'demo', port: '19510', cdpPort: '19511', vncPort: '59512', containerName: 'demo-browser', dryRun: true, defaultProfile: false });
-  assert.deepEqual(received, ['setup', '--state-dir', '/tmp/a directory', '--browser-profile', 'demo', '--port', '19510', '--cdp-port', '19511', '--vnc-port', '59512', '--container-name', 'demo-browser', '--dry-run', '--no-default-profile']);
+  await setup.callback({ stateDir: '/tmp/a directory', browserProfile: 'demo', port: '19510', cdpPort: '19511', vncPort: '59512', containerName: 'demo-browser', novnc: true, dryRun: true, defaultProfile: false });
+  assert.deepEqual(received, ['setup', '--state-dir', '/tmp/a directory', '--browser-profile', 'demo', '--port', '19510', '--cdp-port', '19511', '--vnc-port', '59512', '--container-name', 'demo-browser', '--novnc', '--dry-run', '--no-default-profile']);
 });
 
 test('CLI metadata and setup-only discovery never access runtime or register services', () => {

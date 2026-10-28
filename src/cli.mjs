@@ -12,11 +12,12 @@ export function registerClawserCli(api, dependencies = {}) {
     const root = program.command('clawser').description(clawserCliDescriptor.description);
     for (const name of ['setup', 'doctor']) {
       const command = root.command(name).description(name === 'setup'
-        ? 'Install and configure the dedicated browser runtime'
-        : 'Check the dedicated browser runtime without changing it');
+        ? 'Configure handoff using the existing default browser CDP connection'
+        : 'Check the configured browser backend without changing it');
       command
+        .option('--novnc', 'Use the dedicated Docker desktop instead of existing-browser CDP')
         .option('--state-dir <path>', 'Private Clawser state directory')
-        .option('--browser-profile <name>', 'Dedicated OpenClaw browser profile')
+        .option('--browser-profile <name>', 'Existing OpenClaw browser connection (dedicated profile with --novnc)')
         .option('--port <port>', 'Loopback viewer/controller port')
         .option('--cdp-port <port>', 'Loopback Chromium debugging port')
         .option('--vnc-port <port>', 'Loopback VNC port')
@@ -31,6 +32,7 @@ export function registerClawserCli(api, dependencies = {}) {
           ['port', '--port'], ['cdpPort', '--cdp-port'],
           ['vncPort', '--vnc-port'], ['containerName', '--container-name'],
         ]) if (options[key] !== undefined) argv.push(flag, String(options[key]));
+        if (options.novnc) argv.push('--novnc');
         if (options.dryRun) argv.push('--dry-run');
         if (options.defaultProfile === false) argv.push('--no-default-profile');
         try {

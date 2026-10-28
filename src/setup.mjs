@@ -82,6 +82,7 @@ function options(argv, d) {
     if (flag === '--help' || flag === '-h') return { command: 'help' };
     if (seen.has(flag)) throw new Error('Invalid repeated flag: ' + ''.concat(flag));
     seen.add(flag);
+    if (flag === '--novnc') { result.novnc = true; continue; }
     if (flag === '--dry-run') { result.dryRun = true; continue; }
     if (flag === '--no-default-profile') { result.defaultProfile = false; continue; }
     if (!values[flag]) throw new Error('Unknown Clawser flag: ' + ''.concat(flag));
@@ -93,7 +94,6 @@ function options(argv, d) {
       result[key] = Number(value);
     } else result[key] = value;
   }
-  if (new Set([result.port, result.cdpPort, result.vncPort]).size !== 3) throw new Error('Controller, CDP and VNC ports must differ');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/.test(result.profile)) throw new Error('Invalid browser profile name');
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$/.test(result.containerName)) throw new Error('Invalid container name');
   result.specified = [...seen];
@@ -157,19 +157,19 @@ async function marker(o, p, d) {
   return saved;
 }
 
-async function prerequisites(d) {
+async function prerequisites(d, desktop = true) {
   const checks = [];
   const check = async (name, work) => {
     try { await work(); checks.push({ name, ok: true }); }
     catch (error) { checks.push({ name, ok: false, message: error.message }); }
   };
-  await check('platform', async () => { if (d.platform !== 'linux' || d.arch !== 'x64') throw new Error('Clawser setup requires Linux x86_64 with Docker and systemd user services'); });
+  await check('platform', async () => { if (d.platform !== 'linux' || d.arch !== 'x64') throw new Error('Clawser setup requires Linux x86_64' + (desktop ? ' with Docker and systemd user services' : ' for the pinned cloudflared binary')); });
   await check('node', async () => {
     const version = String(d.nodeVersion).match(/^v?(\d+)\.(\d+)\.(\d+)$/);
     const major = Number(version?.[1]), minor = Number(version?.[2]);
     if (!version || !((major === 24 && minor >= 16) || (major === 26 && minor >= 1) || major > 26)) throw new Error('Clawser requires Node 24.16+ on the 24.x line, or Node 26.1+ (including later majors); Node 25 is unsupported');
   });
-  await check('source paths', async () => {
+  if (desktop) await check('source paths', async () => {
     for (const relative of ['index.mjs', 'bin/desktop-controller.mjs', 'runtime/desktop/Dockerfile', 'runtime/desktop/chromium-seccomp.json']) {
       const path = join(d.packageDir, relative);
       await noSymlinks(path, d);
@@ -178,10 +178,12 @@ async function prerequisites(d) {
   });
   // Unsupported hosts should not run any external commands.
   if (checks.some(row => !row.ok)) return checks;
-  await check('docker', () => d.run('docker', [dockerHost, 'info', '--format', '{{.ServerVersion}}']));
-  await check('tar', () => d.run('tar', ['--version']));
-  await check('flock', () => d.run('/usr/bin/flock', ['--version']));
-  await check('systemd user', () => d.run('systemctl', ['--user', 'show-environment']));
+  if (desktop) {
+    await check('docker', () => d.run('docker', [dockerHost, 'info', '--format', '{{.ServerVersion}}']));
+    await check('tar', () => d.run('tar', ['--version']));
+    await check('flock', () => d.run('/usr/bin/flock', ['--version']));
+    await check('systemd user', () => d.run('systemctl', ['--user', 'show-environment']));
+  }
   await check('openclaw', async () => {
     const version = (await d.run('openclaw', ['--version'])).match(/\b(\d{4})\.(\d+)\.(\d+)\b/);
     if (!version || Number(version[1]) < 2026 || (Number(version[1]) === 2026 && (Number(version[2]) < 10 || (Number(version[2]) === 10 && Number(version[3]) < 4)))) throw new Error('Clawser setup requires OpenClaw 2026.10.4 or newer');
@@ -219,7 +221,12 @@ async function configPatch(o, p, saved, d, requireConfigured = false) {
   const profile = browser.profiles?.[o.profile];
   const desktop = plugins.entries?.['browser-handoff']?.config?.desktop;
   if (profile !== undefined && (!saved || !fieldsMatch(profile, profileConfig(o)))) throw new Error('Browser profile ' + ''.concat(o.profile) + ' is unowned or conflicts with Clawser');
-  if (desktop !== undefined && (!saved || !fieldsMatch(desktop, desktopConfig(o, p)))) throw new Error('Existing browser-handoff desktop config is unowned or conflicts with Clawser');
+  // CDP setup may disable an owned desktop without changing its identity.
+  // Only its enable bit may differ when returning to the original receipt.
+  const inertDesktop = (!saved || saved.pendingInertDesktop === true) && fieldsMatch(desktop, { enabled: false });
+  if (!saved && inertDesktop) o.pendingInertDesktop = true;
+  const ownedDesktop = saved && typeof desktop?.enabled === 'boolean' && fieldsMatch({ ...desktop, enabled: true }, desktopConfig(o, p));
+  if (desktop !== undefined && !inertDesktop && !ownedDesktop) throw new Error('Existing browser-handoff desktop config is unowned or conflicts with Clawser');
   for (const [name, value] of [['browser.profiles', browser.profiles], ['plugins.entries', plugins.entries], ['plugin config', plugins.entries?.['browser-handoff']?.config]]) {
     if (value !== undefined && !object(value)) throw new Error('Conflicting ' + ''.concat(name) + ' configuration');
   }
@@ -227,7 +234,7 @@ async function configPatch(o, p, saved, d, requireConfigured = false) {
   if (plugins.deny?.includes('browser-handoff') || tools.deny?.includes('browser_handoff')) throw new Error('Existing deny policy conflicts with Clawser; resolve it explicitly before setup');
   const patch = {
     browser: { profiles: { [o.profile]: profileConfig(o) }, ...(o.defaultProfile ? { defaultProfile: o.profile } : {}) },
-    plugins: { entries: { 'browser-handoff': { enabled: true, config: { desktop: desktopConfig(o, p) } } } },
+    plugins: { entries: { 'browser-handoff': { enabled: true, config: { desktop: desktopConfig(o, p), cloudflare: { enabled: false } } } } },
     tools: {},
   };
   if (plugins.allow !== undefined) patch.plugins.allow = [...new Set([...list(plugins.allow, 'plugins.allow'), 'browser-handoff'])];
@@ -423,6 +430,7 @@ async function install(o, p, saved, service, d) {
     await d.fs.mkdir(o.stateDir, { mode: 0o700 });
     await privatePath(o.stateDir, 'directory', d);
     saved = { identity, uid: d.uid, ownerId: randomUUID(), options: { stateDir: o.stateDir, profile: o.profile, port: o.port, cdpPort: o.cdpPort, vncPort: o.vncPort, containerName: o.containerName, defaultProfile: o.defaultProfile, packageDir: d.packageDir, execPath: d.execPath, servicePath: p.servicePath }, serviceUnit: p.serviceUnit };
+    if (o.pendingInertDesktop) saved.pendingInertDesktop = true;
     await d.fs.writeFile(p.marker, JSON.stringify(saved, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
   }
   const lock = join(o.stateDir, 'setup.lock');
@@ -469,6 +477,7 @@ async function install(o, p, saved, service, d) {
     // changes made during a long Docker build are preserved.
     const patch = await configPatch(o, p, saved, d);
     await d.run('openclaw', ['config', 'patch', '--stdin'], { input: JSON.stringify(patch) + '\n' });
+    if (saved.pendingInertDesktop) { delete saved.pendingInertDesktop; await saveMarker(saved, p, d); }
     await reloadPlugin(d);
     return saved;
   } finally { await d.fs.rm(lock, { recursive: true }); }
@@ -524,9 +533,24 @@ export async function runClawser(argv, deps = {}) {
   }
   const o = options(argv, d);
   if (o.command === 'help') {
-    d.log('Usage: clawser <setup|doctor> [--dry-run] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--cdp-port <n>] [--vnc-port <n>] [--container-name <name>] [--no-default-profile]');
+    d.log('Usage: clawser <setup|doctor> [--novnc] [--dry-run] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--cdp-port <n>] [--vnc-port <n>] [--container-name <name>] [--no-default-profile]\nDefault setup attaches to the existing default browser CDP connection. Desktop-only flags require --novnc.');
     return { ok: true, command: 'help' };
   }
+  let desktop = o.novnc === true;
+  if (o.command === 'doctor' && !desktop) {
+    try { desktop = (await configSection('plugins', d)).entries?.['browser-handoff']?.config?.desktop?.enabled === true; }
+    catch (error) {
+      d.log('FAIL configuration: ' + error.message);
+      return { ok: false, command: 'doctor', checks: [{ name: 'configuration', ok: false, message: error.message }] };
+    }
+  }
+  if (!desktop) {
+    for (const flag of ['--cdp-port', '--vnc-port', '--container-name', '--no-default-profile']) if (o.specified.includes(flag)) throw new Error(flag + ' requires --novnc');
+    if (!o.specified.includes('--state-dir')) o.stateDir = resolve(join(d.env.OPENCLAW_STATE_DIR || join(d.homeDir, '.openclaw'), 'clawser-cdp'));
+    const { runCdpSetup } = await import('./cdp-setup.mjs');
+    return runCdpSetup(o, d, { prerequisites, configSection, stat, noSymlinks, privatePath, readJson, download, atomicPrivate, reloadPlugin });
+  }
+  if (new Set([o.port, o.cdpPort, o.vncPort]).size !== 3) throw new Error('Controller, CDP and VNC ports must differ');
   const p = locations(o, d);
   const checks = await prerequisites(d);
   if (o.command === 'doctor') {
