@@ -120,12 +120,17 @@ export function createBrowserActivation({ api, binding, activate, cleanup = asyn
         activated?.onActive?.();
       }
     }).catch(async error => {
+      let writing;
       if (!terminal.has(owned.status.phase)) {
         clearTimer(owned); owned.abort.abort(error);
-        await transition(owned, 'failed', 'Browser Handoff backend activation failed and is unavailable; inspect service health and reload the plugin');
+        writing = transition(owned, 'failed', 'Browser Handoff backend activation failed and is unavailable; inspect service health and reload the plugin');
       }
       report(owned, error);
-      try { if (record === owned) await cleanup(owned.status.phase); } catch (failure) { report(owned, failure); }
+      try {
+        // Resource cancellation begins before any diagnostic filesystem wait.
+        const cleaning = record === owned ? cleanup(owned.status.phase) : undefined;
+        await Promise.all([writing, cleaning]);
+      } catch (failure) { report(owned, failure); }
       throw error;
     });
     // A pending native start has already returned; retain diagnostics and observe
@@ -190,9 +195,11 @@ export function createBrowserActivation({ api, binding, activate, cleanup = asyn
       const owned = record;
       if (!owned) return;
       clearTimer(owned); owned.abort.abort(new Error('Browser Handoff service stopped'));
-      await transition(owned, 'stopped', 'Browser Handoff service stopped and is unavailable');
-      try { if (record === owned) await cleanup('stopped'); }
-      finally { if (owners().get(owned.scope) === owned.token) owners().delete(owned.scope); }
+      const writing = transition(owned, 'stopped', 'Browser Handoff service stopped and is unavailable');
+      try {
+        const cleaning = record === owned ? cleanup('stopped') : undefined;
+        await Promise.all([writing, cleaning]);
+      } finally { if (owners().get(owned.scope) === owned.token) owners().delete(owned.scope); }
     },
   };
 }

@@ -115,3 +115,11 @@ test('pending discovery diagnostics are read-only and never publish an execution
   await f.activation.stop();
   assert.equal(activationModule.activationStatusForTarget({ config: f.api.config, pluginConfig: f.api.pluginConfig }), undefined);
 });
+test('stop starts resource cancellation before waiting for a delayed diagnostic write', async () => {
+  const target = targetConfig(); let release, cleanups = 0;
+  const api = { config: target, pluginConfig: {}, runtime: { config: { current: () => target } }, logger: { warn() {} } };
+  const binding = createBrowserBindingGuard(api);
+  const activation = activationModule.createBrowserActivation({ api, binding, activate: async ({ assertCurrent }) => assertCurrent(), cleanup: async () => { cleanups++; }, writeDiagnostic: async status => { if (status.phase === 'stopped') await new Promise(resolve => { release = resolve; }); } });
+  await activation.start(); const stopping = activation.stop(); await flush();
+  assert.equal(cleanups, 1); assert.equal(typeof release, 'function'); release(); await stopping;
+});
