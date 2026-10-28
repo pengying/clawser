@@ -112,7 +112,7 @@ jobs:
           "$clawser_cli" plugins install "$RUNNER_TEMP/$clawser_archive" --force --accept-capabilities
           "$clawser_cli" clawser --help
           if "$clawser_cli" clawser doctor --state-dir "$RUNNER_TEMP/clawser-unconfigured" > "$RUNNER_TEMP/clawser-doctor.log" 2>&1; then
-            echo 'Doctor unexpectedly accepted an unconfigured desktop'
+            echo 'Doctor unexpectedly accepted an unconfigured browser connection'
             exit 1
           fi
           node --input-type=module <<'NODE'
@@ -120,8 +120,12 @@ jobs:
           import { readFile } from 'node:fs/promises';
           const output = await readFile(`${process.env.RUNNER_TEMP}/clawser-doctor.log`, 'utf8');
           for (const line of ['OK platform', 'OK node', 'OK source paths', 'OK openclaw']) assert.ok(output.includes(line), `Missing installed-host check: ${line}\n${output}`);
-          assert.ok(output.includes('FAIL installation: No owned Clawser setup found'), output);
+          assert.ok(output.includes('FAIL ownership: No managed CDP setup receipt'), output);
+          assert.ok(output.includes('FAIL browser connection:'), output);
+          assert.ok(!output.includes('OK docker') && !output.includes('OK user systemd'), output);
           NODE
+      - name: Verify native browser authority contract
+        run: node test/native-browser-policy-fixture.mjs "$RUNNER_TEMP/clawser-host/node_modules/openclaw/dist"
       - name: Check ClawHub package publication metadata
         shell: bash
         run: |
