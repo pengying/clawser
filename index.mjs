@@ -6,6 +6,7 @@ import { FunnelTransport } from './src/funnel.mjs';
 import { isAbsolute, join } from 'node:path';
 import { registerDesktopPlugin } from './src/desktop-plugin.mjs';
 import { registerClawserCli } from './src/cli.mjs';
+import { createBrowserBindingGuard, monitorBrowserBinding, registerBrowserAccessPolicy } from './src/browser-policy.mjs';
 
 const ownerKey = (ctx) => JSON.stringify([ctx.sessionKey, ctx.sessionId]);
 const browserTool = (name) => /(?:^|[.:_])browser(?:_\d+)?$/.test(name || '');
@@ -52,13 +53,13 @@ function awaitPublicTransport(readiness, signal) {
   });
 }
 
-export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) => new CdpBrowser(profiles), serverFactory = (options) => new HandoffServer(options), funnelFactory = (options) => new FunnelTransport(options), cloudflareFactory = options => new CloudflareTransport(options) } = {}) {
+export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backendFactory = (profiles) => new CdpBrowser(profiles), serverFactory = (options) => new HandoffServer(options), funnelFactory = (options) => new FunnelTransport(options), cloudflareFactory = options => new CloudflareTransport(options) } = {}) {
   return {
     id: 'browser-handoff', name: 'Clawser',
     register(api) {
       if (api.registrationMode !== 'tool-discovery') registerClawserCli(api);
       if (['cli-metadata', 'setup-only'].includes(api.registrationMode)) return;
-      if (api.pluginConfig?.desktop?.enabled === true) return registerDesktopPlugin(api, { desktopRpcFactory });
+      if (api.pluginConfig?.desktop?.enabled === true) return registerDesktopPlugin(api, { desktopRpcFactory, bindingMonitorScheduler });
       const config = api.pluginConfig || {};
       const allowed = ctx => ownerAuthorized(ctx, config);
       if (api.registrationMode === 'tool-discovery') {
@@ -77,30 +78,47 @@ export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) =>
         return;
       }
       if (api.registrationMode !== undefined && api.registrationMode !== 'full') return;
-      let service, transport, transportReadiness, stopping = false, epoch, publication;
+      let service, transport, transportReadiness, stopping = false, epoch, publication, stopBindingMonitor;
       const unpublish = () => {
         if (publication && liveInstances().get(publication.key) === publication) liveInstances().delete(publication.key);
         publication = undefined;
       };
+      const binding = createBrowserBindingGuard(api, { onDrift() {
+        unpublish();
+        service?.setPublicBase(undefined);
+        if (!service) return;
+        // Poison before retirement: ending a share must not clear uncertain
+        // human input or a pending native browser call from this generation.
+        service.store.gate.poison();
+        for (const share of [...service.store.shares.values()]) service.store.end(share, 'configuration_changed');
+      } });
       const completed = new Map(), calls = new Map();
       const getService = () => {
         if (!service || stopping) throw new Error('Browser Handoff service is not running');
+        binding.current();
         if (!publication || liveInstances().get(publication.key) !== publication) throw new Error('Browser Handoff service is stale or unavailable');
         if (service.store.gate.poisonReason) { unpublish(); throw new Error('Browser Handoff service fault requires operator recovery'); }
         return service;
       };
+      registerBrowserAccessPolicy(api, { binding, assertAvailable: getService });
       api.registerService({
         id: 'browser-handoff',
         async start(ctx = {}) {
           if (service) throw new Error('Browser Handoff service is already running or stopping');
           if (config.funnel?.enabled === true && config.cloudflare?.enabled === true) throw new Error('Funnel and Cloudflare transports are mutually exclusive');
+          const resolved = binding.pin();
           unpublish(); stopping = false;
           const started = epoch = Symbol();
           const dynamic = config.funnel?.enabled === true || config.cloudflare?.enabled === true;
-          const ownedService = service = serverFactory({ backend: backendFactory(config.profiles || {}), publicBaseUrl: dynamic ? undefined : config.publicBaseUrl, comparisonProxyUrl: config.comparisonProxyUrl });
+          const isBindingCurrent = () => {
+            if (epoch !== started || stopping) return false;
+            try { binding.current(); return true; } catch { return false; }
+          };
+          const ownedService = service = serverFactory({ isBindingCurrent, backend: backendFactory(resolved.profiles), publicBaseUrl: dynamic ? undefined : config.publicBaseUrl, comparisonProxyUrl: config.comparisonProxyUrl });
           let ownedTransport;
           const current = () => {
             if (epoch !== started || service !== ownedService || stopping) throw new Error('Browser Handoff service changed during startup');
+            binding.current();
           };
           ownedService.store.on('ended', event => {
             if (service !== ownedService) return;
@@ -140,8 +158,9 @@ export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) =>
             current();
             publication = { key: instanceKey(api), factory: toolFactory };
             liveInstances().set(publication.key, publication);
+            stopBindingMonitor = monitorBrowserBinding(binding, bindingMonitorScheduler);
           } catch (error) {
-            if (epoch === started) { unpublish(); stopping = true; }
+            if (epoch === started) { unpublish(); stopping = true; stopBindingMonitor?.(); stopBindingMonitor = undefined; }
             ownedService.setPublicBase(undefined);
             try { await ownedService.close(); } catch { api.logger.warn('Browser Handoff startup listener cleanup failed.'); }
             try { await ownedTransport?.close(); } catch { api.logger.warn('Browser Handoff startup public transport cleanup could not be verified.'); }
@@ -152,6 +171,7 @@ export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) =>
         },
         async stop() {
           unpublish(); stopping = true; epoch = undefined;
+          stopBindingMonitor?.(); stopBindingMonitor = undefined;
           const ownedService = service, ownedTransport = transport, readiness = transportReadiness;
           readiness?.abort.abort(new Error('Browser Handoff service stopped during public transport readiness'));
           ownedService?.setPublicBase(undefined);
@@ -165,11 +185,12 @@ export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) =>
         },
       });
       api.on('before_tool_call', (event, ctx) => {
-        if (!browserTool(event.toolName) || !service) return;
+        if (!browserTool(event.toolName)) return;
         const id = callKey(event, ctx);
         if (!id) return { block: true, blockReason: 'Browser Handoff requires a paired agent-runtime lifecycle (sessionKey, sessionId, runId, toolCallId). Use the agent browser tool; legacy HTTP/RPC tools.invoke is unsupported.' };
         try {
-          service.store.gate.enter(id);
+          const currentService = getService();
+          currentService.store.gate.enter(id);
           calls.set(id, (calls.get(id) || 0) + 1);
         } catch (error) { return { block: true, blockReason: error.message }; }
       }, { priority: 1000 });
@@ -214,10 +235,12 @@ export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) =>
               if (getService() !== s) throw new Error('Browser Handoff service changed');
             };
             active();
+            const resolved = binding.current().binding;
+            const profile = params.profile === undefined ? resolved.profile : params.profile;
+            if (['tabs', 'create'].includes(params.action) && (typeof profile !== 'string' || !Object.hasOwn(resolved.profiles, profile))) throw new Error('Only configured existing browser profiles can be handed off');
             let result;
             if (params.action === 'tabs') {
-              if (!params.profile) result = { profiles: Object.keys(config.profiles || {}) };
-              else result = { profile: params.profile, tabs: (await s.backend.list(params.profile)).map(({ targetId, title, url }) => ({ targetId, title, url })) };
+              result = { profiles: Object.keys(resolved.profiles), profile, tabs: (await s.backend.list(profile)).map(({ targetId, title, url }) => ({ targetId, title, url })) };
             } else if (params.action === 'create') {
               const readiness = transportReadiness;
               if (readiness?.service === s) {
@@ -227,13 +250,13 @@ export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) =>
               }
               if (!s.publicBaseUrl) throw new Error('Configure publicBaseUrl or explicitly enable Funnel or Cloudflare before creating links');
               // Resolve the target first; invocation may have ended while the browser was queried.
-              const tab = (await s.backend.list(params.profile)).find((tab) => tab.targetId === params.targetId);
+              const tab = (await s.backend.list(profile)).find((tab) => tab.targetId === params.targetId);
               if (!tab) throw new Error('Selected HTTP(S) browser tab is unavailable');
               active();
               const ttlSeconds = params.ttlSeconds ?? 300;
               if (!Number.isInteger(ttlSeconds) || ttlSeconds < 30 || ttlSeconds > 1800) throw new Error('Invalid invitation lifetime');
-              const invite = s.store.create({ owner, target: { profile: params.profile, targetId: params.targetId }, ttlMs: ttlSeconds * 1000, permission: params.permission || 'control' });
-              result = { id: invite.id, url: s.publicBaseUrl + '/s/' + invite.id + '/#invite=' + invite.secret, expiresAt: invite.expiresAt, permission: params.permission || 'control', mode: 'unclaimed' };
+              const invite = s.store.create({ owner, target: { profile, targetId: params.targetId }, ttlMs: ttlSeconds * 1000, permission: params.permission || 'control' });
+              result = { profile, id: invite.id, url: s.publicBaseUrl + '/s/' + invite.id + '/#invite=' + invite.secret, expiresAt: invite.expiresAt, permission: params.permission || 'control', mode: 'unclaimed' };
             } else if (params.action === 'revoke') {
               s.store.revoke(params.id, owner); result = status(params.id);
             } else if (params.action === 'status') result = status(params.id);

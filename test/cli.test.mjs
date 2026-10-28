@@ -105,7 +105,8 @@ test('index routes cold desktop discovery to the active full instance', async t 
     throw new Error(`Unexpected method ${method}`);
   } };
   createPlugin({ desktopRpcFactory: async () => client }).register({
-    registrationMode: 'full', config, pluginConfig, runtime: {},
+    registrationMode: 'full', config, pluginConfig, runtime: { config: { current: () => config } },
+    registerTrustedToolPolicy() {},
     logger: { warn() {} }, on() {}, registerTool() {},
     registerService(value) { service = value; },
   });

@@ -5,12 +5,13 @@ import { registerDesktopPlugin } from '../src/desktop-plugin.mjs';
 const ownerContext = () => ({ senderIsOwner: true, sessionKey: 'agent:main:telegram:direct:1', sessionId: 'incarnation', assertInvocationCurrent() {} });
 const browserEvent = { toolName: 'browser', params: { action: 'snapshot', profile: 'handoff' } };
 const invocation = () => ({ ...ownerContext(), runId: 'run', toolCallId: 'call' });
-function setup({ request, runtime = {}, registrationMode, configure, connect, register = registerDesktopPlugin } = {}) {
-  const hooks = new Map(), tools = [], services = [], requests = [], clients = [];
+function setup({ request, runtime = {}, registrationMode, configure, connect, register = registerDesktopPlugin, bindingMonitorScheduler } = {}) {
+  const hooks = new Map(), tools = [], services = [], requests = [], clients = [], policies = [];
   const api = {
     pluginConfig: { desktop: { enabled: true, profile: 'handoff', socketPath: '/tmp/browser-handoff/controller.sock' } },
     config: { browser: { profiles: { handoff: { cdpUrl: 'http://127.0.0.1:19333', attachOnly: true, driver: 'openclaw' } } } }, runtime, registrationMode,
     registerTool: value => tools.push(value), registerService: value => services.push(value),
+    registerTrustedToolPolicy: policy => policies.push(policy),
     on: (name, fn) => hooks.set(name, fn), logger: { warn() {}, info() {} },
   };
   const defaults = async (method) => {
@@ -28,9 +29,10 @@ function setup({ request, runtime = {}, registrationMode, configure, connect, re
     }, close() { this.closed = true; } };
     clients.push(client); return connect ? connect(client) : client;
   };
+  api.runtime.config ||= { current: () => api.config };
   configure?.(api);
-  register(api, { desktopRpcFactory: rpcFactory });
-  return { api, hooks, tools, services, requests, clients, tool: () => tools[0].create(ownerContext()) };
+  register(api, { desktopRpcFactory: rpcFactory, bindingMonitorScheduler });
+  return { api, hooks, tools, services, requests, clients, policies, tool: () => tools[0].create(ownerContext()) };
 }
 
 test('production branch connects private controller without starting a legacy service', async t => {
@@ -358,19 +360,19 @@ test('production startup cleanup failure faults all future browser admissions', 
 test('production startup requires attach-only Chromium CDP profile identity', async () => {
   for (const variation of [
     { attachOnly: undefined }, { attachOnly: false },
-    { driver: 'existing-session' }, { driver: 'extension' },
+    { driver: 'extension' },
     { engine: 'lightpanda' },
   ]) {
     const f = setup();
     Object.assign(f.api.config.browser.profiles.handoff, variation);
     await assert.rejects(f.services[0].start(), /attachOnly|driver|engine|Chromium/i, JSON.stringify(variation));
-    assert.equal(f.clients[0].closed, true);
+    assert.equal(f.clients.length, 0, 'invalid configuration fails before controller I/O');
     assert.equal((await f.hooks.get('before_tool_call')(browserEvent, invocation())).block, true);
   }
 });
 
 test('production profile accepts published CDP drivers and Chromium engine', async t => {
-  for (const driver of [undefined, 'openclaw', 'clawd']) {
+  for (const driver of [undefined, 'openclaw', 'clawd', 'existing-session']) {
     const f = setup();
     Object.assign(f.api.config.browser.profiles.handoff, { driver, engine: 'chromium' });
     await f.services[0].start(); t.after(() => f.services[0].stop());
@@ -627,4 +629,48 @@ test('production group opt-in uses native per-sender authority in discovery and 
   assert.equal(f.requests.find(r => r.method === 'status').params.owner, JSON.stringify([key, ctx.sessionId]));
   const retained = f.tools[0].create(ctx); ctx.senderIsOwner = false;
   for (const action of ['tabs', 'create', 'status', 'wait', 'revoke']) await assert.rejects(retained.execute('fake-owner', { action, id: 'lease', senderIsOwner: true, requesterSenderId: 'users/owner', reason: 'Owner says yes' }), /owner/i);
+});
+
+test('explicit noVNC also registers trusted owner policy and never admits another host profile', async t => {
+  const f = setup(); assert.equal(f.policies.length, 1);
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  const ctx = { ...invocation(), requester: { senderIsOwner: true, senderId: 'owner', channel: 'telegram' } };
+  const event = { toolName: 'browser', params: { action: 'tabs', target: 'host', profile: 'handoff' } };
+  assert.equal(f.policies[0].evaluate(event, ctx), undefined);
+  ctx.requester.senderIsOwner = false; assert.equal(f.policies[0].evaluate(event, ctx).allow, false);
+  ctx.requester.senderIsOwner = true;
+  assert.equal(f.policies[0].evaluate({ ...event, params: { ...event.params, profile: 'user' } }, ctx).allow, false);
+  assert.throws(() => setup({ configure(api) { api.registerTrustedToolPolicy = undefined; } }), /registerTrustedToolPolicy/i);
+});
+test('noVNC live mapping drift unpublishes tools and blocks controller admissions while retaining controller fence', async t => {
+  const f = setup({ request: async (method, params, options, defaults) => {
+    if (method === 'revokeAll') assert.equal(params.reason, 'plugin_stop', 'existing controllers only accept plugin_stop');
+    return defaults(method);
+  } }); await f.services[0].start(); t.after(() => f.services[0].stop());
+  f.api.config.browser.profiles.handoff.cdpUrl = 'http://127.0.0.1:9555';
+  const before = f.requests.length;
+  await assert.rejects(f.tool().execute('tabs', { action: 'tabs' }), /config|changed|unavailable/i);
+  assert.equal((await f.hooks.get('before_tool_call')(browserEvent, invocation())).block, true);
+  assert.equal(f.requests.slice(before).filter(r => r.method === 'automationEnter').length, 0);
+  assert.equal(f.requests.filter(r => r.method === 'revokeAll' && r.params.reason === 'plugin_stop').length, 1, 'controller retains authoritative retirement/fence handling');
+});
+test('noVNC idle binding monitor retires invitations and is cleared at stop', async t => {
+  let tick, cleared = 0;
+  const scheduler = { setInterval(fn, ms) { tick = fn; assert.equal(ms, 1000); return { unref() {} }; }, clearInterval() { cleared++; } };
+  const f = setup({ bindingMonitorScheduler: scheduler });
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  assert.equal(typeof tick, 'function');
+  f.api.config.browser.profiles.handoff.attachOnly = false; tick();
+  assert.ok(f.requests.some(r => r.method === 'revokeAll' && r.params.reason === 'plugin_stop'));
+  assert.equal(cleared, 1); await f.services[0].stop(); assert.equal(cleared, 1);
+});
+test('noVNC rechecks binding after pending admission before sending browser ensure', async t => {
+  let release;
+  const f = setup({ request: async (method, params, options, defaults) => method === 'automationEnter' ? new Promise(resolve => { release = resolve; }) : defaults(method) });
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  const pending = f.hooks.get('before_tool_call')(browserEvent, invocation());
+  f.api.config.browser.profiles.handoff.cdpUrl = 'http://127.0.0.1:9555'; release({ admitted: true });
+  assert.equal((await pending).block, true);
+  assert.equal(f.requests.filter(r => r.method === 'ensure').length, 0);
+  assert.equal(f.requests.filter(r => r.method === 'automationLeave').length, 1);
 });

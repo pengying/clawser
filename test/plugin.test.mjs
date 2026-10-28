@@ -7,15 +7,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 
-function setup({ funnelFactory, cloudflareFactory, serverFactory, backendFactory } = {}) {
-  const hooks = new Map(), tools = [], services = [];
+function setup({ funnelFactory, cloudflareFactory, serverFactory, backendFactory, bindingMonitorScheduler } = {}) {
+  const hooks = new Map(), tools = [], services = [], policies = [];
   const api = { pluginConfig: { profiles: { demo: 'http://127.0.0.1:9222' }, port: 0, publicBaseUrl: 'https://handoff.example' },
     registerTool: (tool) => tools.push(tool), registerService: (service) => services.push(service),
-    on: (name, fn) => hooks.set(name, fn), logger: { warn() {}, info() {} }, runtime: {}, config: {} };
+    on: (name, fn) => hooks.set(name, fn), logger: { warn() {}, info() {} }, runtime: {}, config: { browser: { defaultProfile: 'demo', profiles: { demo: { cdpUrl: 'http://127.0.0.1:9222', attachOnly: true } } } } };
+  api.runtime.config = { current: () => api.config };
+  api.registerTrustedToolPolicy = policy => policies.push(policy);
   const ctx = { senderIsOwner: true, sessionKey: 'agent:main:telegram:direct:1', sessionId: 'incarnation', assertInvocationCurrent() {} };
   let server;
-  createPlugin({ backendFactory: backendFactory || (() => ({ list: async () => [{ targetId: 'tab', title: 'Demo', url: 'https://example.com' }] })), serverFactory: (options) => (server = serverFactory ? serverFactory(options) : new HandoffServer(options)), ...(funnelFactory ? { funnelFactory } : {}), ...(cloudflareFactory ? { cloudflareFactory } : {}) }).register(api);
-  return { api, hooks, tools, services, ctx, getServer: () => server };
+  createPlugin({ bindingMonitorScheduler, backendFactory: backendFactory || (() => ({ list: async () => [{ targetId: 'tab', title: 'Demo', url: 'https://example.com' }] })), serverFactory: (options) => (server = serverFactory ? serverFactory(options) : new HandoffServer(options)), ...(funnelFactory ? { funnelFactory } : {}), ...(cloudflareFactory ? { cloudflareFactory } : {}) }).register(api);
+  return { api, hooks, tools, services, policies, ctx, getServer: () => server };
 }
 
 test('Funnel ownership uses the stable service state directory and bound listener', async (t) => {
@@ -387,4 +389,74 @@ test('Cloudflare warmup rechecks owner authority before creating a link and fail
   await assert.rejects(discover(f).execute('tabs', { action: 'tabs' }), /unavailable/);
   assert.equal(f.getServer().publicBaseUrl, undefined);
   assert.equal(f.getServer().store.shares.size, 0);
+});
+
+test('existing default supplies omitted handoff profile and explicit unconfigured profiles never reach backend', async t => {
+  const seen = [];
+  const f = setup({ backendFactory: profiles => { assert.deepEqual(profiles, { demo: 'http://127.0.0.1:9222' }); return { list: async profile => { seen.push(profile); return [{ targetId: 'tab' }]; } }; } });
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  const tool = f.tools[0].create(f.ctx);
+  const tabs = (await tool.execute('tabs', { action: 'tabs' })).details;
+  assert.equal(tabs.profile, 'demo'); assert.equal(tabs.tabs[0].targetId, 'tab');
+  const create = (await tool.execute('create', { action: 'create', targetId: 'tab' })).details;
+  assert.equal(create.profile, 'demo');
+  const count = seen.length;
+  await assert.rejects(tool.execute('escape', { action: 'tabs', profile: 'user' }), /profile/i);
+  assert.equal(seen.length, count); assert.ok(seen.every(profile => profile === 'demo'));
+});
+test('full CDP registration requires native trusted policies while metadata and discovery remain inert', () => {
+  const f = setup(); assert.equal(f.policies.length, 1); assert.equal(f.policies[0].id, 'clawser-browser-access');
+  assert.throws(() => createPlugin().register({ ...f.api, registerTrustedToolPolicy: undefined }), /registerTrustedToolPolicy/i);
+  for (const registrationMode of ['cli-metadata', 'setup-only', 'tool-discovery']) {
+    const api = { ...f.api, registrationMode, registerTrustedToolPolicy() { assert.fail('inert mode registered policy'); } };
+    Object.defineProperty(api, 'runtime', { get() { assert.fail('inert mode accessed runtime'); } });
+    createPlugin().register(api);
+  }
+});
+test('CDP gate blocks browser I/O before startup and after stop instead of bypassing coordination', async () => {
+  const f = setup(), event = { toolName: 'browser', params: { action: 'tabs', target: 'host' } }, ctx = { ...f.ctx, runId: 'run', toolCallId: 'call' };
+  assert.equal(f.hooks.get('before_tool_call')(event, ctx)?.block, true);
+  await f.services[0].start(); await f.services[0].stop();
+  assert.equal(f.hooks.get('before_tool_call')(event, ctx)?.block, true);
+});
+test('CDP configuration drift retires invitations and retains uncertain human-input and pending-automation fences', async t => {
+  for (const withInput of [false, true]) {
+    const f = setup(); await f.services[0].start(); t.after(() => f.services[0].stop());
+    const tool = f.tools[0].create(f.ctx), created = await tool.execute('create', { action: 'create', profile: 'demo', targetId: 'tab' });
+    const store = f.getServer().store, share = store.get(created.details.id);
+    store.claim(share.id, new URL(created.details.url).hash.slice('#invite='.length));
+    if (withInput) { await store.takeControl(share); store.gate.beginInput(share.id); }
+    else store.gate.enter('pending-browser');
+    f.api.config.browser.profiles.demo.cdpUrl = 'http://127.0.0.1:9555';
+    await assert.rejects(tool.execute('drift', { action: 'tabs' }), /config|changed|unavailable/i);
+    assert.equal(store.shares.size, 0); assert.ok(store.gate.poisonReason);
+    if (withInput) { assert.equal(store.gate.humanInputs, 1); assert.equal(store.gate.holder, share.id); store.gate.endInput(share.id); }
+    else { assert.ok(store.gate.active.has('pending-browser')); store.gate.leave('pending-browser'); }
+    assert.equal(store.gate.locked, true);
+  }
+});
+test('CDP trusted policy checks fresh default and nonowner authority for every browser invocation', async t => {
+  const f = setup(); await f.services[0].start(); t.after(() => f.services[0].stop());
+  const policy = f.policies[0], event = { toolName: 'tools.browser_1', params: { action: 'tabs', target: 'host', owner: true } };
+  const ctx = { sessionKey: f.ctx.sessionKey, sessionId: f.ctx.sessionId, runId: 'run', toolCallId: 'call', requester: { senderId: 'owner', channel: 'telegram', senderIsOwner: true } };
+  assert.equal(policy.evaluate(event, ctx), undefined);
+  ctx.requester.senderIsOwner = false; assert.equal(policy.evaluate(event, ctx).allow, false);
+  ctx.requester.senderIsOwner = true; f.api.runtime.config.current = undefined;
+  assert.equal(policy.evaluate(event, ctx).allow, false);
+});
+test('explicit invalid handoff profiles cannot redirect to the current default', async t => {
+  const f = setup(); await f.services[0].start(); t.after(() => f.services[0].stop());
+  for (const profile of [null, '', ' demo ', 42, {}]) await assert.rejects(f.tools[0].create(f.ctx).execute('tabs', { action: 'tabs', profile }), /profile/i);
+});
+test('CDP server binding callback retires stale invitations before data-plane use and idle monitor cleans up', async t => {
+  let tick, callback, cleared = 0;
+  const scheduler = { setInterval(fn, ms) { tick = fn; assert.equal(ms, 1000); return { unref() {} }; }, clearInterval() { cleared++; } };
+  const f = setup({ bindingMonitorScheduler: scheduler, serverFactory(options) { callback = options.isBindingCurrent; return new HandoffServer(options); } });
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  assert.equal(typeof callback, 'function'); assert.equal(callback(), true);
+  await f.tools[0].create(f.ctx).execute('create', { action: 'create', targetId: 'tab' });
+  f.api.config.browser.profiles.demo.cdpUrl = 'http://127.0.0.1:9555';
+  assert.equal(callback(), false); assert.equal(f.getServer().store.shares.size, 0); assert.ok(f.getServer().store.gate.poisonReason);
+  tick(); assert.equal(cleared, 1);
+  await f.services[0].stop(); assert.equal(cleared, 1); assert.equal(callback(), false);
 });

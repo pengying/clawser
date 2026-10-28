@@ -61,3 +61,19 @@ test('binding fingerprint is stable for ordering and changes for selected profil
   assert.equal(browserConfig.browserBindingKey({ ...binding, profiles: Object.fromEntries(Object.entries(binding.profiles).reverse()) }), key);
   assert.notEqual(browserConfig.browserBindingKey({ ...binding, profile: 'spare' }), key);
 });
+test('noVNC ignores unused legacy CDP mappings from a previous backend selection', () => {
+  const config = host(); config.browser.profiles.daily.attachOnly = false;
+  const pluginConfig = { desktop: { enabled: true, profile: 'spare' }, profiles: { daily: 'http://127.0.0.1:9222' } };
+  assert.deepEqual(resolve({ config, pluginConfig }).profiles, { spare: 'http://localhost:9223' });
+});
+test('native CDP port and existing-session MCP overrides cannot diverge from the pinned origin', () => {
+  for (const patch of [{ cdpPort: 9444 }, { cdpUrl: 'http://localhost', cdpPort: 9444 }, { mcpArgs: ['--browserUrl', 'http://localhost:9444'] }, { mcpArgs: ['--autoConnect'] }, { mcpArgs: ['--auto-connect=false'] }, { mcpCommand: '/custom-browser-launcher' }]) {
+    const config = host(); Object.assign(config.browser.profiles.daily, patch);
+    assert.throws(() => resolve({ config }), /CDP|MCP|override/i);
+  }
+  const config = host(); config.browser.profiles.daily.mcpCommand = 'npx'; config.browser.profiles.daily.cdpPort = 9222;
+  assert.equal(resolve({ config }).cdpUrl, 'http://127.0.0.1:9222');
+});
+test('an explicitly invalid profile never redirects to the default', () => {
+  for (const profile of [null, '', ' daily ', 42, {}]) assert.throws(() => resolve({ config: host(), profile }), /profile/i);
+});

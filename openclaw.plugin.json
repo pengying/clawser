@@ -8,6 +8,9 @@
   "contracts": {
     "tools": [
       "browser_handoff"
+    ],
+    "trustedToolPolicies": [
+      "clawser-browser-access"
     ]
   },
   "skills": [
@@ -36,7 +39,7 @@
         "additionalProperties": {
           "type": "string"
         },
-        "description": "Explicit shareable profile name to loopback CDP HTTP origin"
+        "description": "Optional additional existing host CDP profiles. Every mapping must match an eligible attach-only Chromium host profile; the configured default is included automatically."
       },
       "funnel": {
         "type": "object",
@@ -60,7 +63,7 @@
       "desktop": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Production full-browser handoff through an operator-managed private Unix controller; ordinary Chromium CDP profile must match controller identity and set attachOnly=true with the openclaw driver. Legacy tab sharing is the default when disabled or absent.",
+        "description": "Explicit noVNC full-browser handoff through an operator-managed private Unix controller. When disabled or absent, reuse the existing configured default Chromium browser through CDP without starting a browser. Both modes require attachOnly=true and a matching explicit loopback CDP origin.",
         "properties": {
           "enabled": {
             "type": "boolean",

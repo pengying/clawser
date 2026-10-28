@@ -1,5 +1,7 @@
 import { authorizedSession, ownerAuthorized, ownerGuard } from './authorization.mjs';
 import { isAbsolute } from 'node:path';
+import { cdpOrigin } from './browser-config.mjs';
+import { createBrowserBindingGuard, monitorBrowserBinding, registerBrowserAccessPolicy } from './browser-policy.mjs';
 
 const scopeNotice = 'This link exposes the entire dedicated browser profile: all tabs, browser chrome, dialogs, and clipboard during control.';
 const browserTool = (name) => /(?:^|[.:_])browser(?:_\d+)?$/.test(name || '');
@@ -24,25 +26,18 @@ const toolDescriptor = {
     timeoutSeconds: { type: 'integer', minimum: 1, maximum: 60 },
   } },
 };
-function cdpIdentity(value) {
-  const url = new URL(value);
-  if (url.protocol !== 'http:' || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) || url.username || url.password || url.pathname !== '/' || url.search || url.hash)
-    throw new Error('Production browser CDP mapping must be a loopback HTTP origin');
-  return url.origin;
-}
 function duration(value, fallback, min, max, label) {
   const result = value ?? fallback;
   if (!Number.isInteger(result) || result < min || result > max) throw new Error('Invalid ' + `${label}`);
   return result;
 }
-function liveInstanceKey(api) {
-  const { socketPath, profile } = api.pluginConfig.desktop;
-  return JSON.stringify(['browser-handoff', socketPath, profile, cdpIdentity(api.config?.browser?.profiles?.[profile]?.cdpUrl)]);
+function liveInstanceKey(api, origin = cdpOrigin(api.config?.browser?.profiles?.[api.pluginConfig.desktop.profile]?.cdpUrl)) {
+  return JSON.stringify([api.pluginConfig || {}, origin]);
 }
 
 // Only private control-plane RPC runs in the Gateway. VNC, HTTP viewers, browser
 // supervision and the authoritative automation gate live in the controller.
-export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFactory } = {}) {
+export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFactory, bindingMonitorScheduler } = {}) {
   const config = api.pluginConfig.desktop;
   const allowed = ctx => ownerAuthorized(ctx, api.pluginConfig);
   if (api.registrationMode === 'tool-discovery') {
@@ -62,11 +57,18 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     return;
   }
   if (api.registrationMode !== undefined && api.registrationMode !== 'full') return;
-  let client, running = false, fault, pollTimer, serviceEpoch, publication;
+  let client, running = false, fault, pollTimer, serviceEpoch, publication, stopBindingMonitor;
   const unpublish = () => {
     if (publication && liveInstances().get(publication.key) === publication) liveInstances().delete(publication.key);
     publication = undefined;
   };
+  const binding = createBrowserBindingGuard(api, { onDrift() {
+    unpublish();
+    fault = 'Browser Handoff current configuration changed; controller retirement and operator reconciliation are required';
+    // The controller remains authoritative for uncertain input and admissions.
+    // Retire its invitations without clearing the Gateway admission ledger.
+    if (client) void client.request('revokeAll', { reason: 'plugin_stop' }, { timeoutMs: 180_000 }).catch(() => api.logger.warn('Browser Handoff configuration-change retirement was not confirmed; controller fencing remains authoritative.'));
+  } });
   const calls = new Map(), notifications = new Map();
   const canceledOwners = new Set(), canceledSessions = new Set();
   const sessionRuntime = api.runtime?.agent?.session, system = api.runtime?.system;
@@ -127,22 +129,24 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     } catch { if (current()) api.logger.warn('Browser Handoff completion polling did not finish; unacknowledged events will be retried.'); }
     finally { polling = false; }
   }
-  const getClient = () => {
+  const getClient = (allowFault = false) => {
     if (!running || !client) throw new Error('Browser Handoff production controller is unavailable');
+    binding.current();
+    if (fault && !allowFault) throw new Error(fault);
+    if (!publication || liveInstances().get(publication.key) !== publication) throw new Error('Browser Handoff production controller is stale or unavailable');
     return client;
   };
   const validateIdentity = (identity) => {
     if (identity?.ready === false || identity?.recoveryRequired === true) throw new Error('Browser Handoff controller is not ready; reconciliation or operator recovery is required');
     if (!identity || identity.profile !== config.profile) throw new Error('Browser Handoff controller profile does not match desktop.profile');
-    const profile = api.config?.browser?.profiles?.[config.profile];
-    if (profile?.attachOnly !== true) throw new Error('Browser Handoff requires attachOnly=true for its dedicated Chromium profile');
-    if (profile.driver !== undefined && !['openclaw', 'clawd'].includes(profile.driver)) throw new Error('Browser Handoff requires the openclaw CDP driver for its dedicated profile');
-    if (profile.engine !== undefined && profile.engine !== 'chromium') throw new Error('Browser Handoff requires the Chromium browser engine for its dedicated profile');
-    const mapping = profile.cdpUrl;
-    if (!mapping || cdpIdentity(mapping) !== cdpIdentity(identity.cdpUrl)) throw new Error('Browser Handoff CDP profile mapping does not match the production controller');
+    const resolved = binding.current().binding;
+    if (resolved.profile !== config.profile || cdpOrigin(identity.cdpUrl) !== resolved.cdpUrl) throw new Error('Browser Handoff CDP profile mapping does not match the production controller');
     return identity;
   };
-  const ensure = async (rpc, signal, key) => validateIdentity(await rpc.request('ensure', { profile: config.profile, ...(key ? { callKey: key } : {}) }, { signal, timeoutMs: 120_000 }));
+  const ensure = async (rpc, signal, key) => {
+    binding.current();
+    return validateIdentity(await rpc.request('ensure', { profile: config.profile, ...(key ? { callKey: key } : {}) }, { signal, timeoutMs: 120_000 }));
+  };
   const releaseAdmission = async (rpc, key) => {
     const count = calls.get(key) || 0;
     if (!count) return;
@@ -156,11 +160,14 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     api.logger.warn(fault);
     return new Error(fault);
   };
+  registerBrowserAccessPolicy(api, { binding, assertAvailable: () => getClient() });
   api.registerService({
     id: 'browser-handoff',
     async start() {
       unpublish();
+      stopBindingMonitor?.(); stopBindingMonitor = undefined;
       running = false; fault = undefined;
+      binding.pin();
       const epoch = serviceEpoch = Symbol();
       if (!isAbsolute(config.socketPath || '')) throw new Error('desktop.socketPath must be an absolute private Unix socket path');
       if (typeof config.profile !== 'string' || !config.profile.trim()) throw new Error('desktop.profile is required');
@@ -173,8 +180,9 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
         if (serviceEpoch !== epoch || client !== rpc) throw new Error('Browser Handoff service changed during controller startup');
         validateIdentity(identity);
         running = true;
-        publication = { key: liveInstanceKey(api), factory: toolFactory };
+        publication = { key: liveInstanceKey(api, binding.current().binding.cdpUrl), factory: toolFactory };
         liveInstances().set(publication.key, publication);
+        stopBindingMonitor = monitorBrowserBinding(binding, bindingMonitorScheduler);
         if (canWake) {
           pollTimer = setInterval(() => { void pollCompletions(); }, 1000);
           pollTimer.unref?.();
@@ -183,13 +191,14 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
       } catch (error) {
         rpc?.close();
         if (client === rpc) client = undefined;
-        if (serviceEpoch === epoch) { running = false; serviceEpoch = undefined; unpublish(); }
+        if (serviceEpoch === epoch) { running = false; serviceEpoch = undefined; unpublish(); stopBindingMonitor?.(); stopBindingMonitor = undefined; }
         throw error;
       }
     },
     async stop() {
       unpublish();
       running = false; serviceEpoch = undefined;
+      stopBindingMonitor?.(); stopBindingMonitor = undefined;
       clearInterval(pollTimer); pollTimer = undefined;
       const rpc = client;
       client = undefined; calls.clear();
@@ -219,7 +228,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
       calls.set(key, (calls.get(key) || 0) + 1);
       try {
         if (!running || rpc !== client) throw new Error('Browser Handoff controller stopped during admission');
-        if ((event.params?.profile ?? api.config?.browser?.defaultProfile) === config.profile) await ensure(rpc, undefined, key);
+        await ensure(rpc, undefined, key);
       } catch (error) {
         try { await releaseAdmission(rpc, key); }
         catch { throw completionFault(); }
@@ -231,7 +240,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     if (!browserTool(event.toolName)) return;
     const key = callKey(event, ctx), count = calls.get(key) || 0;
     if (!count) return;
-    try { await releaseAdmission(getClient(), key); }
+    try { await releaseAdmission(getClient(true), key); }
     catch { completionFault(); }
   });
   api.on('session_end', async (event, ctx) => {
@@ -251,7 +260,8 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
       ...toolDescriptor,
       async execute(_callId, params, signal) {
         current();
-        getClient();
+        const inspect = ['status', 'wait', 'revoke'].includes(params.action);
+        getClient(inspect);
         const epoch = serviceEpoch;
         if (signal?.aborted) throw new Error('Browser handoff cancelled');
         if (params.profile !== undefined && params.profile !== config.profile) throw new Error('Only the configured production browser profile can be handed off');
@@ -260,10 +270,11 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
           rpc = await desktopRpcFactory(config.socketPath);
           current();
           if (!running || serviceEpoch !== epoch) throw new Error('Browser Handoff service changed during tool startup');
+          getClient(inspect);
           if (signal?.aborted) throw new Error('Browser handoff cancelled');
           let result;
           if (params.action === 'tabs' || params.action === 'create') {
-            await ensure(rpc, signal); current();
+            await ensure(rpc, signal); current(); getClient(inspect);
             if (params.action === 'tabs') {
               const tabs = await rpc.request('tabs', { profile: config.profile }, { signal });
               result = { profile: config.profile, tabs: Array.isArray(tabs) ? tabs : tabs.tabs };
@@ -290,6 +301,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
             result = await rpc.request(params.action, { owner, id: params.id, ...(seconds === undefined ? {} : { timeoutSeconds: seconds }) }, { signal, timeoutMs: seconds === undefined ? 120_000 : seconds * 1000 + 10_000 });
           } else throw new Error('Unsupported handoff action');
           current();
+          getClient(inspect);
           const details = { ...result, profile: config.profile, scope: 'browser-profile', scopeNotice, browserGateFault: fault || result?.browserGateFault || null, resumeAllowed: !fault && result?.resumeAllowed === true && result?.recoveryRequired !== true, continuation, continuationNotice };
           return { content: [{ type: 'text', text: JSON.stringify(details) }], details };
         } finally { rpc?.close(); }

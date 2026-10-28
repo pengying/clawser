@@ -20,7 +20,13 @@ function eligibleOrigin(browser, profile) {
   if (connection.driver !== undefined && !['openclaw', 'clawd', 'existing-session'].includes(connection.driver))
     throw new Error('Browser profile requires a compatible CDP driver');
   if (connection.engine !== undefined && connection.engine !== 'chromium') throw new Error('Browser profile requires the Chromium engine');
-  return cdpOrigin(connection.cdpUrl);
+  const origin = cdpOrigin(connection.cdpUrl);
+  if (connection.cdpPort !== undefined && connection.cdpPort !== Number(new URL(origin).port || 80))
+    throw new Error('Browser CDP port conflicts with its explicit origin');
+  if (connection.driver === 'existing-session' &&
+      (connection.mcpCommand !== undefined && connection.mcpCommand !== 'npx' || connection.mcpArgs !== undefined && (!Array.isArray(connection.mcpArgs) || connection.mcpArgs.length)))
+    throw new Error('Browser MCP connection overrides are unsupported; use only the explicit CDP origin');
+  return origin;
 }
 
 export function resolveHandoffBrowser({ config, pluginConfig = {}, profile } = {}) {
@@ -28,13 +34,14 @@ export function resolveHandoffBrowser({ config, pluginConfig = {}, profile } = {
   if (!object(browser)) throw new Error('Current browser configuration is unavailable');
   if (browser.enabled === false) throw new Error('Browser is disabled in current configuration');
   const desktop = pluginConfig.desktop?.enabled === true;
-  const selected = desktop ? pluginConfig.desktop.profile : profile ?? browser.defaultProfile;
+  const selected = desktop ? pluginConfig.desktop.profile : profile === undefined ? browser.defaultProfile : profile;
   if (!name(selected)) throw new Error('An explicitly configured existing default browser profile is required');
   if (desktop && profile !== undefined && profile !== selected) throw new Error('Only the configured desktop browser profile is permitted');
   const cdpUrl = eligibleOrigin(browser, selected);
   const entries = [[selected, cdpUrl]];
   if (pluginConfig.profiles !== undefined && !object(pluginConfig.profiles)) throw new Error('Invalid configured browser profile mappings');
   for (const [legacy, value] of Object.entries(pluginConfig.profiles || {})) {
+    if (desktop && legacy !== selected) continue;
     const origin = eligibleOrigin(browser, legacy);
     if (cdpOrigin(value) !== origin) throw new Error('Browser profile CDP mapping does not match current host configuration');
     if (!desktop || legacy === selected) entries.push([legacy, origin]);
