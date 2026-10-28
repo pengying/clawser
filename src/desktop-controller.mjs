@@ -87,7 +87,7 @@ export class DesktopController {
     Object.assign(this,{stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,supervisorHeartbeatMs});
     this.socketPath=socketPath||join(this.stateDir,'desktop.sock');
     this.transport.on?.('failure',()=>{void this.transportFailed();});
-    this.supervisor={create:params=>this.createActor(params),read:async id=>({state:this.actors.has(id)?'running':'stopped'}),register:params=>this.registration(params.ownedId),promote:params=>this.promote(params),cancelPromotion:id=>this.cancelPromotion(id),destroy:(id,options)=>this.retire(id,options),verifyExited:async id=>this.ledger.leases[id]?.state==='ended'&&safeCompletion(this.ledger.leases[id]),clipboardRead:id=>this.clipboard(id),clipboardWrite:(id,text)=>this.clipboard(id,text)};
+    this.supervisor={create:params=>this.createActor(params),read:async id=>({state:this.actors.has(id)?'running':'stopped'}),register:params=>this.registration(params.ownedId),promote:params=>this.promote(params),cancelPromotion:id=>this.cancelPromotion(id),demote:params=>this.demote(params),destroy:(id,options)=>this.retire(id,options),verifyExited:async id=>this.ledger.leases[id]?.state==='ended'&&safeCompletion(this.ledger.leases[id]),clipboardRead:id=>this.clipboard(id),clipboardWrite:(id,text)=>this.clipboard(id,text)};
     this.gateway=gatewayFactory({...gatewayOptions,supervisor:this.supervisor,noVncAssetsDir,prefix:'/browser/',completionDisposition:'retained',capabilities:{clipboard:'utf8'},maxProbes:1,promotionMs:120_000,onEnded:(session,status)=>this.ended(session,status)});
     this.rpc=new DesktopRpcServer({socketPath:this.socketPath,handler:(method,params,context)=>this.request(method,params,context),onDisconnect:keys=>this.disconnected(keys),onLockLost:()=>{this.poison();this.ready=false;void this.gateway.close();}});
   }
@@ -206,7 +206,22 @@ export class DesktopController {
       return this.registration(ownedId);
     }catch(error){row.reason ||= this.gateway.sessions.get(ownedId)?.reason||'promotion_failed';await this.retire(ownedId).catch(()=>{});throw new Error(this.gate.poisonReason||'Control acquisition failed');}
   }
-  async retire(id,{reconcile=false,reason}={}){
+  async demote({ownedId,probeId,reason}){
+    const row=this.ledger.leases[ownedId];
+    if(!row||probeId!==ownedId||!['watch','control'].includes(row.state))throw new Error('Viewer is unavailable');
+    await this.retire(ownedId,{resume:true});
+    try{
+      if(row.state!=='settled'||this.gateway.sessions.get(ownedId)?.mode!=='demoting')throw new Error('Viewer access ended');
+      row.state='starting';await this.persist();
+      const actor=await this.runtimeOperation(()=>this.runtime.startViewer({leaseId:ownedId,role:'watch',expiresAt:row.expiresAt}));
+      validateActor(actor,ownedId,'watch');
+      if(actor.epoch<=row.receipt.epoch||actor.displayGeneration!==row.displayGeneration||(actor.browserGeneration||actor.displayGeneration)!==row.browserGeneration)throw new Error('Viewer authority generation changed');
+      this.actors.set(ownedId,actor);row.epoch=actor.epoch;row.state='watch';row.mayBeWritable=false;await this.persist();
+      this.gate.release(ownedId);
+      return this.registration(ownedId);
+    }catch(error){row.reason ||= this.gateway.sessions.get(ownedId)?.reason||reason||'unexpected_disconnect';await this.retire(ownedId).catch(()=>{});throw new Error(this.gate.poisonReason||'Viewer could not return to watch');}
+  }
+  async retire(id,{reconcile=false,reason,resume=false}={}){
     const row=this.ledger.leases[id];if(!row)throw new Error('Unknown browser lease');
     if(row.state==='ended')return;
     if(reason)row.reason ||= reason;
@@ -229,6 +244,7 @@ export class DesktopController {
         if(observation?.snapshotObserved!==true||observation.displayGeneration!==receipt.displayGeneration||(receipt.browserGeneration&&observation.browserGeneration!==receipt.browserGeneration))throw new Error('Fresh browser observation was not proven');
         // Copy only nonsecret fence fields into the journal.
         row.receipt={leaseId:id,...Object.fromEntries(receiptFlags.map(key=>[key,true])),displayGeneration:receipt.displayGeneration,browserGeneration:observation.browserGeneration||receipt.displayGeneration,epoch:receipt.epoch,readOnly:false,inputResetRequired:true,snapshotObserved:true,...observedContext(observation)};}
+        if(resume){row.state='settled';delete row.recoveryStage;delete row.recoveryCode;recoveryCode='journal_persistence';await this.persist();this.actors.delete(id);return;}
         row.state='ended';delete row.recoveryStage;delete row.recoveryCode;row.completedAt=Date.now();row.reason||='ended';
         recoveryCode='journal_persistence';await this.persist();this.actors.delete(id);
         if(!reconcile)this.gate.release(id);

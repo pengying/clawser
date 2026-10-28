@@ -486,3 +486,41 @@ test('status never exposes an unrecognized or non-string recovery code from the 
     assert.equal(Object.hasOwn(c.status(row), 'recoveryCode'), false);
   }
 });
+
+test('a viewer drop during control fences and observes, then keeps the lease in watch until Done',async t=>{
+  const{controller:c,events}=await setup(t);
+  const lease=await c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30,targetId:'tab'});
+  const viewer=await viewerClient(t,c,lease);
+  const watching=await(await viewer.post('credentials')).json();await viewer.open(watching.generation);
+  const control=await(await viewer.post('control')).json();const controlSocket=await viewer.open(control.generation);
+  assert.equal(c.gate.holder,lease.id);
+  controlSocket.terminate();
+  for(let n=0;n<100&&c.gateway.sessions.get(lease.id).mode!=='watch';n++)await new Promise(resolve=>setTimeout(resolve,5));
+  const row=c.ledger.leases[lease.id];
+  assert.deepEqual(events,['watch','control','fence','observe','watch'],'the control actor is fully fenced and observed before a fresh watch actor starts');
+  assert.equal(row.state,'watch');assert.equal(row.mayBeWritable,false);assert.equal(row.receipt.snapshotObserved,true);assert.equal(row.receipt.heldInputCleared,true);
+  assert.equal(c.gate.holder,null,'settled control returns the gate as in the original watch state');
+  let status=await c.request('status',{owner,id:lease.id});
+  assert.equal(status.mode,'watch');assert.equal(status.resumeAllowed,false,'the handoff is still open');assert.equal(status.reason,undefined);
+  assert.deepEqual((await c.request('completions')).completions,[],'no completion wakes the agent');
+  const rewatch=await(await viewer.post('credentials')).json();assert.equal(rewatch.password,'watchpass');assert.ok(rewatch.generation>control.generation);
+  await viewer.open(rewatch.generation);
+  const again=await viewer.post('control');assert.equal(again.status,200);await viewer.open((await again.json()).generation);
+  assert.deepEqual(events.slice(5),['control']);
+  const done=await viewer.post('done');assert.deepEqual(await done.json(),{mode:'ended',reason:'done',disposition:'retained'});
+  status=await c.request('status',{owner,id:lease.id});assert.equal(status.resumeAllowed,true);assert.equal(status.reason,'done');
+  assert.deepEqual(events.slice(6),['fence','observe']);
+});
+
+test('a failed fence after a viewer drop ends the lease with recovery required',async t=>{
+  let fences=0;
+  const{controller:c}=await setup(t,{runtime:{stopViewerAndSettle:async({leaseId})=>{fences++;return{leaseId,vncProcessesExited:true};}}});
+  const lease=await c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30});
+  const viewer=await viewerClient(t,c,lease);
+  const watching=await(await viewer.post('credentials')).json();await viewer.open(watching.generation);
+  const control=await(await viewer.post('control')).json();(await viewer.open(control.generation)).terminate();
+  for(let n=0;n<100&&!['ended','cleanup_failed'].includes(c.gateway.sessions.get(lease.id).mode);n++)await new Promise(resolve=>setTimeout(resolve,5));
+  const status=await c.request('status',{owner,id:lease.id});
+  assert.equal(status.mode,'recovery_required');assert.equal(status.resumeAllowed,false);assert.equal(status.recoveryRequired,true);assert.ok(fences>=1);
+  await assert.rejects(c.request('automationEnter',{callKey:'blocked'}),/uncertain|recovery/i);
+});

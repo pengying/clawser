@@ -443,8 +443,7 @@ export class NoVncProbeGateway {
       if (upstream && !attached) upstream.destroy();
       if (session && reserved && !attached) {
         session.connecting = false;
-        const reason = session.mode === 'control-pending' ? 'promotion_failed' : 'unexpected_disconnect';
-        void this.end(session, reason);
+        void (session.mode === 'control-pending' ? this.end(session, 'promotion_failed') : this.demote(session, 'unexpected_disconnect'));
       }
     };
     socket.once('close', onRawClose);
@@ -506,7 +505,7 @@ export class NoVncProbeGateway {
         session.connecting = false;
         if (!['ending', 'ended', 'cleanup_failed'].includes(session.mode)) {
           const reason = session.mode === 'control-pending' ? 'promotion_failed' : error.status === 499 ? 'unexpected_disconnect' : 'stream_failed';
-          void this.end(session, reason);
+          void (reason === 'unexpected_disconnect' ? this.demote(session, reason) : this.end(session, reason));
         }
       }
       rejectUpgrade(socket, error.status || 500, error.status ? error.message : 'Upgrade failed');
@@ -534,7 +533,7 @@ export class NoVncProbeGateway {
       session.mode = 'control';
     }
     let settled = false;
-    const unexpected = () => {
+    const unexpected = (viewer) => () => {
       if (settled) return;
       settled = true;
       const clear = () => {
@@ -543,7 +542,7 @@ export class NoVncProbeGateway {
         upstream.destroy();
       };
       if (ws.expectedClose || ['ending', 'ended', 'cleanup_failed'].includes(session.mode)) { clear(); return; }
-      void this.end(session, 'unexpected_disconnect').finally(clear);
+      void (viewer ? this.demote(session, 'unexpected_disconnect') : this.end(session, 'unexpected_disconnect')).finally(clear);
     };
     upstream.on('data', (chunk) => {
       if (ws.readyState !== WebSocket.OPEN) return;
@@ -554,8 +553,8 @@ export class NoVncProbeGateway {
       ws.send(chunk, { binary: true }, () => upstream.resume?.());
       this.observeBuffer(session, ws);
     });
-    upstream.once('error', unexpected);
-    upstream.once('close', unexpected);
+    upstream.once('error', unexpected(false));
+    upstream.once('close', unexpected(false));
     ws.on('message', (data, isBinary) => {
       if (!isBinary || upstream.destroyed) { ws.close(1003, 'binary RFB required'); return; }
       session.transport.viewerBytesReceived = Math.min(Number.MAX_SAFE_INTEGER, session.transport.viewerBytesReceived + data.byteLength);
@@ -564,8 +563,32 @@ export class NoVncProbeGateway {
         upstream.once('drain', () => ws._socket?.resume());
       }
     });
-    ws.once('error', unexpected);
-    ws.once('close', unexpected);
+    ws.once('error', unexpected(true));
+    ws.once('close', unexpected(true));
+  }
+
+  demote(session, reason) {
+    if (session.mode === 'demoting') return session.demoteDone;
+    if (!['watch', 'control'].includes(session.mode) || typeof this.supervisor.demote !== 'function' || this.closed) return this.end(session, reason);
+    session.mode = 'demoting';
+    session.generation++;
+    if (session.socket) { session.socket.expectedClose = true; session.socket.terminate(); }
+    session.upstream?.destroy();
+    session.socket = session.upstream = undefined;
+    const work = (async () => {
+      await Promise.allSettled([...session.clipboardWork]);
+      const registration = validRegistration(await this.supervisor.demote({ ownedId: session.ownedId, probeId: session.id, expiresAt: session.expiresAt, reason }));
+      if (session.mode !== 'demoting') return;
+      session.endpoint = registration.endpoint; session.credentials = registration.credentials;
+      session.mode = 'watch';
+    })();
+    session.demoteWork = work;
+    // runCleanup awaits demoteWork, never demoteDone, which itself calls end().
+    session.demoteDone = work.catch(() => {}).then(() => {
+      if (session.demoteWork === work) session.demoteWork = undefined;
+      if (session.mode === 'demoting') return this.end(session, reason);
+    });
+    return session.demoteDone;
   }
 
   heartbeat() {
@@ -607,6 +630,7 @@ export class NoVncProbeGateway {
       let verified = false;
       try { await this.supervisor.cancelPromotion?.(session.ownedId); } catch {}
       await session.promotionWork?.catch(() => {});
+      await session.demoteWork?.catch(() => {});
       await Promise.allSettled([...session.clipboardWork]);
       try { await this.supervisor.destroy(session.ownedId, { reason: session.reason }); } catch {}
       try { verified = await this.supervisor.verifyExited(session.ownedId) === true; } catch {}
