@@ -16,8 +16,12 @@ not supported by this first validated installer.
 
 ## ClawHub installation
 
+ClawHub currently serves v0.3.5. The v0.4.1 upload is waiting on a registry
+scanner execution error. Use the tagged Git installation below for v0.4.1's
+owner-requested group handoffs, recovery tooling and viewer fixes.
+
 ```sh
-openclaw plugins install clawhub:@pengying/clawser@0.4.1 --accept-capabilities
+openclaw plugins install clawhub:@pengying/clawser@0.3.5 --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup
 openclaw clawser doctor
