@@ -153,7 +153,8 @@ export class DesktopRuntime {
       return {name:this.name,cdpUrl:this.cdpUrl,persistent:true};
     });
   }
-  status() {return this.rpc('status');}
+  // Read-only health checks must not contend with input retirement.
+  status() {return this.rpcDirect('status');}
   async tabs() {await this.owned(); const response = await fetch(this.cdpUrl + '/json/list',{signal:AbortSignal.timeout(5000)}); if(!response.ok) throw new Error('CDP tabs unavailable'); return response.json();}
   async startViewer({leaseId,role='watch',expiresAt}) {const result = await this.rpc('startViewer',{leaseId,role,expiresAt}); return {...result,host:'127.0.0.1',port:this.vncPort};}
   async promoteViewer({leaseId}) {const result = await this.rpc('promoteViewer',{leaseId}); return {...result,host:'127.0.0.1',port:this.vncPort};}
