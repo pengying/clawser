@@ -1,5 +1,11 @@
 # Changes
 
+## 0.4.0
+
+- Add explicit owner-authorized group handoffs with native sender and conversation checks; private access remains the default.
+- Share existing browser tabs through optional Cloudflare transport and preserve healthy service ownership during cold tool discovery.
+- Document group delivery scope and the existing-tab completion contract.
+
 ## 0.3.5
 
 - Simplify JavaScript string construction and input-operation definitions for complete SkillSpector inspection.
