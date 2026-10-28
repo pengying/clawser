@@ -8,6 +8,8 @@ const requestTimeoutMs = 12_000;
 const assetTimeoutMs = 12_000;
 const connectTimeoutMs = 12_000;
 const promotionDisconnectMs = 3_000;
+const reconnectDelayMs = 5_000;
+const accessGone = new Set([401, 403, 404, 410]);
 let invite = new URLSearchParams(location.hash.slice(1)).get('invite');
 let RFB;
 let activeConnection;
@@ -17,6 +19,8 @@ let cleanupVerified = false;
 let cleanupInFlight;
 let failureTask;
 let controlReady = false;
+let reconnecting = false;
+let expiresAt = 0;
 let remoteClipboard = '';
 const viewport = document.getElementById('viewport');
 const stage = document.getElementById('stage');
@@ -53,11 +57,41 @@ async function post(action, data = {}) {
   try { body = await withDeadline(response.json(), requestTimeoutMs, `${action} response timed out`); }
   catch { throw new Error(action + ' response could not be read'); }
   if (!response.ok) {
-    throw new Error(body.mode === 'cleanup_failed'
+    throw Object.assign(new Error(body.mode === 'cleanup_failed'
       ? 'Cleanup could not be verified. Access remains disabled.'
-      : body.error || 'The disposable session ended');
+      : body.error || 'The disposable session ended'), { status: response.status });
   }
   return body;
+}
+
+async function watchCredentials(retryNetwork) {
+  for (;;) {
+    try { return await post('credentials'); }
+    catch (error) {
+      if (accessEnded || accessGone.has(error.status) || (!error.status && (!retryNetwork || Date.now() >= expiresAt))) throw error;
+    }
+    status.textContent = 'Reconnecting in watch mode…';
+    await new Promise(resolve => setTimeout(resolve, reconnectDelayMs));
+    if (accessEnded) throw new Error('Viewer access has ended');
+  }
+}
+
+async function reconnectWatch() {
+  if (reconnecting || accessEnded) return;
+  reconnecting = true;
+  status.textContent = 'Connection interrupted. Reconnecting in watch mode…';
+  mode.textContent = 'Private watch session';
+  try {
+    for (;;) {
+      const config = await watchCredentials(true);
+      if (accessEnded) return;
+      try { await openConnection(config).ready; return; }
+      catch (error) { if (accessEnded || Date.now() >= expiresAt) throw error; }
+      await new Promise(resolve => setTimeout(resolve, reconnectDelayMs));
+    }
+  } catch (error) {
+    if (!accessEnded) await failAndCleanup(accessGone.has(error.status) ? 'Viewer access ended.' : error.message);
+  } finally { reconnecting = false; }
 }
 
 function streamUrl(generation) {
@@ -67,6 +101,7 @@ function streamUrl(generation) {
 
 function openConnection(config) {
   if (accessEnded) throw new Error('Viewer access has ended');
+  if (config.expiresAt) expiresAt = config.expiresAt;
   status.textContent = config.mode === 'watch' ? 'Connecting in watch mode…' : 'Connecting with control…';
   const instance = new RFB(screen, streamUrl(config.generation), { credentials: { password: config.password } });
   instance.scaleViewport = true;
@@ -106,7 +141,7 @@ function openConnection(config) {
     control.disabled = true;
     disconnectedResolve();
     if (!connected) readyReject(new Error('The VNC connection closed before it became ready'));
-    else if (!connection.retiring && !promoting && !accessEnded) void failAndCleanup('The VNC connection ended unexpectedly.');
+    else if (!connection.retiring && !promoting && !accessEnded) void reconnectWatch();
   }, { once: true });
   connection.ready = withDeadline(readyEvent, connectTimeoutMs, 'The VNC connection did not become ready in time').catch((error) => {
     connection.retiring = true;
@@ -195,8 +230,10 @@ done.addEventListener('click', async () => {
 
 async function bootstrap() {
   try {
+    let claimError;
     if (invite) {
-      await post('claim', { token: invite });
+      try { await post('claim', { token: invite }); }
+      catch (error) { if (error.status !== 401) throw error; claimError = error; }
       invite = undefined;
     }
     if (accessEnded) return;
@@ -204,7 +241,7 @@ async function bootstrap() {
     if (typeof module.default !== 'function') throw new Error('Viewer assets are invalid');
     RFB = module.default;
     if (accessEnded) return;
-    const config = await post('credentials');
+    const config = await watchCredentials(false).catch((error) => { throw claimError && error.status === 401 ? claimError : error; });
     if (accessEnded) return;
     const connection = openConnection(config);
     await connection.ready;

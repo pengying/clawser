@@ -47,6 +47,12 @@ class FakeSupervisor {
     if (this.destroyError) throw new Error('destroy acknowledgement lost');
   }
   async verifyExited(ownedId) { this.calls.push(['verifyExited', ownedId]); return this.verify; }
+  async demote({ ownedId, reason }) {
+    this.calls.push(['demote', ownedId, reason]);
+    if (this.demoteError) throw new Error('settlement not proven');
+    this.credentials = { watch: `watch${this.calls.length}`.padEnd(8, '0'), control: 'admin456' };
+    return { endpoint: { ...this.endpoint }, credentials: { ...this.credentials } };
+  }
 }
 
 async function setup(t, options = {}) {
@@ -194,6 +200,23 @@ async function socketOutcome(socket) {
     once(socket, 'open').then(() => ({ status: 101, socket })),
     once(socket, 'unexpected-response').then(([, response]) => { response.resume(); return { status: response.statusCode, socket }; }),
   ]);
+}
+
+async function controlling(ctx, cookie) {
+  const watch = openSocket(ctx, cookie, (await credentials(ctx, cookie)).body.generation);
+  assert.equal((await socketOutcome(watch)).status, 101);
+  const watchClosed = once(watch, 'close');
+  const promoted = await (await ctx.post('control', {}, cookie)).json();
+  await watchClosed;
+  const control = openSocket(ctx, cookie, promoted.generation);
+  assert.equal((await socketOutcome(control)).status, 101);
+  assert.equal(ctx.gateway.status(ctx.invite.id).mode, 'control');
+  return { control, generation: promoted.generation };
+}
+
+async function settledToWatch(ctx) {
+  for (let n = 0; n < 50 && ctx.gateway.status(ctx.invite.id).mode !== 'watch'; n++) await pause(5);
+  assert.equal(ctx.gateway.status(ctx.invite.id).mode, 'watch');
 }
 
 test('creation registers only the fixed owned loopback endpoint and returns a secret in the fragment', async (t) => {
@@ -442,8 +465,8 @@ test('a raw viewer that leaves during upstream connect cannot leak the late sock
   for (let n = 0; n < 30 && !late.destroyed; n++) await pause(5);
   assert.equal(late.destroyed, true);
   assert.equal(ctx.gateway.sessions.get(ctx.invite.id).connecting, false);
-  for (let n = 0; n < 30 && ctx.gateway.status(ctx.invite.id).mode !== 'ended'; n++) await pause(5);
-  assert.equal(ctx.gateway.status(ctx.invite.id).mode, 'ended');
+  await settledToWatch(ctx);
+  assert.deepEqual(ctx.supervisor.calls.filter(([name]) => name === 'demote').map(([, , reason]) => reason), ['unexpected_disconnect']);
 });
 
 test('a malformed WebSocket handshake cannot leak its connected VNC upstream', async (t) => {
@@ -468,8 +491,8 @@ test('a malformed WebSocket handshake cannot leak its connected VNC upstream', a
   for (let n = 0; n < 30 && !ctx.sockets[0]?.destroyed; n++) await pause(5);
   assert.equal(ctx.sockets[0]?.destroyed, true);
   assert.equal(ctx.gateway.sessions.get(ctx.invite.id).connecting, false);
-  for (let n = 0; n < 30 && ctx.gateway.status(ctx.invite.id).mode !== 'ended'; n++) await pause(5);
-  assert.equal(ctx.gateway.status(ctx.invite.id).mode, 'ended');
+  await settledToWatch(ctx);
+  assert.equal(ctx.gateway.sessions.get(ctx.invite.id).socket, undefined);
   raw.destroy();
 });
 
@@ -504,8 +527,8 @@ test('a failed promotion deadline destroys the owned server', async (t) => {
   assert.deepEqual(ctx.supervisor.calls.slice(-2).map(([name]) => name), ['destroy', 'verifyExited']);
 });
 
-test('expiry, Done, and unexpected disconnect destroy and verify the exact owned server', async (t) => {
-  for (const ending of ['expiry', 'done', 'disconnect']) {
+test('expiry and Done destroy and verify the exact owned server', async (t) => {
+  for (const ending of ['expiry', 'done']) {
     let time = 10_000;
     const ctx = await setup(t, { now: () => time });
     const cookie = await claim(ctx);
@@ -513,13 +536,10 @@ test('expiry, Done, and unexpected disconnect destroy and verify the exact owned
     const ws = openSocket(ctx, cookie);
     await socketOutcome(ws);
     if (ending === 'expiry') { time = ctx.invite.expiresAt + 1; await ctx.gateway.sweep(); }
-    else if (ending === 'done') {
+    else {
       const response = await ctx.post('done', {}, cookie);
       assert.equal(response.status, 200);
       assert.deepEqual(await response.json(), { mode: 'ended', reason: 'done' });
-    } else {
-      ws.terminate();
-      for (let n = 0; n < 30 && ctx.gateway.status(ctx.invite.id).mode !== 'ended'; n++) await new Promise((resolve) => setTimeout(resolve, 5));
     }
     assert.equal(ctx.gateway.status(ctx.invite.id).mode, 'ended', ending);
     const ownedId = `owned-${ctx.invite.id}`;
@@ -527,6 +547,110 @@ test('expiry, Done, and unexpected disconnect destroy and verify the exact owned
     assert.equal((await ctx.post('credentials', {}, cookie)).status, 410);
     ws.terminate();
   }
+});
+
+test('an unexpected viewer disconnect during control settles the actor and keeps the invitation in watch', async (t) => {
+  let time = 10_000;
+  const ctx = await setup(t, { now: () => time }), cookie = await claim(ctx), ownedId = `owned-${ctx.invite.id}`;
+  const { control, generation } = await controlling(ctx, cookie);
+  const upstream = ctx.sockets.at(-1);
+  control.terminate();
+  await settledToWatch(ctx);
+  assert.equal(upstream.destroyed, true, 'the control VNC connection is torn down');
+  assert.deepEqual(ctx.supervisor.calls.filter(([name]) => ['demote', 'destroy', 'verifyExited'].includes(name)), [['demote', ownedId, 'unexpected_disconnect']], 'the actor is settled without ending the handoff');
+  assert.equal(ctx.gateway.status(ctx.invite.id).reason, undefined, 'the session is not ended');
+  assert.equal((await socketOutcome(openSocket(ctx, cookie, generation))).status, 409, 'the old control generation cannot reconnect');
+  assert.equal((await ctx.post('clipboard', { action: 'read' }, cookie)).status, 409, 'control-only actions are fenced');
+
+  const watch = await credentials(ctx, cookie);
+  assert.equal(watch.response.status, 200, 'the same viewer cookie still authenticates');
+  assert.equal(watch.body.mode, 'watch');
+  assert.equal(watch.body.password, ctx.supervisor.credentials.watch, 'the fresh watch actor credential is returned');
+  assert.equal(JSON.stringify(watch.body).includes('admin456'), false);
+  assert.ok(watch.body.generation > generation);
+  const rewatch = openSocket(ctx, cookie, watch.body.generation);
+  assert.equal((await socketOutcome(rewatch)).status, 101, 'the viewer reconnects in watch mode');
+  assert.equal(ctx.gateway.status(ctx.invite.id).mode, 'watch', 'reconnecting never restores control');
+
+  const rewatchClosed = once(rewatch, 'close');
+  const again = await ctx.post('control', {}, cookie);
+  assert.equal(again.status, 200, 'an explicit Take control works again');
+  const promoted = await again.json();
+  await rewatchClosed;
+  const recontrol = openSocket(ctx, cookie, promoted.generation);
+  assert.equal((await socketOutcome(recontrol)).status, 101);
+  assert.equal(ctx.gateway.status(ctx.invite.id).mode, 'control');
+
+  recontrol.terminate();
+  await settledToWatch(ctx);
+  time = ctx.invite.expiresAt + 1;
+  await ctx.gateway.sweep();
+  assert.equal(ctx.gateway.status(ctx.invite.id).mode, 'ended', 'absolute expiry still ends a demoted handoff');
+  assert.equal(ctx.gateway.status(ctx.invite.id).reason, 'expired');
+  assert.deepEqual(ctx.supervisor.calls.slice(-2), [['destroy', ownedId], ['verifyExited', ownedId]]);
+  assert.equal((await ctx.post('credentials', {}, cookie)).status, 410);
+});
+
+test('Done after a viewer disconnect still ends the handoff', async (t) => {
+  const ctx = await setup(t), cookie = await claim(ctx), ownedId = `owned-${ctx.invite.id}`;
+  const { control } = await controlling(ctx, cookie);
+  control.terminate();
+  await settledToWatch(ctx);
+  const response = await ctx.post('done', {}, cookie);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { mode: 'ended', reason: 'done' });
+  assert.deepEqual(ctx.supervisor.calls.slice(-2), [['destroy', ownedId], ['verifyExited', ownedId]]);
+  assert.equal((await ctx.post('credentials', {}, cookie)).status, 410);
+  assert.equal((await socketOutcome(openSocket(ctx, cookie, ctx.gateway.sessions.get(ctx.invite.id).generation))).status, 410);
+});
+
+test('Done and expiry during an in-flight demotion end the handoff after the settlement', async (t) => {
+  for (const ending of ['done', 'expiry']) {
+    let time = 10_000, finishDemote, demoteStarted;
+    const held = new Promise((resolve) => { finishDemote = resolve; }), started = new Promise((resolve) => { demoteStarted = resolve; });
+    const supervisor = new FakeSupervisor();
+    const demote = supervisor.demote.bind(supervisor);
+    supervisor.demote = async (params) => { demoteStarted(); await held; return demote(params); };
+    const ctx = await setup(t, { supervisor, now: () => time }), cookie = await claim(ctx);
+    const { control } = await controlling(ctx, cookie);
+    control.terminate();
+    await started;
+    assert.equal(ctx.gateway.status(ctx.invite.id).mode, 'demoting');
+    assert.equal((await ctx.post('credentials', {}, cookie)).status, 409, 'no credentials while the actor is settling');
+    let finished = false;
+    const ended = (ending === 'done' ? ctx.post('done', {}, cookie) : (time = ctx.invite.expiresAt + 1, ctx.gateway.sweep())).then((value) => { finished = true; return value; });
+    await pause(20);
+    assert.equal(finished, false, `${ending} waits for the in-flight settlement`);
+    assert.equal(supervisor.calls.some(([name]) => name === 'destroy'), false, 'cleanup does not race the settlement');
+    finishDemote();
+    await ended;
+    assert.equal(ctx.gateway.status(ctx.invite.id).mode, 'ended', ending);
+    assert.equal(ctx.gateway.status(ctx.invite.id).reason, ending === 'done' ? 'done' : 'expired');
+    assert.deepEqual(supervisor.calls.slice(-2).map(([name]) => name), ['destroy', 'verifyExited']);
+  }
+});
+
+test('a failed settlement on disconnect ends the handoff instead of returning to watch', async (t) => {
+  const supervisor = new FakeSupervisor();
+  supervisor.demoteError = true;
+  const ctx = await setup(t, { supervisor }), cookie = await claim(ctx);
+  const { control } = await controlling(ctx, cookie);
+  control.terminate();
+  for (let n = 0; n < 50 && ctx.gateway.status(ctx.invite.id).mode !== 'ended'; n++) await pause(5);
+  assert.equal(ctx.gateway.status(ctx.invite.id).mode, 'ended');
+  assert.equal(ctx.gateway.status(ctx.invite.id).reason, 'unexpected_disconnect');
+  assert.deepEqual(supervisor.calls.slice(-2).map(([name]) => name), ['destroy', 'verifyExited']);
+});
+
+test('without a supervisor demote, an unexpected disconnect still ends the handoff', async (t) => {
+  const supervisor = new FakeSupervisor();
+  supervisor.demote = undefined;
+  const ctx = await setup(t, { supervisor }), cookie = await claim(ctx);
+  const { control } = await controlling(ctx, cookie);
+  control.terminate();
+  for (let n = 0; n < 50 && ctx.gateway.status(ctx.invite.id).mode !== 'ended'; n++) await pause(5);
+  assert.equal(ctx.gateway.status(ctx.invite.id).mode, 'ended');
+  assert.equal(ctx.gateway.status(ctx.invite.id).reason, 'unexpected_disconnect');
 });
 
 test('cleanup verification failure retains fault ownership and permanently denies access', async (t) => {
@@ -610,15 +734,17 @@ test('viewer serves pinned noVNC with local scaling, explicit clipboard controls
   assert.match(await styleResponse.text(), /touch-action/);
 });
 
-test('an inactive WebSocket is detected and destroys the owned VNC server', async (t) => {
+test('an inactive WebSocket is detected and settles the owned VNC actor back to watch', async (t) => {
   const ctx = await setup(t, { heartbeatMs: 20 }), cookie = await claim(ctx);
   await credentials(ctx, cookie);
   const ws = openSocket(ctx, cookie);
   assert.equal((await socketOutcome(ws)).status, 101);
   ws._socket.pause();
-  for (let n = 0; n < 50 && ctx.gateway.status(ctx.invite.id).mode !== 'ended'; n++) await pause(10);
-  assert.equal(ctx.gateway.status(ctx.invite.id).mode, 'ended');
-  assert.equal(ctx.gateway.status(ctx.invite.id).reason, 'unexpected_disconnect');
+  for (let n = 0; n < 50 && !ctx.supervisor.calls.some(([name]) => name === 'demote'); n++) await pause(10);
+  await settledToWatch(ctx);
+  assert.equal(ctx.sockets[0].destroyed, true);
+  assert.equal(ctx.gateway.sessions.get(ctx.invite.id).socket, undefined);
+  assert.deepEqual(ctx.supervisor.calls.filter(([name]) => name === 'demote').map(([, , reason]) => reason), ['unexpected_disconnect']);
   ws._socket.resume();
 });
 
@@ -718,11 +844,17 @@ async function openProbeFixture(t, options = {}) {
         claimCalls: 0, credentialCalls: 0, controlCalls: 0, doneCalls: 0, rfbs: [] };
       window.fetch = async (url, init = {}) => {
         const action = String(url).split('/').at(-1);
-        if (action === 'claim') { fixture.claimCalls++; return response({ mode: 'watch' }); }
+        if (action === 'claim') {
+          fixture.claimCalls++;
+          if (config.claimReused) return response({ error: 'Invalid, claimed, or expired invitation' }, 401);
+          return response({ mode: 'watch' });
+        }
         if (action === 'credentials') {
           fixture.credentialCalls++;
           if (config.stallCredentials) return hang(init);
-          return response({ mode: 'watch', password: 'watch123', generation: 0, expiresAt: Date.now() + 60000 });
+          if (config.credentialsGone && fixture.credentialCalls > 1) return response({ error: 'Probe access ended' }, 410);
+          if (fixture.credentialCalls > 1 && fixture.credentialCalls <= 1 + (config.credentialsDemoting || 0)) return response({ error: 'Credentials are unavailable in this state' }, 409);
+          return response({ mode: 'watch', password: 'watch123', generation: fixture.credentialCalls * 2, expiresAt: Date.now() + 60000 });
         }
         if (action === 'control') {
           fixture.controlCalls++;
@@ -746,6 +878,7 @@ async function openProbeFixture(t, options = {}) {
         window.fixture.deadlinePhase = 'vnc';
         if (!window.fixture.config.stallConnect && !(window.fixture.config.stallReplacementConnect && index > 0)) setTimeout(() => this.dispatchEvent(new Event('connect')), 0);
       }
+      drop() { this.dispatchEvent(new Event('disconnect')); }
       disconnect() {
         window.fixture.disconnectCalls = (window.fixture.disconnectCalls || 0) + 1;
         if (!window.fixture.config.stallDisconnect) setTimeout(() => this.dispatchEvent(new Event('disconnect')), 0);
@@ -865,4 +998,34 @@ test('stalled control VNC readiness is bounded after the one permitted replaceme
   await evaluate('document.querySelector("#control").click()');
   await waitFor('fixture.rfbs.length === 2 && fixture.doneCalls === 1 && /destroyed/i.test(document.querySelector("#status").textContent)', 'late control readiness triggered verified cleanup');
   assert.equal(await evaluate('fixture.rfbs.length'), 2, 'only the bounded promotion replacement was created');
+});
+
+test('an unexpected drop reconnects in watch mode with the same cookie and requires Take control again', { skip: !existsSync(chromePath) }, async (t) => {
+  const { evaluate, waitFor } = await openProbeFixture(t, { signalPromotionClose: true, credentialsDemoting: 2 });
+  await waitFor('fixture.rfbs.length === 1 && document.querySelector("#control").disabled === false', 'watch connection became ready');
+  await evaluate('document.querySelector("#control").click()');
+  await waitFor('fixture.rfbs.length === 2 && /Control connected/.test(document.querySelector("#status").textContent)', 'control connected');
+  await evaluate('fixture.rfbs[1].drop()');
+  await waitFor('/Reconnecting in watch mode/.test(document.querySelector("#status").textContent)', 'drop shows a watch reconnect');
+  assert.equal(await evaluate('document.querySelector("#control").disabled'), true, 'control is disabled while reconnecting');
+  await waitFor('fixture.rfbs.length === 3 && /Watching/.test(document.querySelector("#status").textContent)', 'reconnected after the server finished settling');
+  assert.deepEqual(await evaluate('({ claims: fixture.claimCalls, credentials: fixture.credentialCalls, controls: fixture.controlCalls, cleanups: fixture.doneCalls, viewOnly: fixture.rfbs[2].viewOnly })'),
+    { claims: 1, credentials: 4, controls: 1, cleanups: 0, viewOnly: true }, 'the reconnect is watch-only, never replays claim or control, and does not end the handoff');
+  assert.equal(await evaluate('document.querySelector("#control").disabled'), false, 'Take control is offered again');
+  assert.equal(await evaluate('document.querySelector("#keyboard").disabled'), true, 'remote input stays off until control is retaken');
+});
+
+test('a reopened claimed link resumes in watch mode with its existing cookie', { skip: !existsSync(chromePath) }, async (t) => {
+  const { evaluate, waitFor } = await openProbeFixture(t, { claimReused: true });
+  await waitFor('fixture.rfbs.length === 1 && /Watching/.test(document.querySelector("#status").textContent)', 'reopened link resumed with the cookie');
+  assert.deepEqual(await evaluate('({ claims: fixture.claimCalls, cleanups: fixture.doneCalls })'), { claims: 1, cleanups: 0 });
+});
+
+test('a drop after the handoff ended stops reconnecting and confirms cleanup', { skip: !existsSync(chromePath) }, async (t) => {
+  const { evaluate, waitFor } = await openProbeFixture(t, { credentialsGone: true });
+  await waitFor('fixture.rfbs.length === 1 && document.querySelector("#control").disabled === false', 'watch connection became ready');
+  await evaluate('fixture.rfbs[0].drop()');
+  await waitFor('fixture.doneCalls === 1 && /destroyed/i.test(document.querySelector("#status").textContent)', 'ended access is confirmed instead of retried');
+  await pause(150);
+  assert.deepEqual(await evaluate('({ rfbs: fixture.rfbs.length, credentials: fixture.credentialCalls })'), { rfbs: 1, credentials: 2 }, 'no reconnect after a definitive refusal');
 });

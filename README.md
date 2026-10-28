@@ -93,7 +93,10 @@ Deliver links privately by default and keep them out of logs, issues, other chat
 and durable agent memory.
 
 Invitations expire after **five minutes by default**, configurable from 30 to
-1800 seconds. Done, revocation, disconnect or absolute expiry ends viewer access.
+1800 seconds. Done, revocation or absolute expiry ends viewer access. A viewer
+disconnect, such as a phone switching apps for a 2FA code, releases control and
+keeps the invitation in watch mode until expiry. noVNC settles input with the
+full fence first. Control needs **Take control** again.
 There is **no human-inactivity timeout**. A dropped connection may take a
 heartbeat interval to detect. First-link tunnel readiness can take up to 90
 seconds. Ending a handoff leaves the browser, tabs, cookies and profile intact;

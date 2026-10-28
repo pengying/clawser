@@ -28,8 +28,11 @@ Control invitations begin in watch mode and require explicit takeover. Reopening
 a link in the same browser may reuse its authenticated cookie until the original
 expiry; it does not renew the lifetime. The default lifetime is 300 seconds,
 configurable from 30 to 1800 seconds. There is no human-inactivity timeout.
-Done, revocation, disconnect or absolute expiry retires viewer access while
-preserving the browser, tabs, cookies and profile.
+Done, revocation or absolute expiry retires viewer access while preserving the
+browser, tabs, cookies and profile. A viewer disconnect releases control but
+keeps the same viewer cookie valid in watch mode until the original expiry.
+noVNC first fences and settles input exactly as retirement does. Control again
+requires explicit takeover.
 
 Private owner conversations are the default. Exact `ownerGroupSessions` entries
 may authorize native verified owner turns in groups. Only an explicit owner
