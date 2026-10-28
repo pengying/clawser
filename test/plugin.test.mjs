@@ -218,7 +218,7 @@ function discover(f) {
   createPlugin().register({ ...f.api, registrationMode: 'tool-discovery', registerTool: tool => tools.push(tool) });
   return tools[0].create(f.ctx);
 }
-test('Cloudflare existing-browser readiness uses its asset and publishes only after allocation', async t => {
+test('Cloudflare startup completes before network readiness and create waits for its owned public origin', async t => {
   let options, port, ready;
   const transport = new EventEmitter();
   transport.ensure = value => { port = value; return new Promise(resolve => { ready = resolve; }); };
@@ -237,9 +237,17 @@ test('Cloudflare existing-browser readiness uses its asset and publishes only af
   assert.equal(options.binaryPath, '/fixture/cloudflared');
   assert.equal(port, Number(new URL(f.getServer().localUrl).port));
   assert.equal(f.getServer().publicBaseUrl, undefined);
-  await assert.rejects(discover(f).execute('tabs', { action: 'tabs' }), /unavailable/);
-  ready('https://fixture.trycloudflare.com'); await started;
-  const tool = discover(f), created = await tool.execute('create', { action: 'create', profile: 'demo', targetId: 'tab' });
+  const activation = await Promise.race([started.then(() => 'started'), new Promise(resolve => setTimeout(() => resolve('blocked'), 50))]);
+  assert.equal(activation, 'started', 'service.start must not wait for public network readiness');
+  const tool = discover(f);
+  assert.deepEqual((await tool.execute('tabs', { action: 'tabs' })).details.profiles, ['demo']);
+  let delivered = false;
+  const creating = tool.execute('create', { action: 'create', profile: 'demo', targetId: 'tab' }).then(value => { delivered = true; return value; });
+  await new Promise(setImmediate);
+  assert.equal(delivered, false);
+  assert.equal(f.getServer().store.shares.size, 0);
+  ready('https://fixture.trycloudflare.com');
+  const created = await creating;
   assert.match(created.details.url, /^https:\/\/fixture.trycloudflare.com\/s\//);
   transport.emit('failure', new Error('owned tunnel stopped'));
   assert.equal(f.getServer().publicBaseUrl, undefined);
@@ -247,7 +255,7 @@ test('Cloudflare existing-browser readiness uses its asset and publishes only af
   await assert.rejects(tool.execute('tabs', { action: 'tabs' }), /unavailable|running/);
 });
 
-test('Cloudflare and Funnel cannot both be enabled and failure cleans owned resources', async () => {
+test('Cloudflare and Funnel cannot both be enabled and background failure retires owned transport', async t => {
   let constructed = false;
   const conflict = setup({ cloudflareFactory() { constructed = true; }, funnelFactory: () => ({ open: async () => 'https://fixture.example', close: async () => {} }) });
   conflict.api.pluginConfig.cloudflare = { enabled: true, binaryPath: '/fixture/cloudflared' };
@@ -257,8 +265,9 @@ test('Cloudflare and Funnel cannot both be enabled and failure cleans owned reso
   let closed = false;
   const failed = setup({ cloudflareFactory: () => ({ on() {}, ensure: async () => { throw new Error('allocation failed'); }, close: async () => { closed = true; } }) });
   failed.api.pluginConfig.cloudflare = { enabled: true, binaryPath: '/fixture/cloudflared' };
-  await assert.rejects(failed.services[0].start({ stateDir: tmpdir() }), /allocation failed/);
-  assert.equal(closed, true); assert.equal(failed.getServer().server.listening, false);
+  await failed.services[0].start({ stateDir: tmpdir() }); t.after(() => failed.services[0].stop());
+  await new Promise(setImmediate);
+  assert.equal(closed, true); assert.equal(failed.getServer().publicBaseUrl, undefined);
   await assert.rejects(discover(failed).execute('tabs', { action: 'tabs' }), /unavailable/);
 });
 
@@ -272,7 +281,9 @@ test('stop during existing-browser transport startup prevents late publication',
   assert.ok(ready, 'transport allocation must begin');
   await f.services[0].stop();
   ready('https://old.trycloudflare.com');
-  await assert.rejects(start, /changed|stopped/);
+  await start;
+  await new Promise(setImmediate);
+  assert.equal(f.getServer().publicBaseUrl, undefined);
   await assert.rejects(discover(f).execute('tabs', { action: 'tabs' }), /unavailable/);
 });
 
@@ -315,4 +326,65 @@ test('stopped or superseded existing-browser services cannot return late browser
   const pending = f.tools[0].create(f.ctx).execute('tabs', { action: 'tabs', profile: 'demo' });
   await f.services[0].stop(); release([{ targetId: 'stale' }]);
   await assert.rejects(pending, /running|changed|unavailable/i);
+});
+
+test('Cloudflare warmup waits cancel per invocation and old completion cannot publish after stop', async t => {
+  let ready, options;
+  const transport = new EventEmitter(); transport.ensure = () => new Promise(resolve => { ready = resolve; }); transport.close = async () => {};
+  const f = setup({ cloudflareFactory: value => { options = value; return transport; } });
+  f.api.pluginConfig.cloudflare = { enabled: true, binaryPath: '/fixture/cloudflared' };
+  const started = f.services[0].start({ stateDir: tmpdir() }); t.after(() => f.services[0].stop());
+  for (let i = 0; i < 100 && !ready; i++) await new Promise(setImmediate);
+  assert.ok(ready);
+  const activation = await Promise.race([started.then(() => 'started'), new Promise(resolve => setTimeout(() => resolve('blocked'), 50))]);
+  assert.equal(activation, 'started');
+  assert.equal(options.startupTimeoutMs, 90_000);
+  const abort = new AbortController();
+  const canceled = discover(f).execute('create', { action: 'create', profile: 'demo', targetId: 'tab' }, abort.signal);
+  abort.abort(); await assert.rejects(canceled, /cancel|abort/i);
+  const retained = { ...f.ctx };
+  const stale = f.tools[0].create(retained).execute('create', { action: 'create', profile: 'demo', targetId: 'tab' });
+  retained.assertInvocationCurrent = () => { throw new Error('stale invocation'); };
+  const staleRejected = assert.rejects(stale, /stale|stopped|running|changed/i);
+  const stopping = discover(f).execute('create', { action: 'create', profile: 'demo', targetId: 'tab' });
+  const stopped = assert.rejects(stopping, /stopped|running|changed|cancel/i);
+  await f.services[0].stop();
+  await stopped;
+  const nextTransport = new EventEmitter();
+  nextTransport.ensure = async () => 'https://replacement.trycloudflare.com'; nextTransport.close = async () => {};
+  const replacement = setup({ cloudflareFactory: () => nextTransport });
+  replacement.api.pluginConfig.cloudflare = { ...f.api.pluginConfig.cloudflare };
+  await replacement.services[0].start({ stateDir: tmpdir() }); t.after(() => replacement.services[0].stop());
+  ready('https://late.trycloudflare.com');
+  await staleRejected;
+  await new Promise(setImmediate);
+  assert.equal(replacement.getServer().publicBaseUrl, 'https://replacement.trycloudflare.com');
+  assert.deepEqual((await discover(replacement).execute('tabs', { action: 'tabs' })).details.profiles, ['demo']);
+  assert.equal(f.getServer().publicBaseUrl, undefined);
+  assert.equal(f.getServer().store.shares.size, 0);
+});
+
+test('Cloudflare warmup rechecks owner authority before creating a link and fails closed on readiness failure', async t => {
+  let ready, fail;
+  const transport = new EventEmitter(); transport.ensure = () => new Promise((resolve, reject) => { ready = resolve; fail = reject; }); transport.close = async () => {};
+  const f = setup({ cloudflareFactory: () => transport }); f.api.pluginConfig.cloudflare = { enabled: true, binaryPath: '/fixture/cloudflared' };
+  const started = f.services[0].start({ stateDir: tmpdir() }); t.after(() => f.services[0].stop());
+  for (let i = 0; i < 100 && !ready; i++) await new Promise(setImmediate);
+  const activation = await Promise.race([started.then(() => 'started'), new Promise(resolve => setTimeout(() => resolve('blocked'), 50))]);
+  assert.equal(activation, 'started');
+  let invocationCurrent = true;
+  const ctx = { ...f.ctx, assertInvocationCurrent() { if (!invocationCurrent) throw new Error('stale invocation'); } };
+  const revoked = f.tools[0].create(ctx).execute('create', { action: 'create', profile: 'demo', targetId: 'tab' });
+  invocationCurrent = false;
+  ready('https://ready.trycloudflare.com');
+  await assert.rejects(revoked, /stale invocation/i);
+  assert.equal(f.getServer().store.shares.size, 0);
+  await f.services[0].stop();
+  await f.services[0].start({ stateDir: tmpdir() });
+  const pending = discover(f).execute('create', { action: 'create', profile: 'demo', targetId: 'tab' });
+  const rejected = assert.rejects(pending, /allocation failed|unavailable|running/i);
+  fail(new Error('allocation failed')); await rejected;
+  await assert.rejects(discover(f).execute('tabs', { action: 'tabs' }), /unavailable/);
+  assert.equal(f.getServer().publicBaseUrl, undefined);
+  assert.equal(f.getServer().store.shares.size, 0);
 });

@@ -34,6 +34,24 @@ const liveSymbol = Symbol.for('openclaw.browser-handoff.cdp-live-instances.v1');
 const liveInstances = () => globalThis[liveSymbol] ??= new Map();
 const instanceKey = api => JSON.stringify(api.pluginConfig || {});
 
+// A canceled tool wait must not cancel the operator-enabled shared warmup.
+function awaitPublicTransport(readiness, signal) {
+  const cancellation = signal ? AbortSignal.any([signal, readiness.abort.signal]) : readiness.abort.signal;
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      cancellation.removeEventListener('abort', onAbort);
+      reject(cancellation.reason instanceof Error ? cancellation.reason : new Error('Browser handoff cancelled'));
+    };
+    readiness.promise.then(() => {
+      cancellation.removeEventListener('abort', onAbort); resolve();
+    }, error => {
+      cancellation.removeEventListener('abort', onAbort); reject(error);
+    });
+    cancellation.addEventListener('abort', onAbort, { once: true });
+    if (cancellation.aborted) onAbort();
+  });
+}
+
 export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) => new CdpBrowser(profiles), serverFactory = (options) => new HandoffServer(options), funnelFactory = (options) => new FunnelTransport(options), cloudflareFactory = options => new CloudflareTransport(options) } = {}) {
   return {
     id: 'browser-handoff', name: 'Clawser',
@@ -59,7 +77,7 @@ export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) =>
         return;
       }
       if (api.registrationMode !== undefined && api.registrationMode !== 'full') return;
-      let service, transport, stopping = false, epoch, publication;
+      let service, transport, transportReadiness, stopping = false, epoch, publication;
       const unpublish = () => {
         if (publication && liveInstances().get(publication.key) === publication) liveInstances().delete(publication.key);
         publication = undefined;
@@ -97,18 +115,27 @@ export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) =>
               const origin = await ownedTransport.open(Number(new URL(ownedService.localUrl).port)); current();
               ownedService.setPublicBase(origin);
             } else if (config.cloudflare?.enabled === true) {
-              ownedTransport = transport = cloudflareFactory({ binaryPath: config.cloudflare.binaryPath, startupTimeoutMs: config.cloudflare.startupTimeoutMs ?? 60_000, stateDir: join(ctx.stateDir, 'browser-handoff', 'cloudflare'), probePath: '/assets/style.css' });
-              ownedTransport.on('failure', () => {
+              ownedTransport = transport = cloudflareFactory({ binaryPath: config.cloudflare.binaryPath, startupTimeoutMs: config.cloudflare.startupTimeoutMs ?? 90_000, stateDir: join(ctx.stateDir, 'browser-handoff', 'cloudflare'), probePath: '/assets/style.css' });
+              const readiness = transportReadiness = { abort: new AbortController(), service: ownedService };
+              const failed = error => {
                 if (epoch !== started || service !== ownedService || transport !== ownedTransport || stopping) return;
                 unpublish(); stopping = true;
+                readiness.abort.abort(error);
                 ownedService.setPublicBase(undefined);
                 for (const share of [...ownedService.store.shares.values()]) ownedService.store.end(share, 'tunnel_exit');
                 // Keep the local service/gate until normal stop. A failed tunnel
                 // must never publish new invitations or bypass browser fencing.
                 void ownedTransport.close().catch(() => api.logger.warn('Browser Handoff could not verify owned public transport shutdown.'));
-              });
-              const origin = await ownedTransport.ensure(Number(new URL(ownedService.localUrl).port)); current();
-              ownedService.setPublicBase(origin);
+              };
+              ownedTransport.on('failure', failed);
+              // Host hot activation has a short service.start deadline. Warm
+              // the tunnel in the background; create alone waits for readiness.
+              readiness.promise = Promise.resolve().then(() => {
+                current();
+                return ownedTransport.ensure(Number(new URL(ownedService.localUrl).port));
+              }).then(origin => { current(); ownedService.setPublicBase(origin); }).catch(error => { failed(error); throw error; });
+              // Startup failures are observed even when no owner is waiting.
+              void readiness.promise.catch(() => {});
             }
             current();
             publication = { key: instanceKey(api), factory: toolFactory };
@@ -125,13 +152,15 @@ export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) =>
         },
         async stop() {
           unpublish(); stopping = true; epoch = undefined;
-          const ownedService = service, ownedTransport = transport;
+          const ownedService = service, ownedTransport = transport, readiness = transportReadiness;
+          readiness?.abort.abort(new Error('Browser Handoff service stopped during public transport readiness'));
           ownedService?.setPublicBase(undefined);
           try { await ownedService?.close(); }
           finally {
             try { await ownedTransport?.close(); } catch { api.logger.warn('Browser Handoff could not verify public transport cleanup; inspect the owned route/process.'); }
             if (service === ownedService) { service = undefined; calls.clear(); completed.clear(); }
             if (transport === ownedTransport) transport = undefined;
+            if (transportReadiness === readiness) transportReadiness = undefined;
           }
         },
       });
@@ -190,6 +219,12 @@ export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) =>
               if (!params.profile) result = { profiles: Object.keys(config.profiles || {}) };
               else result = { profile: params.profile, tabs: (await s.backend.list(params.profile)).map(({ targetId, title, url }) => ({ targetId, title, url })) };
             } else if (params.action === 'create') {
+              const readiness = transportReadiness;
+              if (readiness?.service === s) {
+                active();
+                await awaitPublicTransport(readiness, signal);
+                active();
+              }
               if (!s.publicBaseUrl) throw new Error('Configure publicBaseUrl or explicitly enable Funnel or Cloudflare before creating links');
               // Resolve the target first; invocation may have ended while the browser was queried.
               const tab = (await s.backend.list(params.profile)).find((tab) => tab.targetId === params.targetId);

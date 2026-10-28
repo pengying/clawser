@@ -259,9 +259,12 @@ loopback CDP origin. Example values below are placeholders, not personal IDs:
 ```
 
 Install and verify the trusted `cloudflared` binary as the operator. The optional
-`cloudflare` block defaults to disabled; its startup timeout defaults to 60000 ms
+`cloudflare` block defaults to disabled; its startup timeout defaults to 90000 ms
 and accepts 1000–180000 ms. It uses the service's private stable state directory
-and bound loopback viewer port. It probes the harmless `/assets/style.css` asset;
+and bound loopback viewer port. Tunnel allocation warms in the background after
+the listener starts, so plugin activation does not wait for network readiness.
+Creating a link awaits that readiness and rechecks the current owner invocation.
+It probes the harmless `/assets/style.css` asset;
 the desktop controller retains `/browser/assets/probe.css`. Only a ready public
 HTTPS viewer origin is published. A tunnel failure removes that origin, stops
 new invitations and retires existing viewer access; normal browser fencing still
