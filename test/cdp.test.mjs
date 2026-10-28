@@ -24,8 +24,9 @@ async function browserFixture(t, { rejectCancel = false, disconnectRecoveryPaint
       socket.terminate(); return;
     }
     const result = command.method === 'Page.getFrameTree' ? { frameTree: { frame: { id: 'frame', url: 'https://example.com/' } } }
+      : command.method === 'Page.getLayoutMetrics' ? { cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 800, clientHeight: 600 } }
       : command.method === 'Page.createIsolatedWorld' ? { executionContextId: 1 }
-      : command.method === 'Runtime.evaluate' ? { result: { value: { document: 'fixture', regions: [], focus: null } } }
+      : command.method === 'Runtime.evaluate' ? { result: { value: command.params.expression === 'globalThis.devicePixelRatio' ? 1 : { document: 'fixture', regions: [], focus: null } } }
       : command.method === 'Browser.getWindowForTarget' ? { windowId: 7, bounds }
       : command.method === 'Browser.setWindowBounds' ? (bounds = { ...bounds, ...command.params.bounds }, {})
       : command.method === 'Page.captureScreenshot' ? { data: 'static-frame' } : {};
@@ -73,12 +74,12 @@ test('a minimized renderer is restored and repainted before atomic wheel dispatc
   const input = commands.slice(start).filter(({ method }) => method !== 'Page.screencastFrameAck');
   assert.deepEqual(input.map(({ method }) => method), [
     'Browser.getWindowForTarget', 'Browser.setWindowBounds', 'Page.bringToFront',
-    'Page.captureScreenshot', 'Input.dispatchMouseEvent',
+    'Page.getLayoutMetrics', 'Runtime.evaluate', 'Page.captureScreenshot', 'Input.dispatchMouseEvent',
   ]);
   assert.equal(input[0].params.targetId, 'tab');
   assert.deepEqual(input[1].params, { windowId: 7, bounds: { windowState: 'normal' } });
-  assert.deepEqual(input[3].params, { format: 'jpeg', quality: 70, captureBeyondViewport: false });
-  assert.equal(input[4].params.type, 'mouseWheel');
+  assert.deepEqual(input[5].params, { format: 'jpeg', quality: 70, captureBeyondViewport: false });
+  assert.equal(input[6].params.type, 'mouseWheel');
 });
 
 test('a normal renderer is activated without a recovery repaint', async (t) => {
@@ -104,7 +105,7 @@ test('an unacknowledged readiness repaint never dispatches the original input', 
 
   const input = fixture.commands.slice(start);
   assert.deepEqual(input.filter(({ method }) => method !== 'Page.screencastFrameAck').map(({ method }) => method), [
-    'Browser.getWindowForTarget', 'Browser.setWindowBounds', 'Page.bringToFront', 'Page.captureScreenshot',
+    'Browser.getWindowForTarget', 'Browser.setWindowBounds', 'Page.bringToFront', 'Page.getLayoutMetrics', 'Runtime.evaluate', 'Page.captureScreenshot',
   ]);
   assert.equal(input.some(({ method }) => method.startsWith('Input.')), false);
 });

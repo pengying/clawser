@@ -119,11 +119,15 @@ try {
   releaseOpening();
   await until(() => evaluate(viewer, "!document.getElementById('control').disabled"), 'takeover becomes available after stream readiness');
   const oldConnection = handoff.streams.get(invite.id).connectionId;
+  await evaluate(viewer, `(()=>{window.qaDisconnectImage=Image;window.Image=function(...args){const image=new qaDisconnectImage(...args);Object.defineProperty(image,'onload',{set(callback){image.addEventListener('load',()=>{window.qaReleaseDisconnectImage=()=>callback.call(image)},{once:true})}});return image}})()`);
+  await until(() => !handoff.streams.get(invite.id).display.inFlight, 'old stream display settles');
+  handoff.streams.get(invite.id).display.frame(JSON.parse(await evaluate(viewer, 'qaLastFrame')));
+  await until(() => evaluate(viewer, "typeof qaReleaseDisconnectImage==='function'"), 'old frame decode callback held before disconnect');
+  const paintsBeforeDisconnect = await evaluate(viewer, 'qaPaints');
   handoff.streams.get(invite.id).ws.terminate();
   await until(() => evaluate(viewer, "document.getElementById('status').textContent.includes('Connection interrupted')"), 'network interruption reaches the viewer');
-  const paintsBeforeDisconnect = await evaluate(viewer, 'qaPaints');
-  await evaluate(viewer, "qaSockets.at(-1).dispatchEvent(new MessageEvent('message',{data:qaLastFrame}))");
-  await until(async () => (await evaluate(viewer, 'qaPaints')) > paintsBeforeDisconnect, 'a queued old frame decodes after disconnect');
+  await evaluate(viewer, 'qaReleaseDisconnectImage();window.Image=qaDisconnectImage');
+  assert.equal(await evaluate(viewer, 'qaPaints'), paintsBeforeDisconnect, 'a decoded old-generation image cannot draw after disconnect');
   assert.equal(await evaluate(viewer, "document.getElementById('control').disabled"), true, 'a late frame cannot re-enable takeover on a disconnected socket');
   await until(async () => handoff.streams.get(invite.id)?.connectionId !== oldConnection && handoff.streams.get(invite.id)?.ready && !(await evaluate(viewer, "document.getElementById('control').disabled")), 'fresh stream reconnects and restores takeover');
   const beforeDecodeFailure = handoff.streams.get(invite.id).connectionId;

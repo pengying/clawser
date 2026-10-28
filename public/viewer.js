@@ -528,7 +528,11 @@ function suspend() {
   // picker; its eventual commit still revalidates control, focus and the token.
   if (pickerIntent?.action === 'open') pickerIntent = null;
 }
-document.addEventListener('visibilitychange', () => { if (document.hidden) suspend(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) suspend();
+  if (!ended && connectionId && socket?.readyState === WebSocket.OPEN)
+    socket.send(JSON.stringify({ type: 'captureVisibility', connectionId, visibility: document.visibilityState }));
+});
 window.addEventListener('pagehide', () => { suspend(); socket?.close(); });
 setInterval(() => { if (state && !ended) $('expiry').textContent = Math.max(0, Math.ceil((state.expiresAt - Date.now()) / 1000)) + 's remaining'; }, 1000);
 void openViewer();

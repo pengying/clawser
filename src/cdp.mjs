@@ -1,5 +1,6 @@
 import { WebSocket } from 'ws';
 import { randomBytes } from 'node:crypto';
+import { PaintAssist } from './paint-assist.mjs';
 import { FrameKeyboard } from './frame-keyboard.mjs';
 import { interactionCollector } from './interaction-metadata.mjs';
 import { pickerOpen, pickerApply, pickerCancel } from './native-picker.mjs';
@@ -150,7 +151,7 @@ export class CdpBrowser {
       webSocketDebuggerUrl: tab.webSocketDebuggerUrl,
     }));
   }
-  async open(target, { onFrame, onClose, onMetadata = () => {}, isInputAllowed = () => true }) {
+  async open(target, { onFrame, onClose, onMetadata = () => {}, isInputAllowed = () => true, getCaptureState = () => ({ live: true, demand: true, control: 'standalone' }) }) {
     const tab = (await this.list(target.profile)).find((tab) => tab.targetId === target.targetId);
     if (!tab) throw new Error('Selected browser tab is unavailable');
     const base = this.profiles[target.profile];
@@ -160,9 +161,9 @@ export class CdpBrowser {
     const cdp = await new CdpConnection().connect(wsUrl);
     let width = 1, height = 1, pageScale = 1, closed = false, url = tab.url, metadataTimer;
     let contextId, documentId = randomBytes(16).toString('hex'), activeFocus, activePicker, latestMap, gesture, dragData, dragEntered = false;
-    let metadataQueue = Promise.resolve(), polling = false, keyboard;
+    let metadataQueue = Promise.resolve(), polling = false, keyboard, paints, topFrameId, paintRead;
     const failure = (message) => Object.assign(new Error(message), { definitive: true });
-    const finish = () => { if (!closed) { closed = true; keyboard?.revoke(); clearInterval(metadataTimer); cdp.close(); onClose(); } };
+    const finish = () => { if (!closed) { closed = true; paints?.stop(); keyboard?.revoke(); clearInterval(metadataTimer); cdp.close(); onClose(); } };
     const collect = () => {
       const work = metadataQueue.catch(() => {}).then(async () => {
         if (closed) throw failure('Browser disconnected');
@@ -195,6 +196,39 @@ export class CdpBrowser {
       if (result.exceptionDetails) throw failure('Picker is unavailable or changed');
       return result.result.value;
     };
+    const captureViewport = async (context) => {
+      if (closed || !isWebPage(url) || context && !context.isCurrent()) return false;
+      const generation = documentId;
+      const metrics = await cdp.send('Page.getLayoutMetrics');
+      const viewport = metrics.cssVisualViewport;
+      if (!viewport || !finite(viewport.clientWidth, 1, 100_000) || !finite(viewport.clientHeight, 1, 100_000) ||
+          !finite(viewport.pageX, 0, 100_000_000) || !finite(viewport.pageY, 0, 100_000_000)) throw failure('Browser viewport is unavailable');
+      if (!contextId) await collect();
+      const density = await cdp.send('Runtime.evaluate', { expression: 'globalThis.devicePixelRatio', contextId, returnByValue: true });
+      const ratio = density.result?.value;
+      if (density.exceptionDetails || !finite(ratio, .1, 10)) throw failure('Browser pixel density is unavailable');
+      // CDP screenshot clips can reset another session's emulation. Keep the
+      // native viewport untouched and reject oversized readback instead. The
+      // margin accounts for scrollbars omitted by cssVisualViewport metrics.
+      const pixelsWide = (viewport.clientWidth + 32) * ratio, pixelsHigh = (viewport.clientHeight + 32) * ratio;
+      if (pixelsWide > 8192 || pixelsHigh > 8192 || pixelsWide * pixelsHigh > 16_777_216)
+        throw failure('Browser viewport is too large for bounded capture');
+      if (closed || generation !== documentId || !isWebPage(url)) return false;
+      if (context ? !context.onDispatch() : !getCaptureState().live) return false;
+      if (!context) paints.noteDispatch();
+      // Returned bytes are discarded; only ordinary screencast frames display.
+      await cdp.send('Page.captureScreenshot', { format: 'jpeg', quality: 70, captureBeyondViewport: false });
+      return true;
+    };
+    const capturePaint = async (context) => {
+      // Mandatory startup/restore reads and scheduled assistance share one
+      // readback. A scheduled post-input obligation never joins an older read.
+      while (paintRead) await paintRead;
+      const work = captureViewport(context); paintRead = work;
+      try { return await work; }
+      finally { if (paintRead === work) paintRead = null; }
+    };
+    paints = new PaintAssist({ paint: capturePaint, getState: getCaptureState, onError: finish });
     const key = async (name) => {
       const [windowsVirtualKeyCode, code] = KEYS[name];
       const args = { key: name === 'Ctrl+A' ? 'a' : name, code, windowsVirtualKeyCode, modifiers: name === 'Ctrl+A' ? 2 : 0 };
@@ -217,7 +251,7 @@ export class CdpBrowser {
         // A restored renderer can acknowledge activation while remaining slow
         // to accept native input. One discarded paint request makes it ready;
         // the input itself is still sent exactly once below.
-        await cdp.send('Page.captureScreenshot', { format: 'jpeg', quality: 70, captureBeyondViewport: false });
+        await capturePaint();
       }
     };
     // Screencast dimensions are screen DIPs; CDP input uses visual-viewport CSS
@@ -249,9 +283,22 @@ export class CdpBrowser {
       dragData = data;
     });
     cdp.onClose = finish;
+    for (const method of ['Page.frameStartedNavigating', 'Page.frameStartedLoading']) {
+      cdp.onAny(method, ({ frameId }, session) => {
+        if (session && !keyboard.sessions.has(session)) return;
+        if (!session && frameId === topFrameId) paints.navigationStarted();
+        else paints.release();
+      });
+    }
+    for (const method of ['Page.frameNavigated', 'Page.frameDetached']) {
+      cdp.onAny(method, (_event, session) => {
+        if (session && keyboard.sessions.has(session)) paints.release();
+      });
+    }
     cdp.on('Page.frameNavigated', ({ frame }) => {
-      if (frame.parentId) return;
+      if (frame.parentId) { paints.release(); return; }
       url = frame.url;
+      paints.navigationCommitted();
       contextId = undefined; documentId = randomBytes(16).toString('hex'); activeFocus = null; activePicker = null; latestMap = null;
       onMetadata({ interactions: { document: documentId, regions: [], focus: null, pickerFocus: null, timestamp: Date.now() } });
       if (!isWebPage(url)) { finish(); return; }
@@ -263,6 +310,7 @@ export class CdpBrowser {
         const { deviceWidth, deviceHeight, pageScaleFactor = 1 } = frame.metadata;
         if (!finite(deviceWidth, 1, 100_000) || !finite(deviceHeight, 1, 100_000) || !finite(pageScaleFactor, .01, 100)) return;
         width = deviceWidth; height = deviceHeight; pageScale = pageScaleFactor;
+        paints.frame();
         onFrame({ type: 'frame', data: frame.data, width, height });
       }
     });
@@ -271,22 +319,22 @@ export class CdpBrowser {
       // Recheck after subscribing: the selected tab could have navigated since /json/list.
       const tree = await cdp.send('Page.getFrameTree');
       url = tree.frameTree.frame.url;
-      await keyboard.start(tree.frameTree.frame.id);
+      topFrameId = tree.frameTree.frame.id;
+      await keyboard.start(topFrameId);
       if (!isWebPage(url)) throw new Error('Only HTTP(S) browser pages can be shared');
       onMetadata({ url, title: tab.title });
       await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 70, maxWidth: 1600, maxHeight: 1200, everyNthFrame: 1 });
       // An unchanged background tab may not paint for startScreencast alone.
       // Request the first paint without activating the tab or changing focus.
-      await cdp.send('Page.captureScreenshot', { format: 'jpeg', quality: 70, captureBeyondViewport: false });
+      await capturePaint();
       await collect();
+      paints.start();
       metadataTimer = setInterval(() => {
         if (polling || closed) return;
         polling = true; void collect().catch(() => {}).finally(() => { polling = false; });
       }, 250); metadataTimer.unref();
     } catch (error) { finish(); throw error; }
-    return {
-      async input(raw) {
-        const event = validateInput(raw);
+    const performInput = async (event) => {
         if (closed) throw new Error('Browser disconnected');
         if (!['nativeKeyboardOpen', 'nativeEdit', 'focus'].includes(event.kind)) keyboard.revoke();
         await prepareForInput(event);
@@ -389,7 +437,23 @@ export class CdpBrowser {
           catch { cdp.close(); throw new Error('Browser input sequence incomplete'); }
           return { focus: await collect() };
         }
+      };
+    return {
+      async input(raw) {
+        const event = validateInput(raw);
+        const hint = ['focus', 'nativeKeyboardOpen', 'pickerCancel'].includes(event.kind) ? null : paints.inputStarted();
+        try {
+          const result = await performInput(event);
+          paints.inputCompleted(hint);
+          return result;
+        } catch (error) {
+          if (error.definitive) paints.release(); else paints.stop();
+          throw error;
+        }
       },
+      captureDemandChanged() { paints.demandChanged(); },
+      releaseCaptureControl() { paints.release(); },
+      stopCaptureAssist() { paints.stop(); },
       cancelGesture,
       revokeKeyboard() { keyboard.revoke(); },
       cancelPicker() {
@@ -400,6 +464,7 @@ export class CdpBrowser {
         return pickerAction(pickerCancel(current.token)).catch(() => {}).then(() => collect().catch(() => {}));
       },
       async close() {
+        paints.stop();
         keyboard.revoke();
         if (closed) return;
         clearInterval(metadataTimer);
