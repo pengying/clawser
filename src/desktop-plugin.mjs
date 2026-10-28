@@ -1,5 +1,6 @@
 import { authorizedSession, ownerAuthorized, ownerGuard } from './authorization.mjs';
 import { isAbsolute } from 'node:path';
+import { activationStatusForTarget, createBrowserActivation } from './browser-activation.mjs';
 import { cdpOrigin } from './browser-config.mjs';
 import { createBrowserBindingGuard, monitorBrowserBinding, registerBrowserAccessPolicy } from './browser-policy.mjs';
 
@@ -37,8 +38,8 @@ function liveInstanceKey(api, origin = cdpOrigin(api.config?.browser?.profiles?.
 
 // Only private control-plane RPC runs in the Gateway. VNC, HTTP viewers, browser
 // supervision and the authoritative automation gate live in the controller.
-export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFactory, bindingMonitorScheduler } = {}) {
-  const config = api.pluginConfig.desktop;
+export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFactory, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic } = {}) {
+  let config = api.pluginConfig.desktop;
   const allowed = ctx => ownerAuthorized(ctx, api.pluginConfig);
   if (api.registrationMode === 'tool-discovery') {
     api.registerTool({ contextVersion: 2, create(ctx) {
@@ -48,7 +49,11 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
         current();
         let instance;
         try { instance = liveInstances().get(liveInstanceKey(api)); } catch { /* Invalid mappings cannot match a live instance. */ }
-        if (!instance) throw new Error('Browser Handoff production controller is unavailable');
+        if (!instance) {
+          const state = activationStatusForTarget({ config: api.config, pluginConfig: api.pluginConfig });
+          if (state && state.phase !== 'active') throw new Error(state.message);
+          throw new Error('Browser Handoff production controller is unavailable');
+        }
         const tool = instance.factory.create(ctx);
         if (!tool) throw new Error('Owner-private access required');
         return tool.execute(callId, params, signal);
@@ -57,7 +62,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     return;
   }
   if (api.registrationMode !== undefined && api.registrationMode !== 'full') return;
-  let client, running = false, fault, pollTimer, serviceEpoch, publication, stopBindingMonitor;
+  let client, running = false, fault, pollTimer, serviceEpoch, publication, stopBindingMonitor, activation;
   const unpublish = () => {
     if (publication && liveInstances().get(publication.key) === publication) liveInstances().delete(publication.key);
     publication = undefined;
@@ -65,6 +70,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
   const binding = createBrowserBindingGuard(api, { onDrift() {
     unpublish();
     fault = 'Browser Handoff current configuration changed; controller retirement and operator reconciliation are required';
+    activation?.retire();
     // The controller remains authoritative for uncertain input and admissions.
     // Retire its invitations without clearing the Gateway admission ledger.
     if (client) void client.request('revokeAll', { reason: 'plugin_stop' }, { timeoutMs: 180_000 }).catch(() => api.logger.warn('Browser Handoff configuration-change retirement was not confirmed; controller fencing remains authoritative.'));
@@ -84,9 +90,13 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
   let polling = false;
   async function pollCompletions() {
     if (!canWake || !running || polling) return;
+    try { activation.assertActive(); } catch { return; }
     polling = true;
     const rpc = client, epoch = serviceEpoch;
-    const current = () => running && client === rpc && serviceEpoch === epoch;
+    const current = () => {
+      if (!running || client !== rpc || serviceEpoch !== epoch) return false;
+      try { activation.assertActive(); return true; } catch { return false; }
+    };
     const ack = async (id) => { if (current()) await rpc.request('acknowledgeCompletion', { id }, { timeoutMs: 10_000 }); };
     try {
       const result = await rpc.request('completions', { limit: 50 }, { timeoutMs: 10_000 });
@@ -130,6 +140,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     finally { polling = false; }
   }
   const getClient = (allowFault = false) => {
+    activation.assertActive();
     if (!running || !client) throw new Error('Browser Handoff production controller is unavailable');
     binding.current();
     if (fault && !allowFault) throw new Error(fault);
@@ -161,33 +172,37 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     return new Error(fault);
   };
   registerBrowserAccessPolicy(api, { binding, assertAvailable: () => getClient() });
-  api.registerService({
-    id: 'browser-handoff',
-    async start() {
+  const lifecycle = {
+    async activate({ prepared, assertCurrent }) {
+      assertCurrent(); config = prepared.pluginConfig.desktop;
       unpublish();
       stopBindingMonitor?.(); stopBindingMonitor = undefined;
       running = false; fault = undefined;
-      binding.pin();
       const epoch = serviceEpoch = Symbol();
       if (!isAbsolute(config.socketPath || '')) throw new Error('desktop.socketPath must be an absolute private Unix socket path');
       if (typeof config.profile !== 'string' || !config.profile.trim()) throw new Error('desktop.profile is required');
       let rpc;
       try {
         rpc = await desktopRpcFactory(config.socketPath);
+        assertCurrent();
         if (serviceEpoch !== epoch) throw new Error('Browser Handoff service changed during controller startup');
         client = rpc;
         const identity = await rpc.request('health', {}, { timeoutMs: 10_000 });
+        assertCurrent();
         if (serviceEpoch !== epoch || client !== rpc) throw new Error('Browser Handoff service changed during controller startup');
-        validateIdentity(identity);
+        validateIdentity(identity); assertCurrent();
         running = true;
         publication = { key: liveInstanceKey(api, binding.current().binding.cdpUrl), factory: toolFactory };
         liveInstances().set(publication.key, publication);
         stopBindingMonitor = monitorBrowserBinding(binding, bindingMonitorScheduler);
-        if (canWake) {
-          pollTimer = setInterval(() => { void pollCompletions(); }, 1000);
-          pollTimer.unref?.();
-          void pollCompletions();
-        } else api.logger.warn('Browser Handoff supports active waits only: session-incarnation reads and system-event wake APIs are required for dormant continuation.');
+        return { onActive() {
+          assertCurrent();
+          if (canWake) {
+            pollTimer = setInterval(() => { void pollCompletions(); }, 1000);
+            pollTimer.unref?.();
+            void pollCompletions();
+          } else api.logger.warn('Browser Handoff supports active waits only: session-incarnation reads and system-event wake APIs are required for dormant continuation.');
+        } };
       } catch (error) {
         rpc?.close();
         if (client === rpc) client = undefined;
@@ -212,7 +227,10 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
         }
       } finally { rpc?.close(); }
     },
-  });
+  };
+  activation = createBrowserActivation({ api, binding, scheduler: activationScheduler, writeDiagnostic: activationWriteDiagnostic,
+    activate: options => lifecycle.activate(options), cleanup: reason => reason === 'retired' ? undefined : lifecycle.stop() });
+  api.registerService({ id: 'browser-handoff', start: ctx => activation.start(ctx), stop: () => activation.stop() });
   api.on('before_tool_call', async (event, ctx) => {
     if (!browserTool(event.toolName)) return;
     const key = callKey(event, ctx);

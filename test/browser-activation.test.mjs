@@ -41,6 +41,7 @@ test('missing current API fails preparation; throwing current reads stay pending
   await f.activation.start(); assert.equal(f.activation.status().phase, 'awaiting-commit');
   f.scheduler.advance(30_000); await flush();
   assert.equal(f.activation.status().phase, 'failed'); assert.match(f.activation.status().message, /publication.*deadline|deadline.*publication/i); assert.equal(f.activations, 0); assert.equal(f.scheduler.size, 0);
+  await missing.activation.stop(); await f.activation.stop();
 });
 test('stop before commit cancels the only pending timer and cannot later activate', async () => {
   const f = fixture(); await f.activation.start(); await f.activation.stop();
@@ -105,4 +106,12 @@ test('private diagnostics identify the producer and an older stopped generation 
   assert.equal(active.phase, 'active'); assert.equal(active.producerPid, process.pid); assert.match(active.producerStartTicks, /^[0-9]+$/);
   assert.equal((await stat(path)).mode & 0o777, 0o600); assert.equal((await stat(join(stateDir, 'browser-handoff'))).mode & 0o777, 0o700);
   assert.doesNotMatch(text, /9222|127\.0\.0\.1/); await next.activation.stop();
+});
+test('pending discovery diagnostics are read-only and never publish an execution factory', async () => {
+  const f = fixture(); await f.activation.start();
+  const status = activationModule.activationStatusForTarget({ config: f.api.config, pluginConfig: f.api.pluginConfig });
+  assert.equal(status.phase, 'awaiting-commit'); assert.match(status.message, /awaiting.*configuration publication/i);
+  assert.equal(status.factory, undefined); assert.equal(f.activations, 0);
+  await f.activation.stop();
+  assert.equal(activationModule.activationStatusForTarget({ config: f.api.config, pluginConfig: f.api.pluginConfig }), undefined);
 });

@@ -111,3 +111,13 @@ test('preparation snapshots intended host settings while mismatching current con
   assert.equal(f.guard.matches(prepared), true); assert.doesNotThrow(() => f.guard.pin(prepared));
   assert.equal(f.guard.current().binding.profile, 'daily');
 });
+test('prepared browser settings retain only the selected binding inputs, excluding unrelated host secrets', () => {
+  const f = fixture(); f.api.config = structuredClone(f.config);
+  f.api.config.channels = { private: { token: 'unrelated-fixture-secret' } };
+  f.api.config.plugins = { entries: { 'browser-handoff': { enabled: true, config: f.api.pluginConfig }, unrelated: { config: { token: 'other-fixture-secret' } } } };
+  const prepared = f.guard.prepare();
+  assert.equal(prepared.config.channels, undefined);
+  assert.equal(prepared.config.plugins.entries.unrelated, undefined);
+  assert.equal(prepared.config.browser.profiles.other, undefined);
+  assert.equal(prepared.config.browser.profiles.daily.cdpUrl, 'http://127.0.0.1:9222');
+});

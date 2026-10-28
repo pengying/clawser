@@ -97,6 +97,7 @@ test('operator setup refuses a host without a stable plugin directory', async t 
 test('index routes cold desktop discovery to the active full instance', async t => {
   const config = { browser: { profiles: { handoff: { cdpUrl: 'http://127.0.0.1:18812', attachOnly: true, driver: 'openclaw', engine: 'chromium' } } } };
   const pluginConfig = { desktop: { enabled: true, socketPath: '/tmp/clawser-index-test.sock', profile: 'handoff' } };
+  config.plugins = { entries: { 'browser-handoff': { enabled: true, config: pluginConfig } } };
   let service, discovered;
   const client = { close() {}, async request(method) {
     if (method === 'health') return { ready: true, profile: 'handoff', cdpUrl: 'http://127.0.0.1:18812' };

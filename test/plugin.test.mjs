@@ -7,16 +7,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
 
-function setup({ funnelFactory, cloudflareFactory, serverFactory, backendFactory, bindingMonitorScheduler } = {}) {
+function setup({ funnelFactory, cloudflareFactory, serverFactory, backendFactory, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic = async () => {} } = {}) {
   const hooks = new Map(), tools = [], services = [], policies = [];
   const api = { pluginConfig: { profiles: { demo: 'http://127.0.0.1:9222' }, port: 0, publicBaseUrl: 'https://handoff.example' },
     registerTool: (tool) => tools.push(tool), registerService: (service) => services.push(service),
     on: (name, fn) => hooks.set(name, fn), logger: { warn() {}, info() {} }, runtime: {}, config: { browser: { defaultProfile: 'demo', profiles: { demo: { cdpUrl: 'http://127.0.0.1:9222', attachOnly: true } } } } };
+  api.config.plugins = { entries: { 'browser-handoff': { enabled: true, config: api.pluginConfig } } };
   api.runtime.config = { current: () => api.config };
   api.registerTrustedToolPolicy = policy => policies.push(policy);
   const ctx = { senderIsOwner: true, sessionKey: 'agent:main:telegram:direct:1', sessionId: 'incarnation', assertInvocationCurrent() {} };
   let server;
-  createPlugin({ bindingMonitorScheduler, backendFactory: backendFactory || (() => ({ list: async () => [{ targetId: 'tab', title: 'Demo', url: 'https://example.com' }] })), serverFactory: (options) => (server = serverFactory ? serverFactory(options) : new HandoffServer(options)), ...(funnelFactory ? { funnelFactory } : {}), ...(cloudflareFactory ? { cloudflareFactory } : {}) }).register(api);
+  createPlugin({ bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic, backendFactory: backendFactory || (() => ({ list: async () => [{ targetId: 'tab', title: 'Demo', url: 'https://example.com' }] })), serverFactory: (options) => (server = serverFactory ? serverFactory(options) : new HandoffServer(options)), ...(funnelFactory ? { funnelFactory } : {}), ...(cloudflareFactory ? { cloudflareFactory } : {}) }).register(api);
   return { api, hooks, tools, services, policies, ctx, getServer: () => server };
 }
 
@@ -267,10 +268,11 @@ test('Cloudflare and Funnel cannot both be enabled and background failure retire
   let closed = false;
   const failed = setup({ cloudflareFactory: () => ({ on() {}, ensure: async () => { throw new Error('allocation failed'); }, close: async () => { closed = true; } }) });
   failed.api.pluginConfig.cloudflare = { enabled: true, binaryPath: '/fixture/cloudflared' };
-  await failed.services[0].start({ stateDir: tmpdir() }); t.after(() => failed.services[0].stop());
+  t.after(() => failed.services[0].stop());
+  await failed.services[0].start({ stateDir: tmpdir() }).catch(error => { assert.match(error.message, /activation|retired|changed/i); });
   await new Promise(setImmediate);
   assert.equal(closed, true); assert.equal(failed.getServer().publicBaseUrl, undefined);
-  await assert.rejects(discover(failed).execute('tabs', { action: 'tabs' }), /unavailable/);
+  await assert.rejects(discover(failed).execute('tabs', { action: 'tabs' }), /unavailable|retired|configuration/i);
 });
 
 test('stop during existing-browser transport startup prevents late publication', async t => {
@@ -281,9 +283,10 @@ test('stop during existing-browser transport startup prevents late publication',
   const start = f.services[0].start({ stateDir: tmpdir() }); t.after(() => f.services[0].stop());
   for (let i = 0; i < 100 && !ready; i++) await new Promise(setImmediate);
   assert.ok(ready, 'transport allocation must begin');
+  const stoppedStart = start.catch(error => { assert.match(error.message, /stopped|changed/i); });
   await f.services[0].stop();
   ready('https://old.trycloudflare.com');
-  await start;
+  await stoppedStart;
   await new Promise(setImmediate);
   assert.equal(f.getServer().publicBaseUrl, undefined);
   await assert.rejects(discover(f).execute('tabs', { action: 'tabs' }), /unavailable/);
@@ -541,4 +544,57 @@ test('CDP results declare their tab backend contract and preserve each active or
   check(await tool.execute('ended-wait', { action: 'wait', id: created.details.id }), 'other');
   const revoked = await tool.execute('create-revoke', { action: 'create', profile: 'other', targetId: 'tab' });
   check(await tool.execute('revoke', { action: 'revoke', id: revoked.details.id }), 'other');
+});
+
+test('native hot CDP activation waits for committed enable or mode-switch before constructing any browser resources', async t => {
+  const { activationClock, flushActivation } = await import('./activation-clock.mjs');
+  for (const previousMode of ['disabled', 'novnc']) {
+    const scheduler = activationClock(), diagnostics = []; let constructed = 0;
+    const f = setup({ activationScheduler: scheduler, activationWriteDiagnostic: async value => diagnostics.push(value), backendFactory: () => { constructed++; return { list: async () => [{ targetId: 'tab' }] }; } });
+    f.api.config.plugins = { entries: { 'browser-handoff': { enabled: true, config: structuredClone(f.api.pluginConfig) } } };
+    const target = structuredClone(f.api.config); let current = structuredClone(target);
+    if (previousMode === 'disabled') current.plugins.entries['browser-handoff'].enabled = false;
+    else { current.browser.defaultProfile = 'old'; current.browser.profiles.old = { attachOnly: true, cdpUrl: 'http://127.0.0.1:9444' }; current.plugins.entries['browser-handoff'].config = { desktop: { enabled: true, profile: 'old', socketPath: '/old/controller.sock' } }; }
+    f.api.runtime.config.current = () => current;
+    await f.services[0].start(); t.after(() => f.services[0].stop());
+    assert.equal(constructed, 0); assert.equal(f.getServer(), undefined); assert.equal(scheduler.size, 1);
+    const tool = f.tools[0].create(f.ctx);
+    await assert.rejects(tool.execute('pending', { action: 'tabs' }), /awaiting.*configuration publication/i);
+    await assert.rejects(discover(f).execute('pending-discovery', { action: 'tabs' }), /awaiting.*configuration publication/i);
+    const native = { ...f.ctx, runId: 'run', toolCallId: 'call', requester: { senderIsOwner: true, senderId: 'owner', channel: 'telegram' } };
+    assert.match(f.policies[0].evaluate({ toolName: 'browser', params: { action: 'tabs', target: 'host' } }, native).reason, /awaiting.*configuration publication/i);
+    current = target; scheduler.advance(100); await flushActivation();
+    assert.equal(constructed, 1); assert.equal(f.getServer().server.listening, true);
+    assert.equal((await tool.execute('active', { action: 'tabs' })).details.profile, 'demo');
+    assert.equal(diagnostics.at(-1).phase, 'active');
+    await f.services[0].stop();
+  }
+});
+
+test('hot CDP activation stays resource-free after stop or publication deadline', async t => {
+  const { activationClock, flushActivation } = await import('./activation-clock.mjs');
+  for (const stopEarly of [true, false]) {
+    const scheduler = activationClock(), diagnostics = []; let resources = 0;
+    const f = setup({ activationScheduler: scheduler, activationWriteDiagnostic: async value => diagnostics.push(value), backendFactory() { resources++; return { list: async () => [] }; } });
+    let current = structuredClone(f.api.config); current.plugins.entries['browser-handoff'].enabled = false;
+    f.api.runtime.config.current = () => current;
+    await f.services[0].start(); t.after(() => f.services[0].stop());
+    if (stopEarly) await f.services[0].stop(); else { scheduler.advance(30_000); await flushActivation(); }
+    assert.equal(diagnostics.at(-1).phase, stopEarly ? 'stopped' : 'failed');
+    current = structuredClone(f.api.config); scheduler.advance(30_000); await flushActivation();
+    assert.equal(resources, 0); assert.equal(f.getServer(), undefined); assert.equal(scheduler.size, 0);
+    await assert.rejects(f.tools[0].create(f.ctx).execute('late', { action: 'tabs' }), /stopped|deadline/i);
+  }
+});
+test('local active diagnostic reports Cloudflare warming then ready without blocking tabs', async t => {
+  let ready; const diagnostics = [];
+  const transport = new EventEmitter(); transport.close = async () => {}; transport.ensure = () => new Promise(resolve => { ready = resolve; });
+  const f = setup({ activationWriteDiagnostic: async value => diagnostics.push(value), cloudflareFactory: () => transport });
+  f.api.pluginConfig.cloudflare = { enabled: true, binaryPath: '/fixture/cloudflared' };
+  await f.services[0].start({ stateDir: tmpdir() }); t.after(() => f.services[0].stop());
+  assert.equal(diagnostics.at(-1).phase, 'active'); assert.equal(diagnostics.at(-1).publicTransport, 'warming');
+  assert.equal((await discover(f).execute('tabs', { action: 'tabs' })).details.profile, 'demo');
+  ready('https://ready.trycloudflare.com');
+  for (let attempt = 0; attempt < 100 && diagnostics.at(-1).publicTransport !== 'ready'; attempt++) await new Promise(setImmediate);
+  assert.equal(diagnostics.at(-1).publicTransport, 'ready'); assert.equal(diagnostics.at(-1).phase, 'active');
 });

@@ -41,7 +41,15 @@ export function browserConfigurationState(config, pluginConfig = {}, { requireEn
   ]) };
 }
 export function prepareBrowserConfiguration({ config, pluginConfig = {}, requireEnabledEntry = false }) {
-  const snapshot = structuredClone({ config, pluginConfig });
+  const initial = browserConfigurationState(config, pluginConfig, { requireEnabledEntry });
+  const entry = config.plugins?.entries?.['browser-handoff'];
+  // Preparation retains only immutable browser binding inputs, never unrelated
+  // channel/provider credentials from the host registration snapshot.
+  const snapshot = structuredClone({ pluginConfig, config: {
+    browser: { enabled: config.browser.enabled, defaultProfile: config.browser.defaultProfile, attachOnly: config.browser.attachOnly,
+      profiles: Object.fromEntries(Object.keys(initial.binding.profiles).map(profile => [profile, config.browser.profiles[profile]])) },
+    ...(entry ? { plugins: { entries: { 'browser-handoff': { enabled: entry.enabled, config: entry.config } } } } : {}),
+  } });
   return freeze({ ...browserConfigurationState(snapshot.config, snapshot.pluginConfig, { requireEnabledEntry }), pluginConfig: snapshot.pluginConfig, requireEnabledEntry });
 }
 

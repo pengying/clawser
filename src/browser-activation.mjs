@@ -4,6 +4,15 @@ import { isAbsolute, join } from 'node:path';
 import { prepareBrowserConfiguration } from './browser-policy.mjs';
 
 const ownersSymbol = Symbol.for('openclaw.browser-handoff.activation-owners.v1');
+const scopeKeysSymbol = Symbol.for('openclaw.browser-handoff.activation-scope-keys.v1');
+const scopeKeys = () => globalThis[scopeKeysSymbol] ??= new WeakMap();
+function scopeKey(value) {
+  if (value && (typeof value === 'object' || typeof value === 'function')) {
+    if (!scopeKeys().has(value)) scopeKeys().set(value, randomUUID());
+    return scopeKeys().get(value);
+  }
+  return value || randomUUID();
+}
 const queuesSymbol = Symbol.for('openclaw.browser-handoff.activation-diagnostic-queues.v1');
 const owners = () => globalThis[ownersSymbol] ??= new Map();
 const queues = () => globalThis[queuesSymbol] ??= new Map();
@@ -24,6 +33,18 @@ const terminal = new Set(['failed', 'stopped', 'retired']);
 export const activationDiagnosticPath = stateDir => join(stateDir, 'browser-handoff', 'activation.json');
 export function activationTargetFingerprint({ config, pluginConfig = {} }) {
   return createHash('sha256').update(prepareBrowserConfiguration({ config, pluginConfig, requireEnabledEntry: true }).fingerprint).digest('hex');
+}
+
+// Diagnostic-only lookup for a cold discovery module. It grants no execution
+// factory or browser authority and never reads runtime configuration.
+export function activationStatusForTarget(settings) {
+  let expected;
+  try { expected = activationTargetFingerprint(settings); } catch { return undefined; }
+  const matching = [...owners().values()].filter(owned => owned.status.targetFingerprint === expected);
+  const pending = matching.filter(owned => !terminal.has(owned.status.phase));
+  if (pending.length === 1) return { ...pending[0].status };
+  if (pending.length > 1) return undefined;
+  return matching.length === 1 ? { ...matching[0].status } : undefined;
 }
 
 async function writePrivateDiagnostic(path, value, current) {
@@ -47,8 +68,9 @@ export function createBrowserActivation({ api, binding, activate, cleanup = asyn
   const now = () => typeof scheduler.now === 'function' ? scheduler.now() : Date.now();
   const status = () => record ? { ...record.status } : { version: 1, phase: 'prepared', message: 'Browser Handoff service is not running' };
   function clearTimer(owned) { if (owned.timer) { scheduler.clearTimeout(owned.timer); owned.timer = undefined; } }
-  function isOwner(owned) { return record === owned && owners().get(owned.scope) === owned; }
+  function isOwner(owned) { return record === owned && owners().get(owned.scope) === owned.token; }
   function diagnostic(owned) {
+    owned.token.status = { ...owned.status };
     if (!owned.path && !writeDiagnostic) return Promise.resolve();
     const value = { ...owned.status }, key = owned.path || owned.scope;
     const prior = queues().get(key) || Promise.resolve();
@@ -70,14 +92,14 @@ export function createBrowserActivation({ api, binding, activate, cleanup = asyn
   function report(owned, error) {
     if (!isOwner(owned)) return;
     api.logger?.warn?.('Browser Handoff activation did not complete: ' + error.message);
-    owned.ctx.serviceHealth?.reportFailure?.(error);
+    if (typeof owned.ctx.serviceHealth?.reportFailure === 'function') owned.ctx.serviceHealth.reportFailure(error);
   }
   function assertCurrent(owned) {
     if (!isOwner(owned) || terminal.has(owned.status.phase) || owned.abort.signal.aborted)
       throw new Error('Browser Handoff activation ' + owned.status.phase + '; service generation changed or stopped');
     binding.current();
   }
-  function retireOwned(owned, message = 'Browser Handoff service generation retired; operator reconciliation is required') {
+  function retireOwned(owned, message = 'Browser Handoff service generation is retired and unavailable; operator reconciliation is required') {
     if (terminal.has(owned.status.phase)) return;
     clearTimer(owned); owned.abort.abort(new Error(message));
     void transition(owned, 'retired', message);
@@ -94,13 +116,13 @@ export function createBrowserActivation({ api, binding, activate, cleanup = asyn
       await transition(owned, 'active', 'Browser Handoff backend is active');
       assertCurrent(owned);
       if (isOwner(owned) && owned.status.phase === 'active') {
-        owned.ctx.serviceHealth?.clearFailure?.();
+        if (typeof owned.ctx.serviceHealth?.clearFailure === 'function') owned.ctx.serviceHealth.clearFailure();
         activated?.onActive?.();
       }
     }).catch(async error => {
       if (!terminal.has(owned.status.phase)) {
         clearTimer(owned); owned.abort.abort(error);
-        await transition(owned, 'failed', 'Browser Handoff backend activation failed; inspect service health and reload the plugin');
+        await transition(owned, 'failed', 'Browser Handoff backend activation failed and is unavailable; inspect service health and reload the plugin');
       }
       report(owned, error);
       try { if (record === owned) await cleanup(owned.status.phase); } catch (failure) { report(owned, failure); }
@@ -132,12 +154,18 @@ export function createBrowserActivation({ api, binding, activate, cleanup = asyn
     status,
     async start(ctx = {}) {
       if (record && !terminal.has(record.status.phase)) throw new Error('Browser Handoff service is already running or awaiting configuration publication');
-      const owned = record = { ctx, scope: scope || (isAbsolute(ctx.stateDir || '') ? ctx.stateDir : api.runtime?.config), abort: new AbortController(), status: { version: 1, generation: randomUUID(), phase: 'prepared', updatedAt: now(), message: 'Browser Handoff intended configuration is prepared' } };
-      if (!owned.scope) owned.scope = owned;
+      const owned = record = { ctx, scope: scopeKey(scope || (isAbsolute(ctx.stateDir || '') ? ctx.stateDir : api.runtime?.config)), abort: new AbortController(), status: { version: 1, generation: randomUUID(), phase: 'prepared', updatedAt: now(), message: 'Browser Handoff intended configuration is prepared' } };
       if (isAbsolute(ctx.stateDir || '')) owned.path = activationDiagnosticPath(ctx.stateDir);
-      const previous = owners().get(owned.scope); owners().set(owned.scope, owned);
-      if (previous && previous !== owned) previous.retire?.();
+      // The process registry stores fixed diagnostic metadata plus a weak owner
+      // reference. It cannot retain host API/config credentials after retirement.
+      owned.token = { status: { ...owned.status }, owner: new WeakRef(owned) };
+      const previous = owners().get(owned.scope); owners().set(owned.scope, owned.token);
+      previous?.owner.deref()?.retire?.();
       owned.retire = () => retireOwned(owned, 'Browser Handoff activation was superseded by a newer service generation');
+      for (const [key, value] of owners()) {
+        if (owners().size <= 128) break;
+        if (terminal.has(value.status.phase) && value !== owned.token) owners().delete(key);
+      }
       try {
         owned.prepared = binding.prepare();
         owned.status = { ...owned.status, backend: owned.prepared.binding.backend, profile: owned.prepared.binding.profile, publicTransport: owned.prepared.binding.backend === 'novnc' ? 'on-demand' : owned.prepared.pluginConfig.cloudflare?.enabled === true || owned.prepared.pluginConfig.funnel?.enabled === true ? 'warming' : owned.prepared.pluginConfig.publicBaseUrl ? 'ready' : 'disabled', targetFingerprint: createHash('sha256').update(owned.prepared.fingerprint).digest('hex') };
@@ -162,9 +190,9 @@ export function createBrowserActivation({ api, binding, activate, cleanup = asyn
       const owned = record;
       if (!owned) return;
       clearTimer(owned); owned.abort.abort(new Error('Browser Handoff service stopped'));
-      await transition(owned, 'stopped', 'Browser Handoff service stopped and is not running');
+      await transition(owned, 'stopped', 'Browser Handoff service stopped and is unavailable');
       try { if (record === owned) await cleanup('stopped'); }
-      finally { if (owners().get(owned.scope) === owned) owners().delete(owned.scope); }
+      finally { if (owners().get(owned.scope) === owned.token) owners().delete(owned.scope); }
     },
   };
 }

@@ -13,6 +13,7 @@ const pluginPath = fileURLToPath(new URL('../index.mjs', import.meta.url));
 const { createPlugin } = await import(pathToFileURL(pluginPath));
 const pluginConfig = { port: 0, ownerGroupSessions: ['agent:fixture:googlechat:channel:fixture'] };
 let currentConfig = { browser: { defaultProfile: 'daily', profiles: { daily: { driver: 'openclaw', attachOnly: true, cdpUrl: 'http://127.0.0.1:9222' }, other: { attachOnly: true, cdpUrl: 'http://127.0.0.1:9223' } } } };
+currentConfig.plugins = { entries: { 'browser-handoff': { enabled: true, config: pluginConfig } } };
 let currentAvailable = true;
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'clawser-owner-policy-native-'));
 Object.assign(process.env, {

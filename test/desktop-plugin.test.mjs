@@ -5,7 +5,7 @@ import { registerDesktopPlugin } from '../src/desktop-plugin.mjs';
 const ownerContext = () => ({ senderIsOwner: true, sessionKey: 'agent:main:telegram:direct:1', sessionId: 'incarnation', assertInvocationCurrent() {} });
 const browserEvent = { toolName: 'browser', params: { action: 'snapshot', profile: 'handoff' } };
 const invocation = () => ({ ...ownerContext(), runId: 'run', toolCallId: 'call' });
-function setup({ request, runtime = {}, registrationMode, configure, connect, register = registerDesktopPlugin, bindingMonitorScheduler } = {}) {
+function setup({ request, runtime = {}, registrationMode, configure, connect, register = registerDesktopPlugin, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic = async () => {} } = {}) {
   const hooks = new Map(), tools = [], services = [], requests = [], clients = [], policies = [];
   const api = {
     pluginConfig: { desktop: { enabled: true, profile: 'handoff', socketPath: '/tmp/browser-handoff/controller.sock' } },
@@ -29,9 +29,10 @@ function setup({ request, runtime = {}, registrationMode, configure, connect, re
     }, close() { this.closed = true; } };
     clients.push(client); return connect ? connect(client) : client;
   };
+  api.config.plugins = { entries: { 'browser-handoff': { enabled: true, config: api.pluginConfig } } };
   api.runtime.config ||= { current: () => api.config };
   configure?.(api);
-  register(api, { desktopRpcFactory: rpcFactory, bindingMonitorScheduler });
+  register(api, { desktopRpcFactory: rpcFactory, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic });
   return { api, hooks, tools, services, requests, clients, policies, tool: () => tools[0].create(ownerContext()) };
 }
 
@@ -573,6 +574,8 @@ test('production stop during full startup prevents late publication to discovery
   const starting = full.services[0].start();
   await eventually(() => assert.ok(full.requests.some(r => r.method === 'health')));
   const rejected = assert.rejects(starting, /service changed|stopped/i);
+  for (let attempt = 0; attempt < 100 && !full.clients.length; attempt++) await new Promise(setImmediate);
+  assert.equal(full.clients.length, 1, 'the connection must be in flight before stopping');
   await full.services[0].stop();
   release({ profile: 'handoff', cdpUrl: 'http://127.0.0.1:19333' });
   await rejected;
@@ -587,6 +590,8 @@ test('production stop before full RPC connection rejects and closes the late cli
   const full = setup({ connect: client => connecting.then(() => client) });
   const starting = full.services[0].start();
   const rejected = assert.rejects(starting, /service changed|stopped/i);
+  for (let attempt = 0; attempt < 100 && !full.clients.length; attempt++) await new Promise(setImmediate);
+  assert.equal(full.clients.length, 1, 'the connection must be in flight before stopping');
   await full.services[0].stop();
   release();
   await rejected;
@@ -683,4 +688,41 @@ test('noVNC results declare their backend while retaining strict full-browser ha
   assert.equal(result.details.profile, 'handoff'); assert.equal(result.details.resumeAllowed, true);
   assert.equal(result.details.recoveryRequired, false); assert.equal(result.details.continuation, 'active-wait');
   assert.deepEqual(JSON.parse(result.content[0].text), result.details);
+});
+
+test('native hot noVNC activation waits for committed current config before RPC or completion wake activity', async t => {
+  const { activationClock, flushActivation } = await import('./activation-clock.mjs');
+  const scheduler = activationClock(), diagnostics = [];
+  const f = setup({ activationScheduler: scheduler, activationWriteDiagnostic: async value => diagnostics.push(value) });
+  f.api.config.browser.defaultProfile = 'handoff';
+  f.api.config.plugins = { entries: { 'browser-handoff': { enabled: true, config: structuredClone(f.api.pluginConfig) } } };
+  const target = structuredClone(f.api.config); let current = structuredClone(target);
+  current.browser.defaultProfile = 'old'; current.browser.profiles.old = { cdpUrl: 'http://127.0.0.1:9555', attachOnly: true };
+  current.plugins.entries['browser-handoff'].config = { desktop: { enabled: false } };
+  f.api.runtime.config.current = () => current;
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  assert.equal(f.clients.length, 0); assert.equal(f.requests.length, 0);
+  await assert.rejects(f.tool().execute('tabs', { action: 'tabs' }), /awaiting.*configuration publication/i);
+  current = target; scheduler.advance(100); await flushActivation();
+  assert.equal(f.clients.length, 1); assert.equal(f.requests[0].method, 'health');
+  assert.equal(diagnostics.at(-1).phase, 'active');
+  assert.equal((await f.tool().execute('tabs', { action: 'tabs' })).details.profile, 'handoff');
+});
+
+test('stopping hot noVNC activation with pending health prevents late publication, completion polls and wake', async t => {
+  const { activationClock, flushActivation } = await import('./activation-clock.mjs');
+  let release; const scheduler = activationClock(), runtime = wakeRuntime();
+  const f = setup({ activationScheduler: scheduler, runtime, request: async (method, params, options, defaults) => method === 'health' ? new Promise(resolve => { release = resolve; }) : method === 'completions' ? [completed()] : defaults(method) });
+  let current = structuredClone(f.api.config); current.plugins.entries['browser-handoff'].enabled = false;
+  f.api.runtime.config.current = () => current;
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  const tools = [];
+  registerDesktopPlugin({ ...f.api, registrationMode: 'tool-discovery', registerTool: value => tools.push(value) });
+  await assert.rejects(tools[0].create(ownerContext()).execute('pending', { action: 'tabs' }), /awaiting.*configuration publication/i);
+  current = structuredClone(f.api.config); scheduler.advance(100); await flushActivation();
+  assert.equal(typeof release, 'function'); assert.equal(f.requests.filter(r => r.method === 'completions').length, 0);
+  await f.services[0].stop(); release({ profile: 'handoff', cdpUrl: 'http://127.0.0.1:19333' }); await flushActivation();
+  assert.ok(f.clients.every(client => client.closed));
+  assert.equal(f.requests.filter(r => r.method === 'completions').length, 0); assert.equal(runtime.events.length, 0); assert.equal(runtime.wakes.length, 0);
+  await assert.rejects(tools[0].create(ownerContext()).execute('late', { action: 'tabs' }), /unavailable|stopped/i);
 });

@@ -6,6 +6,7 @@ import { FunnelTransport } from './src/funnel.mjs';
 import { isAbsolute, join } from 'node:path';
 import { registerDesktopPlugin } from './src/desktop-plugin.mjs';
 import { registerClawserCli } from './src/cli.mjs';
+import { activationStatusForTarget, createBrowserActivation } from './src/browser-activation.mjs';
 import { createBrowserBindingGuard, monitorBrowserBinding, registerBrowserAccessPolicy } from './src/browser-policy.mjs';
 
 const ownerKey = (ctx) => JSON.stringify([ctx.sessionKey, ctx.sessionId]);
@@ -53,14 +54,14 @@ function awaitPublicTransport(readiness, signal) {
   });
 }
 
-export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backendFactory = (profiles) => new CdpBrowser(profiles), serverFactory = (options) => new HandoffServer(options), funnelFactory = (options) => new FunnelTransport(options), cloudflareFactory = options => new CloudflareTransport(options) } = {}) {
+export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic, backendFactory = (profiles) => new CdpBrowser(profiles), serverFactory = (options) => new HandoffServer(options), funnelFactory = (options) => new FunnelTransport(options), cloudflareFactory = options => new CloudflareTransport(options) } = {}) {
   return {
     id: 'browser-handoff', name: 'Clawser',
     register(api) {
       if (api.registrationMode !== 'tool-discovery') registerClawserCli(api);
       if (['cli-metadata', 'setup-only'].includes(api.registrationMode)) return;
-      if (api.pluginConfig?.desktop?.enabled === true) return registerDesktopPlugin(api, { desktopRpcFactory, bindingMonitorScheduler });
-      const config = api.pluginConfig || {};
+      if (api.pluginConfig?.desktop?.enabled === true) return registerDesktopPlugin(api, { desktopRpcFactory, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic });
+      let config = api.pluginConfig || {};
       const allowed = ctx => ownerAuthorized(ctx, config);
       if (api.registrationMode === 'tool-discovery') {
         api.registerTool({ contextVersion: 2, create(ctx) {
@@ -69,7 +70,11 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
           return { ...toolDescriptor, async execute(callId, params, signal) {
             current();
             const instance = liveInstances().get(instanceKey(api));
-            if (!instance) throw new Error('Browser Handoff existing-browser service is unavailable');
+            if (!instance) {
+              const state = activationStatusForTarget({ config: api.config, pluginConfig: api.pluginConfig });
+              if (state && state.phase !== 'active') throw new Error(state.message);
+              throw new Error('Browser Handoff existing-browser service is unavailable');
+            }
             const tool = instance.factory.create(ctx);
             if (!tool) throw new Error('Owner-authorized access required');
             return tool.execute(callId, params, signal);
@@ -78,7 +83,7 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
         return;
       }
       if (api.registrationMode !== undefined && api.registrationMode !== 'full') return;
-      let service, transport, transportReadiness, stopping = false, epoch, publication, stopBindingMonitor;
+      let service, transport, transportReadiness, stopping = false, epoch, publication, stopBindingMonitor, activation;
       const unpublish = () => {
         if (publication && liveInstances().get(publication.key) === publication) liveInstances().delete(publication.key);
         publication = undefined;
@@ -91,9 +96,11 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
         // human input or a pending native browser call from this generation.
         service.store.gate.poison();
         for (const share of [...service.store.shares.values()]) service.store.end(share, 'configuration_changed');
+        activation?.retire();
       } });
       const completed = new Map(), calls = new Map(), shareProfiles = new Map();
       const getService = () => {
+        activation.assertActive();
         if (!service || stopping) throw new Error('Browser Handoff service is not running');
         binding.current();
         if (!publication || liveInstances().get(publication.key) !== publication) throw new Error('Browser Handoff service is stale or unavailable');
@@ -101,18 +108,19 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
         return service;
       };
       registerBrowserAccessPolicy(api, { binding, assertAvailable: getService });
-      api.registerService({
-        id: 'browser-handoff',
-        async start(ctx = {}) {
+      const lifecycle = {
+        async activate({ ctx, prepared, assertCurrent, setPublicTransport }) {
+          assertCurrent();
+          config = prepared.pluginConfig;
           if (service) throw new Error('Browser Handoff service is already running or stopping');
           if (config.funnel?.enabled === true && config.cloudflare?.enabled === true) throw new Error('Funnel and Cloudflare transports are mutually exclusive');
-          const resolved = binding.pin();
+          const resolved = prepared.binding;
           unpublish(); stopping = false;
           const started = epoch = Symbol();
           const dynamic = config.funnel?.enabled === true || config.cloudflare?.enabled === true;
           let ownedService, published = false, retired = false;
           const retireDataPlane = () => {
-            retired = true;
+            retired = true; activation?.retire();
             if (epoch === started && service === ownedService && ownedService) {
               // Retire only this instance: its registry key may already belong
               // to a healthy replacement, and uncertain work retains its fence.
@@ -125,7 +133,7 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
           const isBindingCurrent = () => {
             if (retired) return false;
             if (epoch !== started || stopping) return retireDataPlane();
-            try { binding.current(); } catch { return retireDataPlane(); }
+            try { assertCurrent(); } catch { return retireDataPlane(); }
             if (ownedService?.store.gate.poisonReason) return retireDataPlane();
             // Assets are needed during startup before a service is published.
             // Once published, losing that exact registration is permanent.
@@ -135,6 +143,7 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
           ownedService = service = serverFactory({ isBindingCurrent, backend: backendFactory(resolved.profiles), publicBaseUrl: dynamic ? undefined : config.publicBaseUrl, comparisonProxyUrl: config.comparisonProxyUrl });
           let ownedTransport;
           const current = () => {
+            assertCurrent();
             if (epoch !== started || service !== ownedService || stopping || retired) throw new Error('Browser Handoff service changed during startup');
             binding.current();
           };
@@ -150,12 +159,14 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
             if (config.funnel?.enabled === true) {
               ownedTransport = transport = funnelFactory({ httpsPort: config.funnel.httpsPort ?? 10000, ownershipFile: join(ctx.stateDir, 'browser-handoff', 'funnel-ownership.json') });
               const origin = await ownedTransport.open(Number(new URL(ownedService.localUrl).port)); current();
-              ownedService.setPublicBase(origin);
+              ownedService.setPublicBase(origin); setPublicTransport('ready');
             } else if (config.cloudflare?.enabled === true) {
               ownedTransport = transport = cloudflareFactory({ binaryPath: config.cloudflare.binaryPath, startupTimeoutMs: config.cloudflare.startupTimeoutMs ?? 90_000, stateDir: join(ctx.stateDir, 'browser-handoff', 'cloudflare'), probePath: '/assets/style.css' });
               const readiness = transportReadiness = { abort: new AbortController(), service: ownedService };
               const failed = error => {
                 if (epoch !== started || service !== ownedService || transport !== ownedTransport || stopping) return;
+                setPublicTransport('failed');
+                activation.retire();
                 unpublish(); stopping = true;
                 readiness.abort.abort(error);
                 ownedService.setPublicBase(undefined);
@@ -170,7 +181,7 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
               readiness.promise = Promise.resolve().then(() => {
                 current();
                 return ownedTransport.ensure(Number(new URL(ownedService.localUrl).port));
-              }).then(origin => { current(); ownedService.setPublicBase(origin); }).catch(error => { failed(error); throw error; });
+              }).then(origin => { current(); ownedService.setPublicBase(origin); setPublicTransport('ready'); }).catch(error => { failed(error); throw error; });
               // Startup failures are observed even when no owner is waiting.
               void readiness.promise.catch(() => {});
             }
@@ -202,7 +213,10 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
             if (transportReadiness === readiness) transportReadiness = undefined;
           }
         },
-      });
+      };
+      activation = createBrowserActivation({ api, binding, scheduler: activationScheduler, writeDiagnostic: activationWriteDiagnostic,
+        activate: options => lifecycle.activate(options), cleanup: reason => reason === 'retired' ? undefined : lifecycle.stop() });
+      api.registerService({ id: 'browser-handoff', start: ctx => activation.start(ctx), stop: () => activation.stop() });
       api.on('before_tool_call', (event, ctx) => {
         if (!browserTool(event.toolName)) return;
         const id = callKey(event, ctx);
