@@ -20,26 +20,50 @@ function withDefaults(value, schema = manifest.configSchema) {
   return result;
 }
 
-// Every service generation is bound to the live host configuration at start.
-// A failed current read is itself drift: restoring a stale snapshot cannot
-// revive invitations or an automation fence from the retired generation.
-export function createBrowserBindingGuard(api, { onDrift = () => {} } = {}) {
-  let pinned, fingerprint, fault;
-  function read() {
-    const config = currentBrowserConfig(api);
-    const pluginConfig = api.pluginConfig || {};
-    const liveEntry = config.plugins?.entries?.['browser-handoff'];
-    if (liveEntry && (liveEntry.enabled === false || canonical(withDefaults(liveEntry.config || {})) !== canonical(withDefaults(pluginConfig))))
-      throw new Error('Browser Handoff plugin configuration changed');
-    const binding = resolveHandoffBrowser({ config, pluginConfig });
-    return { config, binding, fingerprint: canonical([
-      browserBindingKey(binding), config.browser.defaultProfile, pluginConfig, liveEntry,
-      Object.keys(binding.profiles).sort().map(profile => [profile, config.browser.profiles[profile]]), config.browser.attachOnly,
-    ]) };
+const freeze = value => {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) freeze(child);
+    Object.freeze(value);
   }
+  return value;
+};
+export function browserConfigurationState(config, pluginConfig = {}, { requireEnabledEntry = false } = {}) {
+  const liveEntry = config?.plugins?.entries?.['browser-handoff'];
+  if (requireEnabledEntry && liveEntry?.enabled !== true) throw new Error('Browser Handoff requires an explicitly enabled current plugin entry');
+  const normalized = withDefaults(pluginConfig);
+  if (liveEntry && (liveEntry.enabled === false || canonical(withDefaults(liveEntry.config || {})) !== canonical(normalized)))
+    throw new Error('Browser Handoff plugin configuration changed or is disabled');
+  const binding = resolveHandoffBrowser({ config, pluginConfig });
+  return { config, binding, fingerprint: canonical([
+    browserBindingKey(binding), config.browser.defaultProfile, normalized,
+    liveEntry ? { enabled: liveEntry.enabled !== false, config: withDefaults(liveEntry.config || {}) } : null,
+    Object.keys(binding.profiles).sort().map(profile => [profile, config.browser.profiles[profile]]), config.browser.attachOnly,
+  ]) };
+}
+export function prepareBrowserConfiguration({ config, pluginConfig = {}, requireEnabledEntry = false }) {
+  const snapshot = structuredClone({ config, pluginConfig });
+  return freeze({ ...browserConfigurationState(snapshot.config, snapshot.pluginConfig, { requireEnabledEntry }), pluginConfig: snapshot.pluginConfig, requireEnabledEntry });
+}
+
+// Intended registration settings can be prepared before native hot activation
+// commits them. Only pinning a fresh matching runtime read grants authority.
+export function createBrowserBindingGuard(api, { onDrift = () => {} } = {}) {
+  let pinned, fingerprint, fault, requireEnabledEntry = false;
+  const read = (required = requireEnabledEntry) => browserConfigurationState(currentBrowserConfig(api), api.pluginConfig || {}, { requireEnabledEntry: required });
   return {
-    pin() {
-      const state = read(); pinned = state.binding; fingerprint = state.fingerprint; fault = undefined;
+    prepare() {
+      let supported;
+      try { supported = typeof api.runtime?.config?.current === 'function'; } catch { /* unavailable runtime */ }
+      if (!supported) throw new Error('Current browser configuration API is unavailable');
+      return prepareBrowserConfiguration({ config: api.config, pluginConfig: api.pluginConfig, requireEnabledEntry: true });
+    },
+    matches(prepared) {
+      try { return read(prepared.requireEnabledEntry).fingerprint === prepared.fingerprint; } catch { return false; }
+    },
+    pin(prepared) {
+      const state = read(prepared?.requireEnabledEntry);
+      if (prepared && state.fingerprint !== prepared.fingerprint) throw new Error('Browser Handoff is awaiting configuration publication');
+      pinned = state.binding; fingerprint = state.fingerprint; fault = undefined; requireEnabledEntry = prepared?.requireEnabledEntry === true;
       return pinned;
     },
     current() {
@@ -82,8 +106,8 @@ export function createBrowserAccessPolicy({ api, binding, assertAvailable }) {
           !authorizedSession(ctx.sessionKey, api.pluginConfig?.ownerGroupSessions))
         return { allow: false, reason: 'Verified owner browser access requires a complete current native invocation in an authorized conversation' };
       try {
-        assertBrowserRoute(event, binding.current());
         assertAvailable();
+        assertBrowserRoute(event, binding.current());
       } catch (error) { return { allow: false, reason: error.message }; }
     },
   };

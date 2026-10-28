@@ -99,3 +99,15 @@ test('native page-text reads remain available on the pinned existing host connec
   const f = fixture();
   assert.equal(f.policy.evaluate(event({ action: 'text' }), identity()), undefined);
 });
+
+test('preparation snapshots intended host settings while mismatching current config stays unarmed and retryable', () => {
+  const f = fixture(); f.api.config = structuredClone(f.config);
+  f.api.config.plugins = { entries: { 'browser-handoff': { enabled: true, config: f.api.pluginConfig } } };
+  f.config.plugins = { entries: { 'browser-handoff': { enabled: false, config: f.api.pluginConfig } } };
+  const prepared = f.guard.prepare();
+  assert.equal(Object.isFrozen(prepared.config.browser.profiles), true);
+  assert.equal(f.guard.matches(prepared), false); assert.equal(f.drift, 0);
+  f.config.plugins.entries['browser-handoff'].enabled = true;
+  assert.equal(f.guard.matches(prepared), true); assert.doesNotThrow(() => f.guard.pin(prepared));
+  assert.equal(f.guard.current().binding.profile, 'daily');
+});
