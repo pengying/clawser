@@ -27,7 +27,7 @@ session, `flock`, and outbound HTTPS. Start your OpenClaw Gateway before setup. 
 not validated for this release.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.4.1 --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.4.1 --force --accept-capabilities
 openclaw clawser setup
 openclaw clawser doctor
 ```
