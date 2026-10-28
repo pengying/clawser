@@ -64,8 +64,10 @@ add `test/cdp-setup.test.mjs`; extend `test/cli.test.mjs`, `test/setup.test.mjs`
    unrelated settings and group allowlists. Default CDP keeps the current browser
    selection; an explicit operator profile selection uses an existing connection.
 4. Give CDP its own ownership/state namespace. Refuse conflicting unowned state;
-   preserve desktop receipts. Permit intentional enable/disable transitions only
-   when the corresponding ownership identity matches.
+   preserve desktop receipts. Explicit CDP setup may disable the desktop mode
+   flag without adopting or changing its resources; preserve its identity fields.
+   Enabling, reusing or provisioning a desktop still requires matching ownership
+   (or an exact inert disabled configuration with no identity on first install).
 5. Install/verify the pinned Cloudflare binary and patch CDP transport settings,
    disabling the plugin's old Funnel selection without touching unrelated routes.
 6. Make doctor inspect only the selected backend and remain read-only. Report the
