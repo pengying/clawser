@@ -1,6 +1,6 @@
 # Changes
 
-## 0.5.0 (planned)
+## 0.5.0
 
 - Make the existing configured default attach-only Chromium CDP connection the standard setup path. Reuse its selected tab without launching a browser, creating a Chrome profile, copying cookies or falling back to another endpoint.
 - Add a separate private CDP setup receipt, checksum-pinned cloudflared installation and read-only doctor checks for ownership, executable integrity, current browser binding, local viewer and public tunnel readiness. Keep Docker/noVNC desktop setup behind `--novnc`.
@@ -10,7 +10,7 @@
 - Support explicit mobile Keyboard control of the focused opaque/cross-origin frame, with bounded capabilities revoked on navigation, stale state or loss of control. Keep passive metadata value-free and never replay uncertain input.
 - Report backend-specific scope and handback: CDP shares one tab with active waits; noVNC shares a whole profile and requires `resumeAllowed=true`. Preserve existing browsers, tabs, profiles and strict desktop ownership across mode changes.
 
-## 0.4.2 (unreleased)
+## 0.4.2 (included in 0.5.0)
 
 - Generate new controller user units with `KillMode=mixed` so service stop preserves singleton authority through graceful input retirement, with bounded cleanup of remaining processes.
 - Keep read-only desktop status checks independent of the mutation lock while retaining ownership validation, so diagnostics cannot block handback at that lock.
