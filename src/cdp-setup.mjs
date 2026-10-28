@@ -6,6 +6,11 @@ const identity = 'clawser-cdp-setup-v1';
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 
+async function syncPath(path, d) {
+  const file = await d.fs.open(path, 'r');
+  try { await file.sync(); } finally { await file.close(); }
+}
+
 async function current(d, h) {
   const browser = await h.configSection('browser', d);
   const plugins = await h.configSection('plugins', d);
@@ -55,6 +60,7 @@ async function receipt(o, p, d, h) {
 }
 
 async function binary(p, saved, d, h, required = false) {
+  const pending = saved?.binaryDigest === undefined && saved?.pendingBinaryDigest === d.artifacts.cloudflared.sha256;
   await h.noSymlinks(p.binary, d);
   if (await h.stat(dirname(p.binary), d)) await h.privatePath(dirname(p.binary), 'directory', d);
   if (!await h.stat(p.binary, d)) {
@@ -62,9 +68,13 @@ async function binary(p, saved, d, h, required = false) {
     return false;
   }
   const info = await h.privatePath(p.binary, 'file', d);
+  if (!saved || (saved.binaryDigest !== d.artifacts.cloudflared.sha256 && !pending) || digest(await d.fs.readFile(p.binary)) !== d.artifacts.cloudflared.sha256) throw new Error('Existing cloudflared binary is unowned or changed; refusing to overwrite it');
+  if (pending) {
+    if (required) throw new Error('Pinned cloudflared installation is incomplete; rerun setup');
+    return 'pending';
+  }
   if (!(info.mode & 0o100)) throw new Error('Pinned cloudflared binary must be executable by its owner');
-  if (!saved || saved.binaryDigest !== d.artifacts.cloudflared.sha256 || digest(await d.fs.readFile(p.binary)) !== d.artifacts.cloudflared.sha256) throw new Error('Existing cloudflared binary is unowned or changed; refusing to overwrite it');
-  return true;
+  return 'installed';
 }
 
 function patch(config, connection, port, p, o) {
@@ -114,6 +124,19 @@ async function publicReady(port, d, h) {
   await viewerReady(transport.origin, d);
 }
 
+async function viewerPort(config, port, p, o, saved, installed, d, h) {
+  if (await d.isPortFree(port)) return;
+  try {
+    if (!saved || installed !== 'installed') throw new Error('No completed owned CDP setup');
+    const active = binding(config, { ...o, specified: [] }, true);
+    configured(config, active, port, p);
+    await viewerReady('http://127.0.0.1:' + port, d);
+    await publicReady(port, d, h);
+  } catch {
+    throw new Error('Viewer port ' + port + ' is in use by an unowned or unready service; stop that listener or select a free --port before setup');
+  }
+}
+
 /** Attach-only operator setup. This module never launches or provisions Chrome. */
 export async function runCdpSetup(o, d, h) {
   const p = { marker: join(o.stateDir, 'setup.json'), binary: join(o.stateDir, 'bin/cloudflared') };
@@ -124,10 +147,11 @@ export async function runCdpSetup(o, d, h) {
     finally { if (!checks.some(row => row.name === name)) checks.push({ name, ok: true }); }
   };
   if (o.command === 'doctor') {
+    let connection;
     const config = await check('configuration', () => current(d, h));
-    const saved = await check('ownership', async () => { const value = await receipt(o, p, d, h); if (!value) throw new Error('No owned CDP setup receipt; run clawser setup'); return value; });
+    const saved = await check('ownership', async () => { const value = await receipt(o, p, d, h); if (!value) throw new Error('No managed CDP setup receipt; run clawser setup'); return value; });
     if (config) {
-      const connection = await check('browser connection', async () => binding(config, o, true));
+      connection = await check('browser connection', async () => binding(config, o));
       const port = o.specified.includes('--port') ? o.port : config.plugin.port ?? 18796;
       if (connection) {
         await check('CDP endpoint', () => browserReady(connection, d));
@@ -137,8 +161,9 @@ export async function runCdpSetup(o, d, h) {
       }
     }
     if (saved) await check('pinned cloudflared', () => binary(p, saved, d, h, true));
+    if (connection) d.log('Browser connection: ' + connection.profile + '\nCDP: ' + connection.cdpUrl);
     for (const row of checks) d.log((row.ok ? 'OK ' : 'FAIL ') + row.name + (row.message ? ': ' + row.message : ''));
-    return { ok: checks.every(row => row.ok), command: o.command, backend: 'cdp', checks, stateDir: o.stateDir };
+    return { ok: checks.every(row => row.ok), command: o.command, backend: 'cdp', checks, stateDir: o.stateDir, ...(connection ? { profile: connection.profile, cdpUrl: connection.cdpUrl } : {}) };
   }
   const failed = checks.filter(row => !row.ok);
   if (failed.length) throw new Error(failed.map(row => row.name + ': ' + row.message).join('\n'));
@@ -150,6 +175,7 @@ export async function runCdpSetup(o, d, h) {
   const port = o.specified.includes('--port') ? o.port : config.plugin.port ?? 18796;
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Invalid configured viewer port');
   const proposed = patch(config, connection, port, p, o);
+  await viewerPort(config, port, p, o, saved, installed, d, h);
   if (o.dryRun) {
     d.log('Dry run: reuse existing browser connection ' + connection.profile + ', verify pinned cloudflared, configure its authenticated CDP viewer and reload browser-handoff.\nState: ' + o.stateDir + '\nNo files, downloads, services, or configuration were changed.');
     return { ok: true, command: o.command, backend: 'cdp', dryRun: true, stateDir: o.stateDir, patch: proposed };
@@ -162,25 +188,44 @@ export async function runCdpSetup(o, d, h) {
     await h.noSymlinks(o.stateDir, d);
     await d.fs.mkdir(o.stateDir, { mode: 0o700 });
     await h.privatePath(o.stateDir, 'directory', d);
-    saved = { identity, uid: d.uid, ownerId: randomUUID(), stateDir: o.stateDir, packageDir: d.packageDir };
-    await d.fs.writeFile(p.marker, JSON.stringify(saved) + '\n', { flag: 'wx', mode: 0o600 });
+    saved = { identity, uid: d.uid, ownerId: randomUUID(), stateDir: o.stateDir, packageDir: d.packageDir, pendingBinaryDigest: d.artifacts.cloudflared.sha256 };
+    const file = await d.fs.open(p.marker, 'wx', 0o600);
+    try { await file.writeFile(JSON.stringify(saved) + '\n'); await file.sync(); }
+    finally { await file.close(); }
   }
   const lock = join(o.stateDir, 'setup.lock');
   try { await d.fs.mkdir(lock, { mode: 0o700 }); }
   catch (error) { if (error.code === 'EEXIST') throw new Error('CDP setup is already locked; inspect the current setup process'); throw error; }
   try {
-    if (!installed) {
+    // Re-read under the installation lock. Publication may have completed
+    // between preflight and admission of a concurrent setup invocation.
+    saved = await receipt(o, p, d, h);
+    const binaryState = await binary(p, saved, d, h);
+    if (binaryState !== 'installed') {
+      // Persist the intended checksum before the binary can appear. A retry
+      // may repair only this owned, pinned pending installation, never adopt
+      // an unexplained file left beside a receipt without installation intent.
+      if (saved.pendingBinaryDigest !== d.artifacts.cloudflared.sha256) {
+        saved.pendingBinaryDigest = d.artifacts.cloudflared.sha256;
+        await h.atomicPrivate(p.marker, JSON.stringify(saved) + '\n', d);
+      }
       await d.fs.mkdir(dirname(p.binary), { recursive: true, mode: 0o700 });
       await h.privatePath(dirname(p.binary), 'directory', d);
-      await h.atomicPrivate(p.binary, contents, d);
+      await syncPath(o.stateDir, d);
+      if (!binaryState) await h.atomicPrivate(p.binary, contents, d);
       await d.fs.chmod(p.binary, 0o700);
+      await syncPath(p.binary, d);
+      await syncPath(dirname(p.binary), d);
       saved.binaryDigest = d.artifacts.cloudflared.sha256;
+      delete saved.pendingBinaryDigest;
       await h.atomicPrivate(p.marker, JSON.stringify(saved) + '\n', d);
+      await syncPath(o.stateDir, d);
     }
     config = await current(d, h);
     const latest = binding(config, o);
     if (latest.profile !== connection.profile || latest.cdpUrl !== connection.cdpUrl) throw new Error('Current browser connection changed during setup; rerun setup');
     const finalPatch = patch(config, latest, port, p, o);
+    await viewerPort(config, port, p, o, saved, 'installed', d, h);
     await d.run('openclaw', ['config', 'patch', '--stdin'], { input: JSON.stringify(finalPatch) + '\n' });
     await h.reloadPlugin(d);
   } finally { await d.fs.rm(lock, { recursive: true }); }
