@@ -30,9 +30,9 @@ const own = (value, key) => Object.hasOwn(value ?? {}, key);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 
-function execute(command, args, { input = '', timeoutMs = 30_000, cwd, env, combined = false } = {}) {
+function execute(command, args, { input = '', timeoutMs = 30_000, combined = false } = {}) {
   return new Promise((accept, reject) => {
-    const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], cwd, env: env && { ...process.env, ...env } });
+    const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '', stderr = '', overflow = false;
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
     child.stdout.on('data', bytes => {
@@ -112,7 +112,6 @@ function locations(o, d) {
     marker: join(o.stateDir, 'setup.json'), config: join(o.stateDir, 'controller.json'), state,
     runtime: join(state, 'runtime'), socket: join(state, 'desktop.sock'),
     binary: join(o.stateDir, 'bin/cloudflared'), assets: join(o.stateDir, 'vendor/novnc-1.7.0'),
-    hostDeps: join(o.stateDir, 'clawser-novnc'), hostRoot: join(o.stateDir, 'clawser-novnc/root'),
     serviceUnit, servicePath: join(configRoot, 'systemd/user', serviceUnit),
     controllerScript: join(d.packageDir, 'bin/desktop-controller.mjs'),
   };
@@ -283,7 +282,7 @@ async function ownedFiles(p, saved, d) {
       if (!checksum || sha256(await d.fs.readFile(path)) !== checksum) throw new Error('Refusing unowned or changed ' + ''.concat(name) + ': ' + ''.concat(path));
     } else if (checksum) throw new Error('Owned ' + ''.concat(name) + ' is missing: ' + ''.concat(path));
   }
-  for (const path of [p.state, p.runtime, dirname(p.binary), dirname(p.assets), ...(d.hostDependencies ? [p.hostDeps] : [])]) {
+  for (const path of [p.state, p.runtime, dirname(p.binary), dirname(p.assets)]) {
     if (await stat(path, d)) await privatePath(path, 'directory', d);
   }
 }
@@ -423,20 +422,18 @@ async function reloadPlugin(d) {
   throw new Error('OpenClaw is still unavailable for plugin reload. Configuration is saved; rerun setup after the Gateway is ready.');
 }
 
-const hostHelpers = { stat, noSymlinks, privatePath };
+const hostHelpers = { stat, noSymlinks };
 
-// An extraction published by an interrupted setup is adopted only while it matches its durable intent.
-async function hostPlan(saved, p, d) {
-  try { return await d.hostResolver.plan(saved?.hostDeps ?? (saved?.pendingHostDeps && await stat(p.hostRoot, d) ? saved.pendingHostDeps : undefined), p, d, hostHelpers); }
+async function hostPlan(saved, d) {
+  try { return await d.hostResolver.plan(saved?.hostDeps, d, hostHelpers); }
   catch (error) { throw new Error('host dependencies: ' + error.message); }
 }
 
 async function hostInstall(host, saved, p, warnings, d) {
-  const intend = async pending => { saved.pendingHostDeps = pending; await saveMarker(saved, p, d); };
-  const { record, warnings: late } = await d.hostResolver.install(host, p, d, hostHelpers, { intend, previous: saved.hostDeps });
+  const { record, warnings: late } = await d.hostResolver.install(host, d, { previous: saved.hostDeps });
   warnings.push(...late);
-  if (same(record, saved.hostDeps) && !own(saved, 'pendingHostDeps')) return;
-  saved.hostDeps = record; delete saved.pendingHostDeps;
+  if (same(record, saved.hostDeps)) return;
+  saved.hostDeps = record;
   await saveMarker(saved, p, d);
 }
 
@@ -522,7 +519,7 @@ async function diagnose(o, p, saved, d, checks) {
     });
     if (d.hostDependencies) {
       let warnings = [];
-      await check('host dependencies', async () => { warnings = await d.hostResolver.verify(saved.hostDeps, p, d, hostHelpers); });
+      await check('host dependencies', async () => { warnings = await d.hostResolver.verify(saved.hostDeps, d, hostHelpers); });
       checks.push(...warnings.map(message => ({ name: 'window manager', ok: true, warning: true, message })));
     }
     await check('desktop image', async () => {
@@ -614,7 +611,7 @@ export async function runClawser(argv, deps = {}) {
     return prefix + `${message}`;
   }).join('\n'));
   const saved = await marker(o, p, d);
-  const host = d.hostDependencies ? await hostPlan(saved, p, d) : undefined, warnings = [...host?.warnings ?? []];
+  const host = d.hostDependencies ? await hostPlan(saved, d) : undefined, warnings = [...host?.warnings ?? []];
   const patch = await configPatch(o, p, saved, d);
   const service = await audit(o, p, saved, d);
   if (o.dryRun) {
