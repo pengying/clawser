@@ -17,7 +17,7 @@ not supported by this first validated installer.
 ## ClawHub installation
 
 ```sh
-openclaw plugins install clawhub:@pengying/clawser@0.4.0 --accept-capabilities
+openclaw plugins install clawhub:@pengying/clawser@0.4.1 --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup
 openclaw clawser doctor
@@ -30,7 +30,7 @@ same setup and persistent browser as the GitHub distribution.
 ## Tagged Git installation
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.4.0 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.4.1 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup
 openclaw clawser doctor
@@ -45,8 +45,10 @@ Setup downloads cloudflared 2026.10.4 and noVNC 1.7.0 from their upstream projec
 checks their pinned SHA-256 hashes, builds the sandboxed Chromium image and
 installs a private controller as a user systemd service. It merges the dedicated
 browser profile, plugin settings and tool permission into OpenClaw configuration
-without replacing unrelated entries. Setup is a local operator command; a chat
-agent cannot invoke it through `browser_handoff`.
+without replacing unrelated entries. Standard setup uses the same noVNC
+full-browser viewer for private owner conversations and authorized groups/channels;
+channel authorization does not choose a different viewer. Setup is a local
+operator command; a chat agent cannot invoke it through `browser_handoff`.
 
 Follow setup’s printed activation/reload instructions. After controller
 maintenance, let an active owner turn settle, then run:
@@ -77,13 +79,13 @@ installation is described in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Release archive alternative
 
-Download `pengying-clawser-0.4.0.tgz` and `SHA256SUMS` from the
-[v0.4.0 release](https://github.com/pengying/clawser/releases/tag/v0.4.0) into the
+Download `pengying-clawser-0.4.1.tgz` and `SHA256SUMS` from the
+[v0.4.1 release](https://github.com/pengying/clawser/releases/tag/v0.4.1) into the
 same directory, then:
 
 ```sh
 sha256sum --check SHA256SUMS
-openclaw plugins install ./pengying-clawser-0.4.0.tgz --force --accept-capabilities
+openclaw plugins install ./pengying-clawser-0.4.1.tgz --force --accept-capabilities
 openclaw clawser setup
 openclaw clawser doctor
 ```
@@ -120,8 +122,10 @@ or profile volume.
 
 Setup makes `handoff` the default browser profile unless
 `--no-default-profile` is supplied. That profile has all of its own tabs, cookies,
-logins and dialogs; personal browser cookies are not imported. Keep secrets out
-of files intended for sharing.
+logins and dialogs. Existing headless tabs, unfinished forms and personal browser
+cookies are not transferred into the desktop. Start the task in the `handoff`
+profile, or return to its original browser to preserve work already in progress.
+Keep secrets out of files intended for sharing.
 
 Private setup files include `setup.json`, `controller.json`, verified downloads
 under `bin/` and `vendor/`, and controller socket/ledger/runtime state under
@@ -154,9 +158,9 @@ it may not exist yet immediately after setup.
    Replace the unit placeholder with the exact name reported for your instance.
 3. Keep the current installation source. For a ClawHub installation, install the
    reviewed version with `openclaw plugins install
-   clawhub:@pengying/clawser@0.4.0 --force --accept-capabilities --no-enable`.
+   clawhub:@pengying/clawser@0.4.1 --force --accept-capabilities --no-enable`.
    For a Git installation, use `openclaw plugins install
-   git:github.com/pengying/clawser@v0.4.0 --force --accept-capabilities --no-enable`.
+   git:github.com/pengying/clawser@v0.4.1 --force --accept-capabilities --no-enable`.
    Replace the version when upgrading. Changing installation source can change
    durable paths and requires an operator migration. While disabled, use its
    standalone `bin/clawser.mjs` entry point shown above to run `setup --dry-run`
@@ -237,6 +241,11 @@ screenshots, invitation URLs or viewer credentials. See [SECURITY.md](../SECURIT
 for vulnerability reporting.
 
 ## Existing-browser CDP and owner-requested groups
+
+This is an explicit compatibility mode using the selected-tab viewer, rather
+than the standard noVNC full-browser viewer. Desktop setup does not automatically
+fall back to CDP if the desktop is unavailable. Switching modes does not transfer
+tabs, logins or unfinished forms between browsers.
 
 Use this mode to share a selected tab from an already-running browser without
 running desktop setup. Configure the plugin entry under

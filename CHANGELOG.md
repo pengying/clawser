@@ -1,5 +1,10 @@
 # Changes
 
+## 0.4.1
+
+- Dismiss the existing-tab viewer’s More controls on outside mouse or touch input while preserving remote clicks, typing and inside controls.
+- Clarify that standard setup uses the same noVNC full-browser viewer across authorized channels; existing-tab CDP is an explicit compatibility mode, with no automatic fallback or browser-state transfer.
+
 ## 0.4.0
 
 - Add explicit owner-authorized group handoffs with native sender and conversation checks; private access remains the default.

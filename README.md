@@ -27,14 +27,14 @@ session, `flock`, and outbound HTTPS. Start your OpenClaw Gateway before setup. 
 not validated for this release.
 
 ```sh
-openclaw plugins install clawhub:@pengying/clawser@0.4.0 --accept-capabilities
+openclaw plugins install clawhub:@pengying/clawser@0.4.1 --accept-capabilities
 openclaw clawser setup
 openclaw clawser doctor
 ```
 
 The install command explicitly accepts Clawser’s declared plugin capabilities.
 The versioned Git source is also available with
-`openclaw plugins install git:github.com/pengying/clawser@v0.4.0 --force --accept-capabilities`.
+`openclaw plugins install git:github.com/pengying/clawser@v0.4.1 --force --accept-capabilities`.
 
 Setup verifies prerequisites, downloads checksum-pinned cloudflared and noVNC,
 builds the browser image, installs a private user service and merges the required
@@ -43,7 +43,10 @@ plan first with `openclaw clawser setup --dry-run`.
 
 Setup makes the dedicated `handoff` browser profile the OpenClaw default. Use
 `--no-default-profile` to keep your current default and select `handoff` explicitly
-for the task. It does not import your personal browser’s cookies.
+for the task. Standard setup uses the same noVNC full-browser viewer in private
+conversations and allowed groups/channels. Keep the task in that profile: setup
+does not transfer existing headless tabs, unfinished forms or personal browser
+cookies into the desktop.
 
 Follow the activation/reload instructions printed by setup, then run `doctor`.
 See [installation and maintenance](docs/install.md) for release archives, custom
@@ -133,6 +136,10 @@ browser snapshot after handback. Best-effort completion notifications may help
 resume a dormant session; they do not guarantee recovery across process crashes.
 
 ## Existing-browser mode and group opt-in
+
+Existing-browser CDP is an explicit compatibility mode. Desktop setup does not
+automatically fall back to it when the desktop is unavailable. It uses the
+selected-tab viewer rather than the noVNC full-browser viewer.
 
 To attach an already-running browser without creating a desktop/container, leave
 `desktop.enabled` absent or false and configure `profiles` with loopback CDP
