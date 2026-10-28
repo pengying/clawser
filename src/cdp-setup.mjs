@@ -124,14 +124,13 @@ async function publicReady(port, d, h) {
   await viewerReady(transport.origin, d);
 }
 
-async function viewerPort(config, port, p, o, saved, installed, d, h) {
+async function viewerPort(config, port, p, o, saved, installed, d) {
   if (await d.isPortFree(port)) return;
   try {
     if (!saved || installed !== 'installed') throw new Error('No completed owned CDP setup');
     const active = binding(config, { ...o, specified: [] }, true);
     configured(config, active, port, p);
     await viewerReady('http://127.0.0.1:' + port, d);
-    await publicReady(port, d, h);
   } catch {
     throw new Error('Viewer port ' + port + ' is in use by an unowned or unready service; stop that listener or select a free --port before setup');
   }
@@ -175,7 +174,7 @@ export async function runCdpSetup(o, d, h) {
   const port = o.specified.includes('--port') ? o.port : config.plugin.port ?? 18796;
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Invalid configured viewer port');
   const proposed = patch(config, connection, port, p, o);
-  await viewerPort(config, port, p, o, saved, installed, d, h);
+  await viewerPort(config, port, p, o, saved, installed, d);
   if (o.dryRun) {
     d.log('Dry run: reuse existing browser connection ' + connection.profile + ', verify pinned cloudflared, configure its authenticated CDP viewer and reload browser-handoff.\nState: ' + o.stateDir + '\nNo files, downloads, services, or configuration were changed.');
     return { ok: true, command: o.command, backend: 'cdp', dryRun: true, stateDir: o.stateDir, patch: proposed };
@@ -225,7 +224,7 @@ export async function runCdpSetup(o, d, h) {
     const latest = binding(config, o);
     if (latest.profile !== connection.profile || latest.cdpUrl !== connection.cdpUrl) throw new Error('Current browser connection changed during setup; rerun setup');
     const finalPatch = patch(config, latest, port, p, o);
-    await viewerPort(config, port, p, o, saved, 'installed', d, h);
+    await viewerPort(config, port, p, o, saved, 'installed', d);
     await d.run('openclaw', ['config', 'patch', '--stdin'], { input: JSON.stringify(finalPatch) + '\n' });
     await h.reloadPlugin(d);
   } finally { await d.fs.rm(lock, { recursive: true }); }

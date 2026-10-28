@@ -293,3 +293,24 @@ test('CDP repeated setup accepts its healthy configured viewer and refuses a dif
   await assert.rejects(runClawser(['setup', '--port', '19999'], h.deps), /[Vv]iewer port.*unowned/);
   assert.deepEqual(h.config, original);
 });
+
+test('CDP repeat setup can repair public transport failure through its healthy owned local viewer', async t => {
+  const h = await harness(t);
+  await runClawser(['setup'], h.deps);
+  h.deps.isPortFree = async () => false;
+  const fetch = h.deps.fetch;
+  h.deps.fetch = (url, options) => url.startsWith('https://fixture.trycloudflare.com/') ? Promise.reject(new Error('Public transport unavailable')) : fetch(url, options);
+  h.calls.length = 0;
+  assert.equal((await runClawser(['setup'], h.deps)).ok, true);
+  assert.ok(h.calls.some(call => call.args[0] === 'plugins' && call.args[1] === 'reload'));
+  const result = await runClawser(['doctor'], h.deps);
+  assert.equal(result.ok, false);
+  assert.ok(result.checks.some(row => row.name === 'viewer service' && row.ok));
+  assert.ok(result.checks.some(row => row.name === 'public transport' && !row.ok));
+  h.config.plugins.entries['browser-handoff'].config.cloudflare.binaryPath = '/unowned/cloudflared';
+  const original = structuredClone(h.config);
+  h.calls.length = 0;
+  await assert.rejects(runClawser(['setup'], h.deps), /[Vv]iewer port.*unowned/);
+  assert.deepEqual(h.config, original);
+  assert.equal(h.calls.some(call => call.args.includes('patch') || call.args.includes('reload')), false);
+});
