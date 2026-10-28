@@ -302,7 +302,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
           } else throw new Error('Unsupported handoff action');
           current();
           getClient(inspect);
-          const details = { ...result, profile: config.profile, scope: 'browser-profile', scopeNotice, browserGateFault: fault || result?.browserGateFault || null, resumeAllowed: !fault && result?.resumeAllowed === true && result?.recoveryRequired !== true, continuation, continuationNotice };
+          const details = { ...result, backend: 'novnc', profile: config.profile, scope: 'browser-profile', scopeNotice, browserGateFault: fault || result?.browserGateFault || null, resumeAllowed: !fault && result?.resumeAllowed === true && result?.recoveryRequired !== true, continuation, continuationNotice };
           return { content: [{ type: 'text', text: JSON.stringify(details) }], details };
         } finally { rpc?.close(); }
       },

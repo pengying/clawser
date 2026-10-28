@@ -674,3 +674,13 @@ test('noVNC rechecks binding after pending admission before sending browser ensu
   assert.equal(f.requests.filter(r => r.method === 'ensure').length, 0);
   assert.equal(f.requests.filter(r => r.method === 'automationLeave').length, 1);
 });
+
+test('noVNC results declare their backend while retaining strict full-browser handback fields', async t => {
+  const f = setup({ request: async (method, params, options, defaults) => method === 'status' ? { id: params.id, mode: 'ended', resumeAllowed: true, recoveryRequired: false } : defaults(method) });
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  const result = await f.tool().execute('status', { action: 'status', id: 'lease' });
+  assert.equal(result.details.backend, 'novnc'); assert.equal(result.details.scope, 'browser-profile');
+  assert.equal(result.details.profile, 'handoff'); assert.equal(result.details.resumeAllowed, true);
+  assert.equal(result.details.recoveryRequired, false); assert.equal(result.details.continuation, 'active-wait');
+  assert.deepEqual(JSON.parse(result.content[0].text), result.details);
+});

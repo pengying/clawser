@@ -518,3 +518,27 @@ test('prepublication asset readiness stays available and Cloudflare warmup remai
   ready('https://warmup.trycloudflare.com'); await new Promise(setImmediate);
   assert.equal(current(), true);
 });
+
+test('CDP results declare their tab backend contract and preserve each active or completed share profile', async t => {
+  const f = setup();
+  f.api.config.browser.profiles.other = { cdpUrl: 'http://127.0.0.1:9333', attachOnly: true };
+  f.api.pluginConfig.profiles.other = 'http://127.0.0.1:9333';
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  const tool = f.tools[0].create(f.ctx);
+  const check = (result, profile) => {
+    assert.equal(result.details.backend, 'cdp'); assert.equal(result.details.scope, 'tab');
+    assert.equal(result.details.continuation, 'active-wait'); assert.equal(result.details.profile, profile);
+    assert.deepEqual(JSON.parse(result.content[0].text), result.details);
+  };
+  check(await tool.execute('tabs', { action: 'tabs' }), 'demo');
+  const created = await tool.execute('create', { action: 'create', profile: 'other', targetId: 'tab' });
+  check(created, 'other');
+  check(await tool.execute('status', { action: 'status', id: created.details.id }), 'other');
+  const waiting = tool.execute('wait', { action: 'wait', id: created.details.id, timeoutSeconds: 1 });
+  f.getServer().store.end(f.getServer().store.get(created.details.id), 'done');
+  check(await waiting, 'other');
+  check(await tool.execute('ended-status', { action: 'status', id: created.details.id }), 'other');
+  check(await tool.execute('ended-wait', { action: 'wait', id: created.details.id }), 'other');
+  const revoked = await tool.execute('create-revoke', { action: 'create', profile: 'other', targetId: 'tab' });
+  check(await tool.execute('revoke', { action: 'revoke', id: revoked.details.id }), 'other');
+});

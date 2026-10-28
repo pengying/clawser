@@ -92,7 +92,7 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
         service.store.gate.poison();
         for (const share of [...service.store.shares.values()]) service.store.end(share, 'configuration_changed');
       } });
-      const completed = new Map(), calls = new Map();
+      const completed = new Map(), calls = new Map(), shareProfiles = new Map();
       const getService = () => {
         if (!service || stopping) throw new Error('Browser Handoff service is not running');
         binding.current();
@@ -140,7 +140,8 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
           };
           ownedService.store.on('ended', event => {
             if (service !== ownedService) return;
-            completed.set(event.id, { ...event, mode: 'ended', viewerMetrics: ownedService.viewerMetrics?.(event.id) || null });
+            completed.set(event.id, { ...event, profile: shareProfiles.get(event.id), mode: 'ended', viewerMetrics: ownedService.viewerMetrics?.(event.id) || null });
+            shareProfiles.delete(event.id);
             while (completed.size > 100) completed.delete(completed.keys().next().value);
           });
           try {
@@ -196,7 +197,7 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
           try { await ownedService?.close(); }
           finally {
             try { await ownedTransport?.close(); } catch { api.logger.warn('Browser Handoff could not verify public transport cleanup; inspect the owned route/process.'); }
-            if (service === ownedService) { service = undefined; calls.clear(); completed.clear(); }
+            if (service === ownedService) { service = undefined; calls.clear(); completed.clear(); shareProfiles.clear(); }
             if (transport === ownedTransport) transport = undefined;
             if (transportReadiness === readiness) transportReadiness = undefined;
           }
@@ -236,11 +237,11 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
           const share = s.store.shares.get(id);
           if (share) {
             if (share.owner !== owner) throw new Error('Share belongs to another owner session');
-            try { return { ...s.store.state(share), browserGateFault: s.store.gate.poisonReason, viewerMetrics: s.viewerMetrics?.(id) || null }; } catch {}
+            try { return { ...s.store.state(share), profile: share.target.profile, browserGateFault: s.store.gate.poisonReason, viewerMetrics: s.viewerMetrics?.(id) || null }; } catch {}
           }
           const end = completed.get(id);
           if (!end || end.owner !== owner) throw new Error('Unknown share for this owner session');
-          return { id, mode: 'ended', reason: end.reason, browserGateFault: s.store.gate.poisonReason, viewerMetrics: end.viewerMetrics || null };
+          return { id, mode: 'ended', profile: end.profile, reason: end.reason, browserGateFault: s.store.gate.poisonReason, viewerMetrics: end.viewerMetrics || null };
         }
         return {
           ...toolDescriptor,
@@ -274,6 +275,7 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
               const ttlSeconds = params.ttlSeconds ?? 300;
               if (!Number.isInteger(ttlSeconds) || ttlSeconds < 30 || ttlSeconds > 1800) throw new Error('Invalid invitation lifetime');
               const invite = s.store.create({ owner, target: { profile, targetId: params.targetId }, ttlMs: ttlSeconds * 1000, permission: params.permission || 'control' });
+              shareProfiles.set(invite.id, profile);
               result = { profile, id: invite.id, url: s.publicBaseUrl + '/s/' + invite.id + '/#invite=' + invite.secret, expiresAt: invite.expiresAt, permission: params.permission || 'control', mode: 'unclaimed' };
             } else if (params.action === 'revoke') {
               s.store.revoke(params.id, owner); result = status(params.id);
@@ -299,6 +301,7 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
               }
             } else throw new Error('Unsupported handoff action');
             active();
+            result = { ...result, backend: 'cdp', scope: 'tab', continuation: 'active-wait', profile: result.profile ?? resolved.profile };
             return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
           },
         };
