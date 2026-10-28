@@ -15,11 +15,11 @@ not require Docker, systemd, `flock`, `tar` or a noVNC download. The optional
 
 ## Tagged Git installation
 
-This guide describes v0.5.0. Tagged Git installation is the recommended
+This guide describes v0.6.0. Tagged Git installation is the recommended
 distribution path.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.5.0 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.6.0 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup
 openclaw clawser doctor
@@ -135,13 +135,13 @@ replace the native capability-acceptance step. Developer installation is in
 
 ## Release archive alternative
 
-Once published, download `pengying-clawser-0.5.0.tgz` and `SHA256SUMS` from the
-[v0.5.0 release](https://github.com/pengying/clawser/releases/tag/v0.5.0) into the
+Once published, download `pengying-clawser-0.6.0.tgz` and `SHA256SUMS` from the
+[v0.6.0 release](https://github.com/pengying/clawser/releases/tag/v0.6.0) into the
 same directory:
 
 ```sh
 sha256sum --check SHA256SUMS
-openclaw plugins install ./pengying-clawser-0.5.0.tgz --force --accept-capabilities
+openclaw plugins install ./pengying-clawser-0.6.0.tgz --force --accept-capabilities
 openclaw clawser setup
 openclaw clawser doctor
 ```
@@ -280,7 +280,7 @@ run the applicable diagnostics and check the owner-session tabs before resuming.
    The systemd command is only for noVNC; substitute the reported unit.
 3. Keep the same installation source/path. Once the tag is published, a Git
    upgrade can use `openclaw plugins install
-   git:github.com/pengying/clawser@v0.5.0 --force --accept-capabilities --no-enable`.
+   git:github.com/pengying/clawser@v0.6.0 --force --accept-capabilities --no-enable`.
    While disabled, run the installed standalone setup entry point with
    `--dry-run`, then setup, retaining the mode and original state/options.
    noVNC requires `--novnc`; plain setup chooses CDP.
