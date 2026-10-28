@@ -3,18 +3,19 @@ import { randomBytes } from 'node:crypto';
 import { interactionCollector } from './interaction-metadata.mjs';
 import { pickerOpen, pickerApply, pickerCancel } from './native-picker.mjs';
 
-const KEYS = {
-  Enter: [13, 'Enter'], Tab: [9, 'Tab'], Backspace: [8, 'Backspace'], Escape: [27, 'Escape'],
-  ArrowLeft: [37, 'ArrowLeft'], ArrowUp: [38, 'ArrowUp'], ArrowRight: [39, 'ArrowRight'],
-  ArrowDown: [40, 'ArrowDown'], Delete: [46, 'Delete'], Home: [36, 'Home'], End: [35, 'End'],
-  'Ctrl+A': [65, 'KeyA'],
-};
+const KEYS = Object.fromEntries(Object.entries({
+  Enter: 13, Tab: 9, Backspace: 8, Escape: 27,
+  ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39,
+  ArrowDown: 40, Delete: 46, Home: 36, End: 35,
+  'Ctrl+A': 65,
+}).map(([name, windowsVirtualKeyCode]) => [name, [windowsVirtualKeyCode, name === 'Ctrl+A' ? 'KeyA' : name]]));
+const EDIT_OPERATIONS = Object.keys({ insert: true, backspace: true, delete: true, enter: true, key: true });
 const finite = (v, min, max) => typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
 const pickerRegion = (document, regionId) => {
   if (!/^[a-f0-9]{32}$/.test(document || '') || typeof regionId !== 'string' || regionId.length > 49 ||
       !/^[a-f0-9]{32}:[1-9][0-9]*$/.test(regionId)) return false;
   const index = Number(regionId.slice(33));
-  return Number.isSafeInteger(index) && regionId === `${document}:${index}`;
+  return Number.isSafeInteger(index) && regionId === (`${document}` + ':' + index);
 };
 export function validateInput(event) {
   if (!event || typeof event !== 'object' || Array.isArray(event)) throw new Error('Invalid input');
@@ -31,7 +32,7 @@ export function validateInput(event) {
   if (event.kind === 'pickerCancel' && /^[a-f0-9]{32}$/.test(event.pickerToken || ''))
     return { kind: 'pickerCancel', pickerToken: event.pickerToken };
   if (event.kind === 'edit' && /^[a-f0-9]{32}$/.test(event.focusToken || '') &&
-      ['insert', 'backspace', 'delete', 'enter', 'key'].includes(event.operation) &&
+      EDIT_OPERATIONS.includes(event.operation) &&
       (event.operation !== 'insert' || typeof event.text === 'string' && event.text.length <= 4096) &&
       (event.operation !== 'key' || Object.hasOwn(KEYS, event.key)))
     return { kind: 'edit', focusToken: event.focusToken, operation: event.operation, ...(event.operation === 'insert' ? { text: event.text } : event.operation === 'key' ? { key: event.key } : {}) };

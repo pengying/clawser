@@ -90,7 +90,7 @@ for (const proxy of proxies) {
 function syncViewport() {
   const visible = window.visualViewport;
   document.documentElement.style.setProperty('--visible-height', `${visible?.height || innerHeight}px`);
-  document.documentElement.style.setProperty('--keyboard-inset', `${Math.max(0, innerHeight - (visible?.height || innerHeight) - (visible?.offsetTop || 0))}px`);
+  document.documentElement.style.setProperty('--keyboard-inset', Math.max(0, innerHeight - (visible?.height || innerHeight) - (visible?.offsetTop || 0)) + 'px');
 }
 window.visualViewport?.addEventListener('resize', syncViewport);
 window.visualViewport?.addEventListener('scroll', syncViewport);
@@ -99,9 +99,9 @@ function zoomTo(value, anchor = { x: viewport.clientWidth / 2, y: viewport.clien
   const previous = zoom;
   zoom = Math.max(1, Math.min(4, value));
   const x = (viewport.scrollLeft + anchor.x) / previous, y = (viewport.scrollTop + anchor.y) / previous;
-  canvas.style.width = `${zoom * 100}%`;
+  canvas.style.width = (zoom * 100) + '%';
   viewport.scrollLeft = x * zoom - anchor.x; viewport.scrollTop = y * zoom - anchor.y;
-  $('zoomReset').textContent = zoom === 1 ? 'Fit width' : `${Math.round(zoom * 100)}% · reset`;
+  $('zoomReset').textContent = zoom === 1 ? 'Fit width' : Math.round(zoom * 100) + '% · reset';
 }
 $('zoomIn').onclick = () => zoomTo(zoom * 1.25);
 $('zoomOut').onclick = () => zoomTo(zoom / 1.25);
@@ -129,7 +129,7 @@ async function request(action, data = {}) {
   return result;
 }
 async function readState() {
-  const response = await fetch(`${base}/state`, { signal: AbortSignal.timeout(stateTimeoutMs) });
+  const response = await fetch(base + '/state', { signal: AbortSignal.timeout(stateTimeoutMs) });
   if (response.ok) return { value: await response.json() };
   if (definitiveStateStatuses.has(response.status)) return { ended: true };
   return { transient: true };
@@ -224,7 +224,7 @@ function connect() {
   const generation = ++connectionGeneration;
   frameSeen = rendering = false; connectionId = null; sequence = intentSequence = 0; inputWindow = 1; interactions = latestInputTiming = null;
   let ws;
-  try { ws = socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}${base}/stream`); }
+  try { ws = socket = new WebSocket((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + base + '/stream'); }
   catch {
     socket = null; connectionGeneration++; status('Unable to connect to the browser stream. Retrying…', true); reconnectLater(); return;
   }
@@ -327,7 +327,7 @@ async function openViewer() {
   let claimAttempted = false, nextState;
   while (!ended && bootstrapController === controller && !controller.signal.aborted) {
     let result;
-    try { result = await readDuringStartup(`${base}/state`, {}, controller.signal); }
+    try { result = await readDuringStartup(base + '/state', {}, controller.signal); }
     catch {
       if (controller.signal.aborted) return;
       status('Browser connection is taking longer than expected. Retrying…', true); await startupPause(controller.signal); continue;
@@ -338,7 +338,7 @@ async function openViewer() {
     if (response.status === 401 && invite && !claimAttempted) {
       claimAttempted = true;
       try {
-        const claimed = await readDuringStartup(`${base}/claim`, {
+        const claimed = await readDuringStartup(base + '/claim', {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: invite }),
         }, controller.signal, 15_000);
         if (ended || bootstrapController !== controller || controller.signal.aborted) return;
@@ -509,5 +509,5 @@ function suspend() {
 }
 document.addEventListener('visibilitychange', () => { if (document.hidden) suspend(); });
 window.addEventListener('pagehide', () => { suspend(); socket?.close(); });
-setInterval(() => { if (state && !ended) $('expiry').textContent = `${Math.max(0, Math.ceil((state.expiresAt - Date.now()) / 1000))}s remaining`; }, 1000);
+setInterval(() => { if (state && !ended) $('expiry').textContent = Math.max(0, Math.ceil((state.expiresAt - Date.now()) / 1000)) + 's remaining'; }, 1000);
 void openViewer();

@@ -63,7 +63,7 @@ export class HandoffServer {
       this.server.once('error', reject);
       this.server.listen(port, '127.0.0.1', resolve);
     });
-    this.localUrl = `http://127.0.0.1:${this.server.address().port}`;
+    this.localUrl = 'http://127.0.0.1:' + this.server.address().port;
     this.expiry = setInterval(() => this.store.sweep(), 100); this.expiry.unref();
     this.ping = setInterval(() => {
       for (const ws of this.wss.clients) {
@@ -79,7 +79,7 @@ export class HandoffServer {
     const tab = (await this.backend.list(profile)).find((tab) => tab.targetId === targetId);
     if (!tab) throw new Error('Selected HTTP(S) tab is unavailable');
     const invite = this.store.create({ owner, target: { profile, targetId }, permission, ttlMs });
-    const url = `${this.publicBaseUrl || this.localUrl}/s/${invite.id}/#invite=${invite.secret}`;
+    const url = (this.publicBaseUrl || this.localUrl) + '/s/' + invite.id + '/#invite=' + invite.secret;
     return { id: invite.id, url, expiresAt: invite.expiresAt, permission, title: tab.title };
   }
   async handle(req, res) {
@@ -106,7 +106,7 @@ export class HandoffServer {
           let session;
           try { session = this.store.claim(id, input.token); } catch { throw fail('Invalid, claimed, or expired invitation', 401); }
           const secure = (this.publicBaseUrl || this.localUrl).startsWith('https:') ? '; Secure' : '';
-          res.setHeader('Set-Cookie', `handoff=${session.secret}; Path=/s/${id}/; HttpOnly; SameSite=Strict; Max-Age=${Math.max(1, Math.floor((session.expiresAt - Date.now()) / 1000))}${secure}`);
+          res.setHeader('Set-Cookie', 'handoff=' + session.secret + '; Path=/s/' + id + '/; HttpOnly; SameSite=Strict; Max-Age=' + Math.max(1, Math.floor((session.expiresAt - Date.now()) / 1000)) + secure);
           json(res, 200, this.store.state(this.store.authorize(id, session.secret))); return;
         }
       } else if (req.method !== 'GET' || action !== 'state') throw fail('Method not allowed', 405);
@@ -221,7 +221,17 @@ export class HandoffServer {
           }
           catch (error) {
             if (!error.definitive) {
-              console.warn(`Browser Handoff input transport failed; command=${error.method || 'unknown'}; cause=${error.causeCode || 'unknown'}; causeCommand=${error.causeMethod || 'unknown'}; kind=${currentInput?.kind || 'unknown'}; phase=${currentInput?.phase || 'none'}`);
+              const method = error.method || 'unknown';
+              const command = `${method}`;
+              const code = error.causeCode || 'unknown';
+              const cause = `${code}`;
+              const causeMethod = error.causeMethod || 'unknown';
+              const causeCommand = `${causeMethod}`;
+              const inputKind = currentInput?.kind || 'unknown';
+              const kind = `${inputKind}`;
+              const inputPhase = currentInput?.phase || 'none';
+              const phase = `${inputPhase}`;
+              console.warn('Browser Handoff input transport failed; command=' + command + '; cause=' + cause + '; causeCommand=' + causeCommand + '; kind=' + kind + '; phase=' + phase);
               this.store.gate.poison();
               rejectInput('Input outcome uncertain. Agent browser actions remain blocked; operator recovery required.');
               await this.closeConnection(entry);

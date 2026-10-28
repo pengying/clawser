@@ -5,8 +5,8 @@ export class NativePickerUI {
   #generation = 0;
   #syncViewport = () => {
     const viewport = window.visualViewport;
-    this.dialog.style.setProperty('--picker-visible-top', `${viewport?.offsetTop || 0}px`);
-    this.dialog.style.setProperty('--picker-visible-height', `${viewport?.height || innerHeight}px`);
+    this.dialog.style.setProperty('--picker-visible-top', (viewport?.offsetTop || 0) + 'px');
+    this.dialog.style.setProperty('--picker-visible-height', (viewport?.height || innerHeight) + 'px');
     this.dialog.classList.toggle('picker-keyboard-compact', Boolean(
       this.#descriptor?.kind === 'color' && viewport && viewport.width > viewport.height && viewport.height < 240,
     ));

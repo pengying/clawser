@@ -2,13 +2,16 @@ const HEX32 = /^[a-f0-9]{32}$/;
 const COLOR = /^#[a-f0-9]{6}$/;
 const MAX_OPTIONS = 256;
 
-const expression = (request) => `(${nativePickerAction.toString()})(${JSON.stringify(request)})`;
+const expression = (request) => {
+  const source = nativePickerAction.toString();
+  return '(' + source + ')(' + JSON.stringify(request) + ')';
+};
 
 // These builders select one of three fixed isolated-world actions. Viewer data
 // is JSON data only; it can never supply script, selectors, or CDP methods.
 export function pickerOpen(document, regionId) {
   const index = typeof regionId === 'string' && regionId.length <= 49 ? Number(regionId.slice(33)) : NaN;
-  if (!HEX32.test(document) || !Number.isSafeInteger(index) || regionId !== `${document}:${index}` ||
+  if (!HEX32.test(document) || !Number.isSafeInteger(index) || regionId !== (`${document}` + ':' + index) ||
       !/^[a-f0-9]{32}:[1-9][0-9]*$/.test(regionId)) throw new Error('Invalid picker open request');
   return expression({ action: 'open', document, regionId });
 }
@@ -98,7 +101,7 @@ function nativePickerAction(request) {
   };
   const optionDisabled = (option) => option.disabled || Boolean(optionGroup(option)?.disabled);
   const opaqueId = (node) => {
-    if (node && !state.ids.has(node)) state.ids.set(node, `${state.seed}:option:${token()}`);
+    if (node && !state.ids.has(node)) state.ids.set(node, state.seed + ':option:' + token());
     return node ? state.ids.get(node) : null;
   };
   const optionSnapshot = (option, index) => {

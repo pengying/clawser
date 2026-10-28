@@ -44,7 +44,7 @@ function execute(command, args, { input = '', timeoutMs = 30_000 } = {}) {
       clearTimeout(timer);
       if (code === 0 && !overflow) accept(stdout.trim());
       else {
-        const error = new Error(`${command} failed (${signal || code}): ${stderr.slice(-1000)}`);
+        const error = new Error(`${command}` + ' failed (' + (signal || code) + '): ' + stderr.slice(-1000));
         Object.assign(error, { code, stdout, stderr }); reject(error);
       }
     });
@@ -73,23 +73,23 @@ async function controllerHealth(socketPath) {
 function options(argv, d) {
   const command = argv[0] ?? 'help';
   if (['help', '--help', '-h'].includes(command)) return { command: 'help' };
-  if (!['setup', 'doctor'].includes(command)) throw new Error(`Unknown Clawser command: ${command}`);
+  if (!['setup', 'doctor'].includes(command)) throw new Error('Unknown Clawser command: ' + `${command}`);
   const result = { command, stateDir: join(d.env.OPENCLAW_STATE_DIR || join(d.homeDir, '.openclaw'), 'clawser'), profile: 'handoff', port: 19410, cdpPort: 18812, vncPort: 59092, containerName: 'openclaw-handoff-desktop', defaultProfile: true, dryRun: false };
   const values = { '--state-dir': 'stateDir', '--browser-profile': 'profile', '--port': 'port', '--cdp-port': 'cdpPort', '--vnc-port': 'vncPort', '--container-name': 'containerName' };
   const seen = new Set();
   for (let i = 1; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === '--help' || flag === '-h') return { command: 'help' };
-    if (seen.has(flag)) throw new Error(`Invalid repeated flag: ${flag}`);
+    if (seen.has(flag)) throw new Error('Invalid repeated flag: ' + ''.concat(flag));
     seen.add(flag);
     if (flag === '--dry-run') { result.dryRun = true; continue; }
     if (flag === '--no-default-profile') { result.defaultProfile = false; continue; }
-    if (!values[flag]) throw new Error(`Unknown Clawser flag: ${flag}`);
+    if (!values[flag]) throw new Error('Unknown Clawser flag: ' + ''.concat(flag));
     const value = argv[++i];
-    if (!value || value.startsWith('--') || /[\x00-\x1f\x7f]/.test(value)) throw new Error(`Invalid value for ${flag}`);
+    if (!value || value.startsWith('--') || /[\x00-\x1f\x7f]/.test(value)) throw new Error('Invalid value for ' + ''.concat(flag));
     const key = values[flag];
     if (['port', 'cdpPort', 'vncPort'].includes(key)) {
-      if (!/^\d+$/.test(value) || Number(value) < 1024 || Number(value) > 65535) throw new Error(`Invalid port for ${flag}`);
+      if (!/^\d+$/.test(value) || Number(value) < 1024 || Number(value) > 65535) throw new Error('Invalid port for ' + ''.concat(flag));
       result[key] = Number(value);
     } else result[key] = value;
   }
@@ -103,7 +103,7 @@ function options(argv, d) {
 }
 
 function locations(o, d) {
-  const serviceUnit = `clawser-desktop-${sha256(o.stateDir).slice(0, 12)}.service`;
+  const serviceUnit = 'clawser-desktop-' + sha256(o.stateDir).slice(0, 12) + '.service';
   const state = join(o.stateDir, 'state');
   const configRoot = d.env.XDG_CONFIG_HOME || join(d.homeDir, '.config');
   if (!isAbsolute(configRoot)) throw new Error('XDG_CONFIG_HOME must be absolute');
@@ -127,13 +127,13 @@ async function noSymlinks(path, d) {
     current = join(current, part);
     const info = await stat(current, d);
     if (!info) break;
-    if (info.isSymbolicLink()) throw new Error(`Refusing symlink path: ${current}`);
+    if (info.isSymbolicLink()) throw new Error('Refusing symlink path: ' + ''.concat(current));
   }
 }
 
 async function privatePath(path, kind, d) {
   const info = await stat(path, d);
-  if (!info || !(kind === 'directory' ? info.isDirectory() : info.isFile()) || info.uid !== d.uid || (info.mode & 0o077)) throw new Error(`Refusing unowned or non-private ${kind}: ${path}`);
+  if (!info || !(kind === 'directory' ? info.isDirectory() : info.isFile()) || info.uid !== d.uid || (info.mode & 0o077)) throw new Error('Refusing unowned or non-private ' + ''.concat(kind) + ': ' + ''.concat(path));
   return info;
 }
 
@@ -143,7 +143,7 @@ async function marker(o, p, d) {
   await noSymlinks(o.stateDir, d);
   if (!await stat(o.stateDir, d)) return undefined;
   await privatePath(o.stateDir, 'directory', d);
-  if (!await stat(p.marker, d)) throw new Error(`State path exists without Clawser ownership: ${o.stateDir}`);
+  if (!await stat(p.marker, d)) throw new Error('State path exists without Clawser ownership: ' + ''.concat(o.stateDir));
   await privatePath(p.marker, 'file', d);
   const saved = await readJson(p.marker, d);
   if (saved.identity !== identity || saved.uid !== d.uid || !/^[a-f0-9-]{36}$/.test(saved.ownerId || '')) throw new Error('Refusing unowned Clawser setup receipt');
@@ -173,7 +173,7 @@ async function prerequisites(d) {
     for (const relative of ['index.mjs', 'bin/desktop-controller.mjs', 'runtime/desktop/Dockerfile', 'runtime/desktop/chromium-seccomp.json']) {
       const path = join(d.packageDir, relative);
       await noSymlinks(path, d);
-      if (!(await stat(path, d))?.isFile()) throw new Error(`Installed package is missing ${relative}`);
+      if (!(await stat(path, d))?.isFile()) throw new Error('Installed package is missing ' + ''.concat(relative));
     }
   });
   // Unsupported hosts should not run any external commands.
@@ -195,7 +195,7 @@ async function configSection(name, d) {
   catch (error) {
     let envelope;
     try { envelope = JSON.parse(error.stdout); } catch {}
-    const unset = `Config path is valid but unset: ${name}. The runtime default applies until you set an authored value with openclaw config set ${name} <value>.`;
+    const unset = 'Config path is valid but unset: ' + ''.concat(name) + '. The runtime default applies until you set an authored value with openclaw config set ' + ''.concat(name) + ' <value>.';
     if (error.code === 1 && typeof error.stderr === 'string' && !error.stderr.trim() && envelope?.ok === false && envelope.error?.type === 'cli_error' && envelope.error.message === unset) return {};
     // Unknown paths, malformed config and permission failures must never be
     // mistaken for empty sections. Do not echo arbitrary JSON error payloads:
@@ -204,11 +204,11 @@ async function configSection(name, d) {
   }
   if (!output.trim()) return {};
   const value = JSON.parse(output);
-  if (!object(value)) throw new Error(`Conflicting non-object OpenClaw ${name} configuration`);
+  if (!object(value)) throw new Error('Conflicting non-object OpenClaw ' + ''.concat(name) + ' configuration');
   return value;
 }
 
-const profileConfig = o => ({ cdpUrl: `http://127.0.0.1:${o.cdpPort}`, driver: 'openclaw', engine: 'chromium', attachOnly: true });
+const profileConfig = o => ({ cdpUrl: 'http://127.0.0.1:' + o.cdpPort, driver: 'openclaw', engine: 'chromium', attachOnly: true });
 const desktopConfig = (o, p) => ({ enabled: true, socketPath: p.socket, profile: o.profile });
 const fieldsMatch = (current, wanted) => object(current) && Object.entries(wanted).every(([key, value]) => current[key] === value) && Object.keys(current).every(key => own(wanted, key));
 
@@ -218,12 +218,12 @@ async function configPatch(o, p, saved, d, requireConfigured = false) {
   const tools = await configSection('tools', d);
   const profile = browser.profiles?.[o.profile];
   const desktop = plugins.entries?.['browser-handoff']?.config?.desktop;
-  if (profile !== undefined && (!saved || !fieldsMatch(profile, profileConfig(o)))) throw new Error(`Browser profile ${o.profile} is unowned or conflicts with Clawser`);
+  if (profile !== undefined && (!saved || !fieldsMatch(profile, profileConfig(o)))) throw new Error('Browser profile ' + ''.concat(o.profile) + ' is unowned or conflicts with Clawser');
   if (desktop !== undefined && (!saved || !fieldsMatch(desktop, desktopConfig(o, p)))) throw new Error('Existing browser-handoff desktop config is unowned or conflicts with Clawser');
   for (const [name, value] of [['browser.profiles', browser.profiles], ['plugins.entries', plugins.entries], ['plugin config', plugins.entries?.['browser-handoff']?.config]]) {
-    if (value !== undefined && !object(value)) throw new Error(`Conflicting ${name} configuration`);
+    if (value !== undefined && !object(value)) throw new Error('Conflicting ' + ''.concat(name) + ' configuration');
   }
-  const list = (value, name) => { if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) throw new Error(`Conflicting ${name} allowlist`); return value; };
+  const list = (value, name) => { if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) throw new Error('Conflicting ' + ''.concat(name) + ' allowlist'); return value; };
   if (plugins.deny?.includes('browser-handoff') || tools.deny?.includes('browser_handoff')) throw new Error('Existing deny policy conflicts with Clawser; resolve it explicitly before setup');
   const patch = {
     browser: { profiles: { [o.profile]: profileConfig(o) }, ...(o.defaultProfile ? { defaultProfile: o.profile } : {}) },
@@ -254,12 +254,12 @@ async function resources(o, p, saved, d) {
   const receiptPath = join(p.runtime, 'ownership.json');
   if (await stat(receiptPath, d)) { await privatePath(receiptPath, 'file', d); receipt = await readJson(receiptPath, d); }
   const container = await inspectDocker(['inspect', o.containerName], d);
-  for (const [kind, name] of [['network', `${o.containerName}-net`], ['volume', `${o.containerName}-profile`]]) {
+  for (const [kind, name] of [['network', o.containerName + '-net'], ['volume', o.containerName + '-profile']]) {
     const item = await inspectDocker([kind, 'inspect', name], d);
-    if (item && (!saved || !receipt?.ownerId || item.Labels?.[runtimeLabel] !== receipt.ownerId)) throw new Error(`Refusing unowned Docker ${kind}: ${name}`);
+    if (item && (!saved || !receipt?.ownerId || item.Labels?.[runtimeLabel] !== receipt.ownerId)) throw new Error('Refusing unowned Docker ' + ''.concat(kind) + ': ' + ''.concat(name));
   }
   if (container) {
-    if (!saved || !receipt?.ownerId) throw new Error(`Refusing unowned Docker container: ${o.containerName}`);
+    if (!saved || !receipt?.ownerId) throw new Error('Refusing unowned Docker container: ' + ''.concat(o.containerName));
     const runtime = new DesktopRuntime({ name: o.containerName, stateDir: p.runtime, cdpPort: o.cdpPort, vncPort: o.vncPort, run: args => d.run('docker', [dockerHost, ...args]) });
     await runtime.owned();
   }
@@ -271,8 +271,8 @@ async function ownedFiles(p, saved, d) {
     const info = await stat(path, d);
     if (info) {
       await privatePath(path, 'file', d);
-      if (!checksum || sha256(await d.fs.readFile(path)) !== checksum) throw new Error(`Refusing unowned or changed ${name}: ${path}`);
-    } else if (checksum) throw new Error(`Owned ${name} is missing: ${path}`);
+      if (!checksum || sha256(await d.fs.readFile(path)) !== checksum) throw new Error('Refusing unowned or changed ' + ''.concat(name) + ': ' + ''.concat(path));
+    } else if (checksum) throw new Error('Owned ' + ''.concat(name) + ' is missing: ' + ''.concat(path));
   }
   for (const path of [p.state, p.runtime, dirname(p.binary), dirname(p.assets)]) {
     if (await stat(path, d)) await privatePath(path, 'directory', d);
@@ -280,37 +280,37 @@ async function ownedFiles(p, saved, d) {
 }
 
 function assertHealth(health, o) {
-  if (health?.ready !== true || health.recoveryRequired === true || health.profile !== o.profile || health.cdpUrl !== `http://127.0.0.1:${o.cdpPort}`) throw new Error('Controller health or profile identity is not ready; inspect its user-service journal before retrying');
+  if (health?.ready !== true || health.recoveryRequired === true || health.profile !== o.profile || health.cdpUrl !== 'http://127.0.0.1:' + o.cdpPort) throw new Error('Controller health or profile identity is not ready; inspect its user-service journal before retrying');
 }
 
 async function audit(o, p, saved, d) {
   await noSymlinks(p.servicePath, d);
   await ownedFiles(p, saved, d);
   const service = await serviceStatus(p, d);
-  if (service.LoadState !== 'not-found' && service.FragmentPath !== p.servicePath) throw new Error(`Refusing unmanaged conflicting user service: ${p.serviceUnit}`);
-  if (service.FragmentPath && (!saved?.serviceDigest || !await stat(p.servicePath, d))) throw new Error(`Refusing unmanaged user service: ${p.serviceUnit}`);
+  if (service.LoadState !== 'not-found' && service.FragmentPath !== p.servicePath) throw new Error('Refusing unmanaged conflicting user service: ' + ''.concat(p.serviceUnit));
+  if (service.FragmentPath && (!saved?.serviceDigest || !await stat(p.servicePath, d))) throw new Error('Refusing unmanaged user service: ' + ''.concat(p.serviceUnit));
   const container = await resources(o, p, saved, d);
   if (!await d.isPortFree(o.port)) {
-    if (!saved?.serviceDigest || service.ActiveState !== 'active') throw new Error(`Controller port ${o.port} is in use by an unowned service`);
+    if (!saved?.serviceDigest || service.ActiveState !== 'active') throw new Error('Controller port ' + ''.concat(o.port) + ' is in use by an unowned service');
     assertHealth(await d.controllerHealth(p.socket), o);
   }
-  for (const port of [o.cdpPort, o.vncPort]) if (!await d.isPortFree(port) && !container?.State?.Running) throw new Error(`Desktop port ${port} is in use by an unowned process`);
+  for (const port of [o.cdpPort, o.vncPort]) if (!await d.isPortFree(port) && !container?.State?.Running) throw new Error('Desktop port ' + ''.concat(port) + ' is in use by an unowned process');
   return service;
 }
 
 async function atomicPrivate(path, contents, d) {
-  const temporary = `${path}.${randomUUID()}.tmp`;
+  const temporary = path + '.' + randomUUID() + '.tmp';
   const file = await d.fs.open(temporary, 'wx', 0o600);
   try { await file.writeFile(contents); await file.sync(); }
   finally { await file.close(); }
   await d.fs.rename(temporary, path);
 }
 
-async function saveMarker(saved, p, d) { await atomicPrivate(p.marker, `${JSON.stringify(saved, null, 2)}\n`, d); }
+async function saveMarker(saved, p, d) { await atomicPrivate(p.marker, JSON.stringify(saved, null, 2) + '\n', d); }
 
 async function download(artifact, d) {
   const response = await d.fetch(artifact.url, { redirect: 'follow', signal: AbortSignal.timeout(120_000) });
-  if (!response.ok) throw new Error(`Pinned download failed: HTTP ${response.status}`);
+  if (!response.ok) throw new Error('Pinned download failed: HTTP ' + ''.concat(response.status));
   const reader = response.body.getReader();
   const chunks = []; let bytes = 0;
   try {
@@ -331,11 +331,11 @@ async function treeDigest(path, d) {
   const hash = createHash('sha256');
   const walk = async (directory, relative = '') => {
     for (const name of (await d.fs.readdir(directory)).sort()) {
-      const file = join(directory, name), next = relative ? `${relative}/${name}` : name;
+      const file = join(directory, name), next = relative ? ''.concat(relative) + '/' + ''.concat(name) : name;
       const info = await d.fs.lstat(file);
       if (info.isDirectory()) await walk(file, next);
-      else if (info.isFile()) { hash.update(`${next}\0${info.size}\0`); hash.update(await d.fs.readFile(file)); }
-      else throw new Error(`Refusing unexpected file type in pinned noVNC assets: ${next}`);
+      else if (info.isFile()) { hash.update(next + '\0' + info.size + '\0'); hash.update(await d.fs.readFile(file)); }
+      else throw new Error('Refusing unexpected file type in pinned noVNC assets: ' + ''.concat(next));
     }
   };
   await walk(path); return hash.digest('hex');
@@ -354,8 +354,8 @@ async function assets(p, saved, d) {
     if (!saved.assetsDigest || await treeDigest(p.assets, d) !== saved.assetsDigest) throw new Error('Existing noVNC assets are unowned or changed; refusing to overwrite them');
   } else {
     const contents = await download(d.artifacts.noVnc, d);
-    const archive = join(dirname(p.assets), `novnc-${randomUUID()}.tar.gz`);
-    const staging = join(dirname(p.assets), `novnc-${randomUUID()}.tmp`);
+    const archive = join(dirname(p.assets), 'novnc-' + randomUUID() + '.tar.gz');
+    const staging = join(dirname(p.assets), 'novnc-' + randomUUID() + '.tmp');
     await atomicPrivate(archive, contents, d);
     await d.fs.mkdir(staging, { mode: 0o700 });
     try {
@@ -376,11 +376,14 @@ async function assets(p, saved, d) {
 
 function systemdArgument(value) {
   if (!isAbsolute(value) || /[\x00-\x1f\x7f]/.test(value)) throw new Error('Service command paths must be absolute and contain no control characters');
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\$/g, () => '$$')}"`;
+  const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\$/g, () => '$$');
+  return '"' + escaped + '"';
 }
 
 function unit(p, d) {
-  return `# Managed by Clawser; ownership is recorded in ${p.marker.replace(/%/g, '%%')}\n[Unit]\nDescription=Clawser private browser handoff controller\nAfter=network-online.target docker.service\n\n[Service]\nType=simple\nExecStart=${[d.execPath, p.controllerScript, p.config].map(systemdArgument).join(' ')}\nUMask=0077\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=180\n\n[Install]\nWantedBy=default.target\n`;
+  const marker = p.marker.replace(/%/g, '%%');
+  const command = [d.execPath, p.controllerScript, p.config].map(systemdArgument).join(' ');
+  return `# Managed by Clawser; ownership is recorded in ${marker}\n[Unit]\nDescription=Clawser private browser handoff controller\nAfter=network-online.target docker.service\n\n[Service]\nType=simple\nExecStart=${command}\nUMask=0077\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=180\n\n[Install]\nWantedBy=default.target\n`;
 }
 
 async function reloadPlugin(d) {
@@ -395,7 +398,7 @@ async function reloadPlugin(d) {
     } catch (error) {
       const stderr = typeof error.stderr === 'string' ? error.stderr : '';
       const transient = /Couldn't connect to OpenClaw\.|\bGateway (?:is )?restarting\b|\bGateway restart (?:is )?in progress\b/i.test(stderr);
-      const unsafe = /permission|EACCES|EPERM|capabilit|schema|invalid config|unauthoriz|forbidden|authentication|ETIMEDOUT|timeout|timed out|uncertain|unknown outcome|outcome (?:is )?unknown/i.test(`${error.message}\n${stderr}`);
+      const unsafe = /permission|EACCES|EPERM|capabilit|schema|invalid config|unauthoriz|forbidden|authentication|ETIMEDOUT|timeout|timed out|uncertain|unknown outcome|outcome (?:is )?unknown/i.test(''.concat(error.message) + '\n' + stderr);
       // Retry only failures known to precede a reload admission. A killed or
       // timed-out command may have applied a reload and is never retried here.
       if (error.code !== 1 || !transient || unsafe) throw error;
@@ -420,7 +423,7 @@ async function install(o, p, saved, service, d) {
     await d.fs.mkdir(o.stateDir, { mode: 0o700 });
     await privatePath(o.stateDir, 'directory', d);
     saved = { identity, uid: d.uid, ownerId: randomUUID(), options: { stateDir: o.stateDir, profile: o.profile, port: o.port, cdpPort: o.cdpPort, vncPort: o.vncPort, containerName: o.containerName, defaultProfile: o.defaultProfile, packageDir: d.packageDir, execPath: d.execPath, servicePath: p.servicePath }, serviceUnit: p.serviceUnit };
-    await d.fs.writeFile(p.marker, `${JSON.stringify(saved, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+    await d.fs.writeFile(p.marker, JSON.stringify(saved, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
   }
   const lock = join(o.stateDir, 'setup.lock');
   try { await d.fs.mkdir(lock, { mode: 0o700 }); }
@@ -432,7 +435,7 @@ async function install(o, p, saved, service, d) {
       const current = await d.run('docker', [dockerHost, 'image', 'inspect', '--format', '{{.Id}}', saved.imageId]);
       if (current.trim() !== saved.imageId) throw new Error('Owned desktop image digest changed');
     } else {
-      const tag = `clawser-desktop:${saved.ownerId}`;
+      const tag = 'clawser-desktop:' + saved.ownerId;
       d.log('Building the pinned Chromium desktop image (the first build can take several minutes)…');
       await d.run('docker', [dockerHost, 'build', '--quiet', '--tag', tag, join(d.packageDir, 'runtime/desktop')], { timeoutMs: 45 * 60_000 });
       const imageId = (await d.run('docker', [dockerHost, 'image', 'inspect', '--format', '{{.Id}}', tag])).trim();
@@ -441,7 +444,7 @@ async function install(o, p, saved, service, d) {
     }
     if (!saved.configDigest) {
       const config = { stateDir: p.state, profile: o.profile, port: o.port, socketPath: p.socket, noVncAssetsDir: p.assets, runtime: { stateDir: p.runtime, name: o.containerName, cdpPort: o.cdpPort, vncPort: o.vncPort, image: saved.imageId }, transport: { binaryPath: p.binary, startupTimeoutMs: 90_000 } };
-      const contents = `${JSON.stringify(config, null, 2)}\n`;
+      const contents = JSON.stringify(config, null, 2) + '\n';
       await d.fs.writeFile(p.config, contents, { flag: 'wx', mode: 0o600 });
       saved.configDigest = sha256(contents); await saveMarker(saved, p, d);
     }
@@ -465,7 +468,7 @@ async function install(o, p, saved, service, d) {
     // Re-read arrays immediately before the validated merge so unrelated
     // changes made during a long Docker build are preserved.
     const patch = await configPatch(o, p, saved, d);
-    await d.run('openclaw', ['config', 'patch', '--stdin'], { input: `${JSON.stringify(patch)}\n` });
+    await d.run('openclaw', ['config', 'patch', '--stdin'], { input: JSON.stringify(patch) + '\n' });
     await reloadPlugin(d);
     return saved;
   } finally { await d.fs.rm(lock, { recursive: true }); }
@@ -531,12 +534,21 @@ export async function runClawser(argv, deps = {}) {
     try { saved = await marker(o, p, d); }
     catch (error) { checks.push({ name: 'ownership', ok: false, message: error.message }); }
     await diagnose(o, p, saved, d, checks);
-    for (const row of checks) d.log(`${row.ok ? 'OK' : 'FAIL'} ${row.name}${row.message ? `: ${row.message}` : ''}`);
+    for (const row of checks) {
+      const status = row.ok ? 'OK' : 'FAIL';
+      const name = row.name;
+      d.log(`${status} ${name}` + (row.message ? `: ${row.message}` : ''));
+    }
     d.log(`Controller unit: ${p.serviceUnit}\nState: ${o.stateDir}\nContainer: ${o.containerName} (profile volume is retained)`);
     return { ok: checks.every(row => row.ok), command: o.command, checks, stateDir: o.stateDir, serviceUnit: p.serviceUnit, servicePath: p.servicePath };
   }
   const failed = checks.filter(row => !row.ok);
-  if (failed.length) throw new Error(failed.map(row => `${row.name}: ${row.message}`).join('\n'));
+  if (failed.length) throw new Error(failed.map(row => {
+    const name = row.name;
+    const prefix = `${name}: `;
+    const message = row.message;
+    return prefix + `${message}`;
+  }).join('\n'));
   const saved = await marker(o, p, d);
   const patch = await configPatch(o, p, saved, d);
   const service = await audit(o, p, saved, d);
@@ -546,7 +558,7 @@ export async function runClawser(argv, deps = {}) {
   }
   // Validate with OpenClaw before downloading or writing anything. Config is
   // never edited directly; supported patch operations preserve its own backups.
-  await d.run('openclaw', ['config', 'patch', '--stdin', '--dry-run'], { input: `${JSON.stringify(patch)}\n` });
+  await d.run('openclaw', ['config', 'patch', '--stdin', '--dry-run'], { input: JSON.stringify(patch) + '\n' });
   await install(o, p, saved, service, d);
   d.log(`Clawser is configured. Controller unit: ${p.serviceUnit}\nState: ${o.stateDir}\nContainer: ${o.containerName}; its browser profile is retained across reruns.\nBefore browser work, ask the owner session to run browser_handoff action=tabs to verify the active plugin connection.`);
   return { ok: true, command: o.command, dryRun: false, stateDir: o.stateDir, serviceUnit: p.serviceUnit, servicePath: p.servicePath };

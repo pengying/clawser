@@ -1,6 +1,7 @@
 // Fixed, value-free DOM capability. No viewer-provided script/selector is used.
 export function interactionCollector(documentId) {
-  return `(${collect.toString()})(${JSON.stringify(documentId)})`;
+  const source = collect.toString();
+  return '(' + source + ')(' + JSON.stringify(documentId) + ')';
 }
 function collect(seed) {
   let state = globalThis.__openclawHandoffMetadata;

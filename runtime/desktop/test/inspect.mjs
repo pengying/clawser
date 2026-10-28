@@ -7,7 +7,7 @@ import { DesktopRuntime } from '../index.mjs';
 const artifact=process.env.DESKTOP_ARTIFACT_DIR??fileURLToPath(new URL('../../../test-artifacts/desktop', import.meta.url));
 const runtime=new DesktopRuntime({name:process.env.DESKTOP_NAME??'handoff-production-runtime-final-test',stateDir:`${artifact}/final-state`,image:process.env.DESKTOP_IMAGE,cdpPort:Number(process.env.DESKTOP_CDP_PORT??18811),vncPort:Number(process.env.DESKTOP_VNC_PORT??59091)});
 await runtime.owned();
-const version=await(await fetch(`${runtime.cdpUrl}/json/version`)).json();
+const version=await(await fetch(runtime.cdpUrl + '/json/version')).json();
 async function connect(url) {
   const socket=new WebSocket(url);await new Promise((r,j)=>{socket.once('open',r);socket.once('error',j);});
   let sequence=0;const pending=new Map();
@@ -42,7 +42,7 @@ const managementProbe="import json,socket;out={};\nfor port in (9222,9223,5900):
 const managementEgress=JSON.parse(await runtime.run(['exec','--user','1000:1000',owned.Id,'python3','-c',managementProbe]));
 assert.ok(Object.values(managementEgress).every(s=>s!=='UNEXPECTED-CONNECTED'));
 const status=await runtime.status();const proxy=status.criticalProcesses.find(c=>c.name==='socat');
-const proxyIdentity=JSON.parse(await runtime.run(['exec','--user','1001:1001',owned.Id,'python3','-c',`import json;print(json.dumps({k:v.strip() for k,v in (line.split(':',1) for line in open('/proc/${proxy.pid}/status') if ':' in line) if k in ['Uid','CapEff','CapBnd','NoNewPrivs','Seccomp']}))`]));
+const proxyIdentity=JSON.parse(await runtime.run(['exec','--user','1001:1001',owned.Id,'python3','-c',"import json;print(json.dumps({k:v.strip() for k,v in (line.split(':',1) for line in open('/proc/" + proxy.pid + "/status') if ':' in line) if k in ['Uid','CapEff','CapBnd','NoNewPrivs','Seccomp']}))"]));
 assert.match(proxyIdentity.Uid,/^1001\s+1001/);assert.equal(Number.parseInt(proxyIdentity.CapEff,16),0);assert.equal(Number.parseInt(proxyIdentity.CapBnd,16),0);assert.equal(proxyIdentity.NoNewPrivs,'1');
 const isolationSettlement=await runtime.stopViewerAndSettle({leaseId:'isolation-proof'});assert.equal(isolationSettlement.xClientsAbsent,true);
 const processes=JSON.parse(await runtime.run(['exec','--user','1000:1000',owned.Id,'python3','-c',"import json;print(json.dumps({k:v.strip() for k,v in (line.split(':',1) for line in open('/proc/1/status') if ':' in line) if k in ['Uid','CapEff','CapBnd','NoNewPrivs','Seccomp']}))"]));

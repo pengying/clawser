@@ -36,7 +36,7 @@ function cdpIdentity(value) {
 }
 function duration(value, fallback, min, max, label) {
   const result = value ?? fallback;
-  if (!Number.isInteger(result) || result < min || result > max) throw new Error(`Invalid ${label}`);
+  if (!Number.isInteger(result) || result < min || result > max) throw new Error('Invalid ' + `${label}`);
   return result;
 }
 function liveInstanceKey(api) {
@@ -111,18 +111,18 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
         if (!notifications.has(notificationKey)) {
           const reason = ['done', 'expired', 'disconnect', 'disconnected', 'revoke', 'revoked', 'tunnel_exit', 'heartbeat_timeout'].includes(completion.reason) ? completion.reason : 'ended';
           const safe = !fault && completion.resumeAllowed === true && completion.recoveryRequired !== true;
-          const text = `Browser Handoff ${JSON.stringify(completion.id)} ended (${reason}) for profile ${JSON.stringify(config.profile)}. ` +
+          const text = 'Browser Handoff ' + JSON.stringify(completion.id) + ' ended (' + reason + ') for profile ' + JSON.stringify(config.profile) + '. ' +
             (safe ? 'Input authority returned safely (resumeAllowed=true). Continue only if the original task remains pending. Take a fresh normal browser snapshot and check the actual outcome before continuing. '
               : 'resumeAllowed=false: browser automation must remain paused; operator recovery is required. ') +
             'This event does not prove a CAPTCHA or form succeeded. After expiry, disconnect, or revoke, do not recreate handoff links automatically; ask the owner if further human action is needed. Do not resume a canceled task.';
           // This synchronous enqueue+wake pair follows the latest incarnation
           // read. Published SDK wake APIs do not accept an expected sessionId.
-          if (system.enqueueSystemEvent(text, { sessionKey, agentId, contextKey: `browser-handoff:${completion.id}:${sessionId}`, fromConversationTurn: true }) !== true) continue;
+          if (system.enqueueSystemEvent(text, { sessionKey, agentId, contextKey: 'browser-handoff:' + completion.id + ':' + sessionId, fromConversationTurn: true }) !== true) continue;
           notifications.set(notificationKey, 'enqueued');
         }
         // Targeted background handback requires immediate intent in the SDK:
         // event intent can be disabled with cadence or deferred until its tick.
-        requestWake({ source: 'background-task', intent: 'immediate', reason: `browser-handoff:${completion.id}`, agentId, sessionKey });
+        requestWake({ source: 'background-task', intent: 'immediate', reason: 'browser-handoff:' + completion.id, agentId, sessionKey });
         notifications.set(notificationKey, 'delivered');
         while (notifications.size > 500) notifications.delete(notifications.keys().next().value);
         await ack(completion.id);

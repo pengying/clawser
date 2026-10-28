@@ -13,8 +13,8 @@ function safeErrorCode(error, fallback) {
   }
   return fallback;
 }
-function startupError(stage, code) { return new Error(`Cloudflare startup failed (${stage}: ${code})`); }
-function processCode(child) { return Number.isInteger(child.exitCode) ? `EXIT_${child.exitCode}` : 'PROCESS_EXIT'; }
+function startupError(stage, code) { return new Error('Cloudflare startup failed (' + stage + ': ' + code + ')'); }
+function processCode(child) { return Number.isInteger(child.exitCode) ? 'EXIT_' + child.exitCode : 'PROCESS_EXIT'; }
 
 // Transport routing only. The viewer gateway remains responsible for auth.
 export class CloudflareTransport extends EventEmitter {
@@ -23,21 +23,21 @@ export class CloudflareTransport extends EventEmitter {
     if (!isAbsolute(binaryPath || '') || !isAbsolute(stateDir || '')) throw new Error('Cloudflare transport requires absolute binary/state paths');
     Object.assign(this, { binaryPath, stateDir, startupTimeoutMs, spawnImpl });
     this.probe = probeImpl || (async (origin, signal) => {
-      const response = await fetch(`${origin}/browser/assets/probe.css`, { signal, redirect: 'error' });
+      const response = await fetch(`${origin}` + '/browser/assets/probe.css', { signal, redirect: 'error' });
       await response.body?.cancel();
-      if (!response.ok) throw Object.assign(new Error('HTTP health response unsuccessful'), { code: `HTTP_${response.status}` });
+      if (!response.ok) throw Object.assign(new Error('HTTP health response unsuccessful'), { code: 'HTTP_' + response.status });
       return true;
     });
     this.dnsProbe = dnsProbeImpl || (async (origin, signal) => {
       // Quick Tunnel edge registration can precede DNS publication. Avoid an
       // early OS lookup caching NXDOMAIN for the newly allocated hostname.
       const name = new URL(origin).hostname;
-      const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=A`, {
+      const response = await fetch('https://cloudflare-dns.com/dns-query?name=' + encodeURIComponent(name) + '&type=A', {
         headers: { accept: 'application/dns-json' }, signal,
       });
-      if (!response.ok) throw Object.assign(new Error('DNS service response unsuccessful'), { code: `HTTP_${response.status}` });
+      if (!response.ok) throw Object.assign(new Error('DNS service response unsuccessful'), { code: 'HTTP_' + response.status });
       const result = await response.json();
-      if (Number.isInteger(result.Status) && result.Status !== 0) throw Object.assign(new Error('DNS response not ready'), { code: `DNS_STATUS_${result.Status}` });
+      if (Number.isInteger(result.Status) && result.Status !== 0) throw Object.assign(new Error('DNS response not ready'), { code: 'DNS_STATUS_' + result.Status });
       return result.Status === 0 && result.Answer?.some(answer => answer.type === 1 || answer.type === 28) === true;
     });
   }
@@ -58,7 +58,7 @@ export class CloudflareTransport extends EventEmitter {
     const config = join(this.stateDir, 'quick-tunnel.yml');
     await writeFile(config, '{}\n', { mode: 0o600 });
     if (this.closed) throw new Error('Cloudflare transport is closed');
-    const child = this.child = this.spawnImpl(this.binaryPath, ['tunnel', '--config', config, '--no-autoupdate', '--metrics', '127.0.0.1:0', '--url', `http://127.0.0.1:${this.port}`], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = this.child = this.spawnImpl(this.binaryPath, ['tunnel', '--config', config, '--no-autoupdate', '--metrics', '127.0.0.1:0', '--url', 'http://127.0.0.1:' + this.port], { stdio: ['ignore', 'pipe', 'pipe'] });
     const abort = this.startupAbort = new AbortController(), deadline = Date.now() + this.startupTimeoutMs;
     let output = '', origin, connected = false, settled = false, timer;
     const ready = new Promise((resolve, reject) => {

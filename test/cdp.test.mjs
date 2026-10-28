@@ -236,3 +236,44 @@ test('a pending input retains the first command timeout that closed its transpor
   assert.equal(input.causeMethod, 'Runtime.evaluate', 'diagnostics must identify the earlier timeout instead of blaming only the pending input');
   assert.equal(Object.hasOwn(input, 'params'), false, 'failure metadata contains no command parameters');
 });
+
+test('named keys preserve CDP codes, modifiers, Enter text and coercible key lookup', async (t) => {
+  const { backend, commands } = await browserFixture(t);
+  const connection = await backend.open({ profile: 'fixture', targetId: 'tab' }, { onFrame() {}, onClose() {} });
+  t.after(() => connection.close());
+  for (const [name, code, virtualKeyCode] of [
+    ['Enter', 'Enter', 13], ['Tab', 'Tab', 9], ['Backspace', 'Backspace', 8], ['Escape', 'Escape', 27],
+    ['ArrowLeft', 'ArrowLeft', 37], ['ArrowUp', 'ArrowUp', 38], ['ArrowRight', 'ArrowRight', 39],
+    ['ArrowDown', 'ArrowDown', 40], ['Delete', 'Delete', 46], ['Home', 'Home', 36], ['End', 'End', 35],
+    ['Ctrl+A', 'KeyA', 65],
+  ]) {
+    const start = commands.length;
+    await connection.input({ kind: 'key', key: name });
+    const events = commands.slice(start).filter(({ method }) => method === 'Input.dispatchKeyEvent').map(({ params }) => params);
+    const args = { key: name === 'Ctrl+A' ? 'a' : name, code, windowsVirtualKeyCode: virtualKeyCode, modifiers: name === 'Ctrl+A' ? 2 : 0 };
+    assert.deepEqual(events, [
+      { type: 'keyDown', ...args, ...(name === 'Enter' ? { text: '\r', unmodifiedText: '\r' } : {}) },
+      { type: 'keyUp', ...args },
+    ]);
+  }
+  const hints = [];
+  const key = { [Symbol.toPrimitive](hint) { hints.push(hint); return 'Enter'; } };
+  const start = commands.length;
+  await connection.input({ kind: 'key', key });
+  assert.deepEqual(hints, ['string', 'string']);
+  const events = commands.slice(start).filter(({ method }) => method === 'Input.dispatchKeyEvent');
+  assert.deepEqual(events.map(({ params }) => [params.code, params.windowsVirtualKeyCode]), [['Enter', 13], ['Enter', 13]]);
+});
+
+test('edit operation allowlist preserves exact types, text bounds and inherited-name rejection', () => {
+  const focusToken = 'a'.repeat(32);
+  for (const operation of ['insert', 'backspace', 'delete', 'enter', 'key']) {
+    const event = { kind: 'edit', focusToken, operation, text: 'x'.repeat(4096), key: 'Ctrl+A' };
+    assert.equal(validateInput(event).operation, operation);
+  }
+  for (const operation of ['constructor', 'toString', '__proto__', 'INSERT', undefined, null, {}, ['insert'], new String('insert')]) {
+    assert.throws(() => validateInput({ kind: 'edit', focusToken, operation, text: 'hello', key: 'Enter' }), /unsupported input/);
+  }
+  assert.throws(() => validateInput({ kind: 'edit', focusToken, operation: 'insert', text: 'x'.repeat(4097) }), /unsupported input/);
+  assert.throws(() => validateInput({ kind: 'edit', focusToken, operation: 'insert', text: new String('hello') }), /unsupported input/);
+});

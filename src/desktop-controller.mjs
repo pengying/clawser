@@ -44,7 +44,7 @@ export async function observeDesktop(runtime, row) {
   const status=await runtime.status();
   if(status.ready!==true||!status.displayGeneration)throw new Error('Browser observation unavailable');
   const origin=validateCdpUrl(runtime.cdpUrl).origin;
-  const versionResponse=await fetch(`${origin}/json/version`,{redirect:'error',signal:AbortSignal.timeout(5000)});
+  const versionResponse=await fetch(origin + '/json/version',{redirect:'error',signal:AbortSignal.timeout(5000)});
   if(!versionResponse.ok)throw new Error('Browser observation unavailable');
   const version=await versionResponse.json();
   const connect=async url=>{
@@ -96,7 +96,7 @@ export class DesktopController {
     if(!this.rpc?.lockHolder||this.rpc.lockHolder.lost){this.poison();throw new Error('Controller authority lock is unavailable; persistence denied');}
     const contents=JSON.stringify(this.ledger)+'\n';
     const next=this.writes.then(async()=>{
-      const temporary=join(this.stateDir,`ledger.${process.pid}.${randomBytes(8).toString('hex')}.tmp`);
+      const temporary=join(this.stateDir,'ledger.' + process.pid + '.' + randomBytes(8).toString('hex') + '.tmp');
       const file=await open(temporary,'wx',0o600);
       try{await file.writeFile(contents);await file.sync();}finally{await file.close();}
       await rename(temporary,join(this.stateDir,'ledger.json'));
@@ -296,7 +296,7 @@ export class DesktopController {
         if(!['watch','control'].includes(params.permission)||!Number.isInteger(params.ttlSeconds)||params.ttlSeconds<30||params.ttlSeconds>1800)throw new Error('Invalid invitation permission or lifetime');
         if(params.targetId!==undefined&&(typeof params.targetId!=='string'||!params.targetId||params.targetId.length>256))throw new Error('Invalid task target');
         this.creating=params;const generation=this.createGeneration;
-        const activationId=params.targetId?`activation:${randomBytes(16).toString('hex')}`:undefined;
+        const activationId=params.targetId?'activation:' + randomBytes(16).toString('hex'):undefined;
         let activationWaiting=false;
         const cancelActivation=()=>{if(activationWaiting)this.gate.release(activationId);};
         const current=()=>{

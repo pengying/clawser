@@ -6,10 +6,10 @@ import { DesktopRuntime } from '../index.mjs';
 
 function inspection(owner='owner',id='owned',name='openclaw-handoff-desktop') {
   const ports={'9223/tcp':[{HostIp:'127.0.0.1',HostPort:'18810'}],'5900/tcp':[{HostIp:'127.0.0.1',HostPort:'59090'}]};
-  return {Id:id,Name:`/${name}`,Config:{Labels:{'openclaw.browser-handoff.desktop':owner}},State:{Running:true},HostConfig:{NetworkMode:`${name}-net`,PortBindings:ports},NetworkSettings:{Ports:ports,Networks:{[`${name}-net`]:{NetworkID:'network-id'}}},Mounts:[{Type:'volume',Name:`${name}-profile`,Destination:'/profile',RW:true}]};
+  return {Id:id,Name:'/' + name,Config:{Labels:{'openclaw.browser-handoff.desktop':owner}},State:{Running:true},HostConfig:{NetworkMode:name + '-net',PortBindings:ports},NetworkSettings:{Ports:ports,Networks:{[name + '-net']:{NetworkID:'network-id'}}},Mounts:[{Type:'volume',Name:name + '-profile',Destination:'/profile',RW:true}]};
 }
 async function receipt(stateDir,owner='owner',id='owned',name='openclaw-handoff-desktop') {
-  await writeFile(`${stateDir}/ownership.json`,JSON.stringify({name,ownerId:owner,containerId:id,network:`${name}-net`,volume:`${name}-profile`,networkId:'network-id',cdpPort:18810,vncPort:59090}));
+  await writeFile(`${stateDir}/ownership.json`,JSON.stringify({name,ownerId:owner,containerId:id,network:name + '-net',volume:name + '-profile',networkId:'network-id',cdpPort:18810,vncPort:59090}));
 }
 
 test('adapter refuses unsafe names, non-loopback endpoints and invalid ports', () => {
@@ -19,7 +19,7 @@ test('adapter refuses unsafe names, non-loopback endpoints and invalid ports', (
 });
 
 test('clipboard text is sent in stdin only and ownership is verified', async () => {
-  const stateDir = await mkdtemp(`${tmpdir()}/desktop-contract-`);
+  const stateDir = await mkdtemp(tmpdir() + '/desktop-contract-');
   await receipt(stateDir,'test-receipt','owned-id');
   const calls = [];
   const run = async (args, input) => {
@@ -38,7 +38,7 @@ test('clipboard text is sent in stdin only and ownership is verified', async () 
 });
 
 test('adapter refuses unowned Docker resources', async () => {
-  const stateDir = await mkdtemp(`${tmpdir()}/desktop-contract-`);
+  const stateDir = await mkdtemp(tmpdir() + '/desktop-contract-');
   await receipt(stateDir,'expected');
   const runtime = new DesktopRuntime({stateDir, ownerId:'expected', run: async () => JSON.stringify([{Id:'foreign',Config:{Labels:{}},State:{Running:true}}])});
   try { await assert.rejects(runtime.clipboardRead(), /ownership/); }
@@ -46,7 +46,7 @@ test('adapter refuses unowned Docker resources', async () => {
 });
 
 test('viewer deadlines are passed to the runtime and clipboard rejects oversized input', async () => {
-  const stateDir=await mkdtemp(`${tmpdir()}/desktop-contract-`);
+  const stateDir=await mkdtemp(tmpdir() + '/desktop-contract-');
   await receipt(stateDir);
   const calls=[];
   const run=async(args,input)=>{
@@ -64,7 +64,7 @@ test('viewer deadlines are passed to the runtime and clipboard rejects oversized
 });
 
 test('ensure resumes an owned partial startup without replacing profile resources',async()=>{
-  const stateDir=await mkdtemp(`${tmpdir()}/desktop-contract-`);
+  const stateDir=await mkdtemp(tmpdir() + '/desktop-contract-');
   const calls=[];
   await writeFile(`${stateDir}/ownership.json`,JSON.stringify({name:'resume-test',ownerId:'resume-owner'}));
   const runtime=new DesktopRuntime({name:'resume-test',stateDir,run:async(args)=>{
@@ -82,7 +82,7 @@ test('ensure resumes an owned partial startup without replacing profile resource
 });
 
 test('ensure creates absent resources using Docker network not-found responses',async()=>{
-  const stateDir=await mkdtemp(`${tmpdir()}/desktop-contract-`);
+  const stateDir=await mkdtemp(tmpdir() + '/desktop-contract-');
   const calls=[];
   const runtime=new DesktopRuntime({name:'fresh-test',stateDir,run:async(args)=>{
     calls.push(args);
@@ -94,7 +94,7 @@ test('ensure creates absent resources using Docker network not-found responses',
 });
 
 test('new containers require the reviewed browser seccomp profile',async()=>{
-  const stateDir=await mkdtemp(`${tmpdir()}/desktop-contract-`);
+  const stateDir=await mkdtemp(tmpdir() + '/desktop-contract-');
   let create;
   const runtime=new DesktopRuntime({stateDir,run:async(args)=>{
     if(args[1]==='inspect')throw new Error('No such object');
@@ -106,7 +106,7 @@ test('new containers require the reviewed browser seccomp profile',async()=>{
 });
 
 test('shutdown grants Chromium bounded graceful exit before removing its container',async()=>{
-  const stateDir=await mkdtemp(`${tmpdir()}/desktop-contract-`),calls=[];
+  const stateDir=await mkdtemp(tmpdir() + '/desktop-contract-'),calls=[];
   await receipt(stateDir);
   const runtime=new DesktopRuntime({stateDir,ownerId:'owner',run:async(args)=>{
     calls.push(args);
@@ -119,7 +119,7 @@ test('shutdown grants Chromium bounded graceful exit before removing its contain
 });
 
 test('ensure refuses a profile mounted by another running container',async()=>{
-  const stateDir=await mkdtemp(`${tmpdir()}/desktop-contract-`);
+  const stateDir=await mkdtemp(tmpdir() + '/desktop-contract-');
   const runtime=new DesktopRuntime({stateDir,run:async(args)=>{
     if(args[1]==='inspect')throw new Error('No such object');
     if(args[0]==='ps')return 'foreign-container-id';
@@ -130,7 +130,7 @@ test('ensure refuses a profile mounted by another running container',async()=>{
 });
 
 test('operation lock identifies its process and rejects concurrent operations',async()=>{
-  const stateDir=await mkdtemp(`${tmpdir()}/desktop-contract-`);
+  const stateDir=await mkdtemp(tmpdir() + '/desktop-contract-');
   const runtime=new DesktopRuntime({stateDir});
   try {
     await runtime.locked(async()=>{
@@ -150,7 +150,7 @@ for(const [name,mutate] of [
   ['profile volume',i=>{i.Mounts[0].Name='some-other-profile';}],
   ['extra published port',i=>{i.NetworkSettings.Ports['6080/tcp']=[{HostIp:'127.0.0.1',HostPort:'16080'}];}],
 ]) test(`ownership check rejects drift in ${name}`,async()=>{
-  const stateDir=await mkdtemp(`${tmpdir()}/desktop-contract-`);await receipt(stateDir);
+  const stateDir=await mkdtemp(tmpdir() + '/desktop-contract-');await receipt(stateDir);
   const item=inspection();mutate(item);
   const runtime=new DesktopRuntime({stateDir,run:async()=>JSON.stringify([item])});
   try {await assert.rejects(runtime.status(),/identity|binding|network|profile|ownership/);}
@@ -158,7 +158,7 @@ for(const [name,mutate] of [
 });
 
 test('unpublished inherited image ports do not change endpoint identity',async()=>{
-  const stateDir=await mkdtemp(`${tmpdir()}/desktop-contract-`);await receipt(stateDir);
+  const stateDir=await mkdtemp(tmpdir() + '/desktop-contract-');await receipt(stateDir);
   const item=inspection();item.NetworkSettings.Ports={...item.NetworkSettings.Ports,'6080/tcp':null};
   const runtime=new DesktopRuntime({stateDir,run:async args=>args[0]==='inspect'?JSON.stringify([item]):JSON.stringify({ready:true})});
   try {assert.equal((await runtime.status()).ready,true);}
@@ -166,14 +166,14 @@ test('unpublished inherited image ports do not change endpoint identity',async()
 });
 
 test('configuration drift is rejected before connecting to any CDP endpoint',async()=>{
-  const stateDir=await mkdtemp(`${tmpdir()}/desktop-contract-`);await receipt(stateDir);
+  const stateDir=await mkdtemp(tmpdir() + '/desktop-contract-');await receipt(stateDir);
   const runtime=new DesktopRuntime({stateDir,cdpPort:18800,run:async()=>JSON.stringify([inspection()])});
   try {await assert.rejects(runtime.tabs(),/binding|configuration|port/);}
   finally {await rm(stateDir,{recursive:true,force:true});}
 });
 
 test('heartbeat requires exact actor context and can run while an ordinary operation owns the host lock',async()=>{
-  const stateDir=await mkdtemp(`${tmpdir()}/desktop-contract-`);await receipt(stateDir);
+  const stateDir=await mkdtemp(tmpdir() + '/desktop-contract-');await receipt(stateDir);
   const calls=[];
   const runtime=new DesktopRuntime({stateDir,run:async(args,input)=>{
     calls.push({args,input});

@@ -75,7 +75,7 @@ export class ComparisonProxy {
       tunnel = this.track(remote); upstream.setTimeout(0); remote.setTimeout(0);
       if (this.closed || socket.destroyed) { remote.destroy(); return; }
       const headers = [];
-      for (let i = 0; i < response.rawHeaders.length; i += 2) headers.push(`${response.rawHeaders[i]}: ${response.rawHeaders[i + 1]}`);
+      for (let i = 0; i < response.rawHeaders.length; i += 2) headers.push(response.rawHeaders[i] + ': ' + response.rawHeaders[i + 1]);
       socket.write(`HTTP/1.1 101 Switching Protocols\r\n${headers.join('\r\n')}\r\n\r\n`);
       if (remoteHead.length) socket.write(remoteHead);
       if (head.length) remote.write(head);

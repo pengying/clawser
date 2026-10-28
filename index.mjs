@@ -134,7 +134,7 @@ export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) =>
               const ttlSeconds = params.ttlSeconds ?? 300;
               if (!Number.isInteger(ttlSeconds) || ttlSeconds < 30 || ttlSeconds > 1800) throw new Error('Invalid invitation lifetime');
               const invite = s.store.create({ owner, target: { profile: params.profile, targetId: params.targetId }, ttlMs: ttlSeconds * 1000, permission: params.permission || 'control' });
-              result = { id: invite.id, url: `${s.publicBaseUrl}/s/${invite.id}/#invite=${invite.secret}`, expiresAt: invite.expiresAt, permission: params.permission || 'control', mode: 'unclaimed' };
+              result = { id: invite.id, url: s.publicBaseUrl + '/s/' + invite.id + '/#invite=' + invite.secret, expiresAt: invite.expiresAt, permission: params.permission || 'control', mode: 'unclaimed' };
             } else if (params.action === 'revoke') {
               s.store.revoke(params.id, owner); result = status(params.id);
             } else if (params.action === 'status') result = status(params.id);

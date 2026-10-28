@@ -156,7 +156,7 @@ export class NoVncProbeGateway {
       this.server.once('error', reject);
       this.server.listen(port, host, resolvePromise);
     });
-    this.localUrl = `http://${host}:${this.server.address().port}`;
+    this.localUrl = 'http://' + host + ':' + this.server.address().port;
     this.expiryTimer = setInterval(() => { void this.sweep(); }, 250);
     this.expiryTimer.unref();
     this.heartbeatTimer = setInterval(() => this.heartbeat(), this.heartbeatMs);
@@ -226,7 +226,8 @@ export class NoVncProbeGateway {
       const message = reason === 'setup_failed' ? 'Could not create the disposable VNC probe' : `Probe creation ${reason === 'expired' ? 'expired' : 'ended'}`;
       throw Object.assign(new Error(message), { cause: error, probeId: session.id });
     }
-    return { id: session.id, url: `${this.origin}${this.prefix}${session.id}/#invite=${inviteSecret}`, expiresAt: session.expiresAt };
+    const origin = this.origin, prefix = this.prefix;
+    return { id: session.id, url: origin + `${prefix}` + session.id + '/#invite=' + inviteSecret, expiresAt: session.expiresAt };
   }
 
   throwIfCreationEnded(session) {
@@ -301,17 +302,21 @@ export class NoVncProbeGateway {
     security(res);
     try {
       const url = new URL(req.url, 'http://localhost');
-      const page = url.pathname.match(new RegExp(`^${this.prefix}([a-f0-9]{32})/$`));
-      const action = url.pathname.match(new RegExp(`^${this.prefix}([a-f0-9]{32})/(claim|credentials|control|done|clipboard)$`));
+      const routePath = (suffix) => {
+        const prefix = this.prefix;
+        return `${prefix}` + suffix;
+      };
+      const page = url.pathname.match(new RegExp('^' + routePath('([a-f0-9]{32})/$')));
+      const action = url.pathname.match(new RegExp('^' + routePath('([a-f0-9]{32})/(claim|credentials|control|done|clipboard)$')));
       if (req.method === 'GET' && page) {
         const session = this.sessionFor(page[1]);
         if (['ending', 'ended', 'cleanup_failed'].includes(session.mode)) throw problem('Probe access ended', 410);
         const data = (await readFile(new URL('probe.html', PUBLIC), 'utf8')).replaceAll(PREFIX, this.prefix);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); res.end(data); return;
       }
-      if (req.method === 'GET' && url.pathname === `${this.prefix}assets/probe.js`) return await this.servePublic(res, 'probe.js', 'text/javascript');
-      if (req.method === 'GET' && url.pathname === `${this.prefix}assets/probe.css`) return await this.servePublic(res, 'probe.css', 'text/css');
-      if (req.method === 'GET' && url.pathname.startsWith(`${this.prefix}novnc/`)) return await this.serveNoVnc(res, url.pathname.slice(`${this.prefix}novnc/`.length));
+      if (req.method === 'GET' && url.pathname === routePath('assets/probe.js')) return await this.servePublic(res, 'probe.js', 'text/javascript');
+      if (req.method === 'GET' && url.pathname === routePath('assets/probe.css')) return await this.servePublic(res, 'probe.css', 'text/css');
+      if (req.method === 'GET' && url.pathname.startsWith(routePath('novnc/'))) return await this.serveNoVnc(res, url.pathname.slice(routePath('novnc/').length));
       if (req.method !== 'POST' || !action) { req.resume(); throw problem('Not found', 404); }
       if (!this.originAllowed(req)) { req.resume(); throw problem('Origin denied', 403); }
       const session = this.sessionFor(action[1]);
@@ -355,7 +360,7 @@ export class NoVncProbeGateway {
     try { decoded = decodeURIComponent(relative); } catch { throw problem('Not found', 404); }
     if (!/^[A-Za-z0-9_./-]+\.js$/.test(decoded)) throw problem('Not found', 404);
     const file = resolve(this.noVncAssetsDir, decoded);
-    if (!file.startsWith(`${this.noVncAssetsDir}${sep}`)) throw problem('Not found', 404);
+    if (!file.startsWith(this.noVncAssetsDir + sep)) throw problem('Not found', 404);
     const data = await readFile(file);
     res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' }); res.end(data);
   }
@@ -368,8 +373,9 @@ export class NoVncProbeGateway {
     session.sessionHash = digest(secret);
     session.mode = 'watch';
     const seconds = Math.max(0, Math.floor((session.expiresAt - this.now()) / 1000));
+    const prefix = this.prefix;
     sendJson(res, 200, { mode: 'watch', expiresAt: session.expiresAt }, {
-      'Set-Cookie': `novnc_probe=${secret}; Path=${this.prefix}${session.id}/; Max-Age=${seconds}; HttpOnly; ${this.lanHttpOrigin ? '' : 'Secure; '}SameSite=Strict`,
+      'Set-Cookie': 'novnc_probe=' + secret + '; Path=' + `${prefix}` + session.id + '/; Max-Age=' + seconds + '; HttpOnly; ' + (this.lanHttpOrigin ? '' : 'Secure; ') + 'SameSite=Strict',
     });
   }
 
@@ -444,7 +450,8 @@ export class NoVncProbeGateway {
     socket.once('close', onRawClose);
     try {
       const path = new URL(req.url, 'http://localhost').pathname;
-      const route = path.match(new RegExp(`^${this.prefix}([a-f0-9]{32})/stream/(\\d+)$`));
+      const prefix = this.prefix;
+      const route = path.match(new RegExp('^' + `${prefix}` + '([a-f0-9]{32})/stream/(\\d+)$'));
       if (!route) throw problem('Not found', 404);
       if (!this.originAllowed(req)) throw problem('Origin denied', 403);
       session = this.sessionFor(route[1]);

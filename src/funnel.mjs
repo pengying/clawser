@@ -41,7 +41,8 @@ export class FunnelTransport {
   }
   async persistOwnership(record) {
     if (!this.ownershipFile) return;
-    const temporary = `${this.ownershipFile}.${randomUUID()}.tmp`;
+    const ownershipFile = this.ownershipFile;
+    const temporary = `${ownershipFile}` + '.' + randomUUID() + '.tmp';
     try {
       await mkdir(dirname(this.ownershipFile), { recursive: true, mode: 0o700 });
       const file = await open(temporary, 'wx', 0o600);
@@ -58,8 +59,10 @@ export class FunnelTransport {
   async clearOwnership(invalidate = false) {
     if (!this.ownershipFile) return;
     try {
-      if (invalidate) await rename(this.ownershipFile, `${this.ownershipFile}.invalid-${randomUUID()}`);
-      else await unlink(this.ownershipFile);
+      if (invalidate) {
+        const source = this.ownershipFile, target = this.ownershipFile;
+        await rename(source, `${target}` + '.invalid-' + randomUUID());
+      } else await unlink(this.ownershipFile);
     } catch (cause) {
       if (cause.code !== 'ENOENT') throw new Error('Cannot clear or invalidate Funnel ownership receipt; inspect the plugin state directory', { cause });
     }
@@ -75,7 +78,7 @@ export class FunnelTransport {
     if (!validDns(dns)) throw new Error('Tailscale DNS name unavailable');
     const intent = { version: 1, owner: 'browser-handoff', httpsPort: this.httpsPort, dnsName: dns, localPort };
     this.target = `http://127.0.0.1:${localPort}`;
-    this.host = `${dns}:${this.httpsPort}`;
+    this.host = dns + ':' + this.httpsPort;
     this.expected = expectedState(intent);
     if (receipt) {
       const recordedState = portState(status, receipt.httpsPort);
@@ -95,7 +98,7 @@ export class FunnelTransport {
     // The CLI may apply a mutation and then fail/times out. Track the attempt first.
     this.owned = true;
     try {
-      await this.run(['funnel', '--bg', `--https=${this.httpsPort}`, this.target]);
+      await this.run(['funnel', '--bg', '--https=' + this.httpsPort, this.target]);
       const observed = JSON.parse(await this.run(['serve', 'status', '--json']));
       if (stable(portState(observed, this.httpsPort)) !== stable(this.expected)) throw new Error('Could not verify isolated Funnel configuration');
     } catch {
@@ -116,7 +119,7 @@ export class FunnelTransport {
       throw new Error('Funnel port configuration changed; left untouched. Inspect configuration for unresolved exposure.');
     }
     let removalError;
-    try { await this.run(['funnel', `--https=${this.httpsPort}`, 'off']); } catch (error) { removalError = error; }
+    try { await this.run(['funnel', '--https=' + this.httpsPort, 'off']); } catch (error) { removalError = error; }
     const after = portState(JSON.parse(await this.run(['serve', 'status', '--json'])), this.httpsPort);
     if (occupied(after)) {
       if (stable(after) !== stable(this.expected)) {

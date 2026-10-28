@@ -3,7 +3,7 @@ const control = document.getElementById('control');
 const done = document.getElementById('done');
 const status = document.getElementById('status');
 const mode = document.getElementById('mode');
-const base = location.pathname.endsWith('/') ? location.pathname : `${location.pathname}/`;
+const base = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
 const requestTimeoutMs = 12_000;
 const assetTimeoutMs = 12_000;
 const connectTimeoutMs = 12_000;
@@ -51,7 +51,7 @@ async function post(action, data = {}) {
   }
   let body;
   try { body = await withDeadline(response.json(), requestTimeoutMs, `${action} response timed out`); }
-  catch { throw new Error(`${action} response could not be read`); }
+  catch { throw new Error(action + ' response could not be read'); }
   if (!response.ok) {
     throw new Error(body.mode === 'cleanup_failed'
       ? 'Cleanup could not be verified. Access remains disabled.'
@@ -62,7 +62,7 @@ async function post(action, data = {}) {
 
 function streamUrl(generation) {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${location.host}${base}stream/${generation}`;
+  return protocol + '//' + location.host + base + 'stream/' + generation;
 }
 
 function openConnection(config) {
@@ -141,12 +141,12 @@ async function requestCleanup(context = 'Viewer access ended.') {
       const outcome = result.disposition === 'retained'
         ? 'Browser returned to the assistant. You can close this tab.'
         : 'Test browser destroyed. You can close this tab.';
-      status.textContent = context === 'Cleanup was requested.' ? outcome : `${context} ${outcome}`;
+      status.textContent = context === 'Cleanup was requested.' ? outcome : context + ' ' + outcome;
       done.textContent = 'Done';
       return true;
     } catch (error) {
       try { activeConnection?.instance.disconnect(); } catch {}
-      status.textContent = `${context} Cleanup could not be verified: ${error.message}.`;
+      status.textContent = ''.concat(context) + ' Cleanup could not be verified: ' + ''.concat(error.message) + '.';
       done.disabled = false;
       done.textContent = 'Retry cleanup';
       return false;
@@ -245,14 +245,14 @@ function updateDisplay(anchor) {
   const width = size.width * displayScale, height = size.height * displayScale;
   const stageWidth = Math.max(width, viewport.clientWidth), stageHeight = Math.max(height, viewport.clientHeight);
   const left = (stageWidth - width) / 2, top = (stageHeight - height) / 2;
-  stage.style.width = `${stageWidth}px`;
-  stage.style.height = `${stageHeight}px`;
-  Object.assign(screen.style, { left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` });
+  stage.style.width = stageWidth + 'px';
+  stage.style.height = stageHeight + 'px';
+  Object.assign(screen.style, { left: left + 'px', top: top + 'px', width: width + 'px', height: height + 'px' });
   if (activeConnection) activeConnection.instance.scaleViewport = true;
   viewport.scrollLeft = zoomMode === 'fit' ? 0 : left + pixel.x * displayScale - point.x;
   viewport.scrollTop = zoomMode === 'fit' ? 0 : top + pixel.y * displayScale - point.y;
   const label = document.getElementById('zoom-level');
-  label.value = `${Math.round(displayScale * 100)}%`;
+  label.value = Math.round(displayScale * 100) + '%';
   label.dataset.scale = String(displayScale);
   document.getElementById('zoom-fit').setAttribute('aria-pressed', String(zoomMode === 'fit'));
   document.getElementById('zoom-actual').setAttribute('aria-pressed', String(zoomMode === 1));
@@ -281,14 +281,14 @@ function toolbarBounds() {
 
 function moveToolbar(left, top) {
   const bounds = toolbarBounds();
-  toolbar.style.left = `${Math.max(bounds.left + 8, Math.min(left, bounds.left + bounds.width - toolbar.offsetWidth - 8))}px`;
-  toolbar.style.top = `${Math.max(bounds.top + 8, Math.min(top, bounds.top + bounds.height - toolbar.offsetHeight - 8))}px`;
+  toolbar.style.left = Math.max(bounds.left + 8, Math.min(left, bounds.left + bounds.width - toolbar.offsetWidth - 8)) + 'px';
+  toolbar.style.top = Math.max(bounds.top + 8, Math.min(top, bounds.top + bounds.height - toolbar.offsetHeight - 8)) + 'px';
 }
 
 function keepToolbarVisible() {
   if (toolbar.hidden) return;
   const bounds = toolbarBounds();
-  toolbar.style.maxHeight = `${Math.max(100, bounds.height - 16)}px`;
+  toolbar.style.maxHeight = Math.max(100, bounds.height - 16) + 'px';
   const rect = toolbar.getBoundingClientRect();
   moveToolbar(rect.left, rect.top);
 }
@@ -319,7 +319,7 @@ handle.addEventListener('keydown', (event) => {
 document.getElementById('collapse').addEventListener('click', () => {
   const restore = document.getElementById('restore');
   const rect = toolbar.getBoundingClientRect();
-  restore.style.top = `${Math.max(8, Math.min(rect.top, innerHeight - 52))}px`;
+  restore.style.top = Math.max(8, Math.min(rect.top, innerHeight - 52)) + 'px';
   const right = rect.left + rect.width / 2 > innerWidth / 2;
   restore.style.left = right ? 'auto' : '0';
   restore.style.right = right ? '0' : 'auto';
@@ -356,11 +356,11 @@ function keepClipboardVisible() {
   const gutter = compact ? 4 : 8;
   clipboardDialog.classList.toggle('clipboard-compact', compact);
   const width = Math.max(0, Math.min(440, bounds.width - gutter * 2));
-  clipboardDialog.style.width = `${width}px`;
-  clipboardDialog.style.maxHeight = `${Math.max(0, bounds.height - gutter * 2)}px`;
-  clipboardDialog.style.left = `${bounds.left + (bounds.width - width) / 2}px`;
+  clipboardDialog.style.width = width + 'px';
+  clipboardDialog.style.maxHeight = Math.max(0, bounds.height - gutter * 2) + 'px';
+  clipboardDialog.style.left = (bounds.left + (bounds.width - width) / 2) + 'px';
   const height = clipboardDialog.getBoundingClientRect().height;
-  clipboardDialog.style.top = `${bounds.top + Math.max(gutter, (bounds.height - height) / 2)}px`;
+  clipboardDialog.style.top = (bounds.top + Math.max(gutter, (bounds.height - height) / 2)) + 'px';
   if (document.activeElement === clipboardText) {
     const content = clipboardText.parentElement;
     content.scrollTop += clipboardText.getBoundingClientRect().top - content.getBoundingClientRect().top;
@@ -410,7 +410,7 @@ document.getElementById('paste').addEventListener('click', async () => {
   try { await pasteText(text); }
   catch (error) {
     if (accessEnded) return;
-    status.textContent = `Paste failed: ${error.message}`;
+    status.textContent = 'Paste failed: ' + ''.concat(error.message);
     showClipboard(text, true);
   }
 });
@@ -418,7 +418,7 @@ document.getElementById('clipboard-send').addEventListener('click', async () => 
   try {
     await pasteText(clipboardText.value);
     clipboardDialog.close();
-  } catch (error) { document.getElementById('clipboard-help').textContent = `Paste failed: ${error.message}`; }
+  } catch (error) { document.getElementById('clipboard-help').textContent = 'Paste failed: ' + ''.concat(error.message); }
 });
 document.getElementById('copy').addEventListener('click', async () => {
   if (!controlReady || accessEnded) return;
@@ -430,7 +430,7 @@ document.getElementById('copy').addEventListener('click', async () => {
     await new Promise(resolve => setTimeout(resolve, 150));
     if (accessEnded || connection !== activeConnection) return;
     try { text = (await post('clipboard', { action: 'read' })).text; }
-    catch (error) { if (!accessEnded) status.textContent = `Copy failed: ${error.message}`; return; }
+    catch (error) { if (!accessEnded) status.textContent = 'Copy failed: ' + ''.concat(error.message); return; }
   } else {
     // Give Chrome's Copy action time to publish the current selection to RFB.
     let listener, timer;
