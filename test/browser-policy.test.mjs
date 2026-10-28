@@ -7,6 +7,7 @@ const currentConfig = () => ({ browser: { defaultProfile: 'daily', profiles: {
   other: { cdpUrl: 'http://127.0.0.1:9223', attachOnly: true },
 } } });
 const identity = () => ({ sessionKey: 'agent:main:googlechat:group:spaces/demo', sessionId: 'incarnation', runId: 'run', toolCallId: 'call', requester: { senderIsOwner: true, senderId: 'owner', channel: 'googlechat' } });
+const administrativeIdentity = () => ({ sessionKey: 'agent:fixture:main', sessionId: 'incarnation', runId: 'admin-run', toolCallId: 'admin-call', requester: { senderIsOwner: true, channel: 'webchat' } });
 const event = params => ({ toolName: 'browser', params: { action: 'snapshot', target: 'host', ...params } });
 function fixture() {
   let config = currentConfig(), available = true, drift = 0;
@@ -25,6 +26,49 @@ test('verified per-turn owner can use the pinned host browser and aliases; subse
   const denied = f.policy.evaluate(event({ owner: true, senderIsOwner: true, requester: { senderIsOwner: true } }), ctx);
   assert.equal(denied.allow, false); assert.match(denied.reason, /owner/i); assert.doesNotMatch(denied.reason, /9222|daily/);
   assert.equal(f.policy.evaluate({ toolName: 'browser_handoff' }, {}), undefined);
+});
+
+test('authenticated administrative main context permits an absent sender ID while retaining per-turn ownership', () => {
+  const f = fixture();
+  for (const ctx of [administrativeIdentity(), { ...administrativeIdentity(), channelId: 'webchat' }]) assert.equal(f.policy.evaluate(event(), ctx), undefined);
+  const member = administrativeIdentity(); member.requester.senderIsOwner = false;
+  assert.equal(f.policy.evaluate(event({ owner: true, senderIsOwner: true }), member).allow, false);
+  const telegram = { ...administrativeIdentity(), sessionKey: 'agent:main:telegram:direct:1', requester: { senderIsOwner: true, channel: 'telegram' } };
+  assert.equal(f.policy.evaluate(event(), telegram).allow, false);
+  telegram.requester.senderId = 'native-owner';
+  assert.equal(f.policy.evaluate(event(), telegram), undefined);
+});
+
+test('administrative main exception rejects malformed sender identity, channel and incomplete lifecycle', () => {
+  const f = fixture();
+  const denied = ctx => assert.equal(f.policy.evaluate(event(), ctx)?.allow, false);
+  for (const value of [undefined, null, '', ' ', 0, {}, []]) {
+    const ctx = administrativeIdentity(); ctx.requester.senderId = value; denied(ctx);
+  }
+  const inherited = administrativeIdentity(); inherited.requester = Object.assign(Object.create({ senderId: undefined }), inherited.requester); denied(inherited);
+  for (const value of [undefined, null, false, 'true', 1]) {
+    const ctx = administrativeIdentity(); ctx.requester.senderIsOwner = value; denied(ctx);
+  }
+  for (const channel of [undefined, null, '', 'telegram', 'googlechat', 'Webchat']) {
+    const ctx = administrativeIdentity(); ctx.requester.channel = channel; denied(ctx);
+  }
+  for (const channelId of [undefined, null, '', 'telegram', 'main']) denied({ ...administrativeIdentity(), channelId });
+  for (const field of ['sessionKey', 'sessionId', 'runId', 'toolCallId']) {
+    const ctx = administrativeIdentity(); delete ctx[field]; denied(ctx);
+  }
+  for (const sessionKey of ['agent:fixture:main:thread:child', 'agent:fixture:MAIN', 'agent:fixture:main\n', 'agent:fixture:telegram:direct:1', 'agent:main:googlechat:group:spaces/demo', 'agent:fixture:cron:job', 'agent:fixture:subagent:child']) denied({ ...administrativeIdentity(), sessionKey });
+});
+
+test('administrative main authority preserves profile, routing, availability and retired binding checks', () => {
+  const f = fixture();
+  for (const params of [{ target: undefined }, { target: 'node' }, { target: 'sandbox' }, { profile: 'other' }, { cdpUrl: 'http://localhost:9999' }, { executablePath: '/untrusted/chrome' }, { action: 'start' }]) assert.equal(f.policy.evaluate(event(params), administrativeIdentity())?.allow, false);
+  f.available = false;
+  assert.equal(f.policy.evaluate(event(), administrativeIdentity()).allow, false);
+  f.available = true;
+  f.config.browser.defaultProfile = 'other';
+  assert.equal(f.policy.evaluate(event(), administrativeIdentity()).allow, false);
+  f.config = currentConfig();
+  assert.equal(f.policy.evaluate(event(), administrativeIdentity()).allow, false);
 });
 test('native policy rejects incomplete host identity and disallowed sessions', () => {
   const f = fixture();

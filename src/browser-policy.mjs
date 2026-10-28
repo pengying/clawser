@@ -110,7 +110,14 @@ export function createBrowserAccessPolicy({ api, binding, assertAvailable }) {
     evaluate(event, ctx) {
       if (!browserTool(event.toolName)) return;
       const requester = ctx?.requester;
-      if (requester?.senderIsOwner !== true || ![requester.senderId, requester.channel, ctx.sessionKey, ctx.sessionId, ctx.runId, ctx.toolCallId].every(nonempty) ||
+      // Native administrative HTTP turns carry authenticated operator authority
+      // without a person-level sender ID. Confine that shape to canonical main
+      // webchat turns; a supplied malformed identity never becomes "absent".
+      const administrativeMain = requester?.senderIsOwner === true && requester.channel === 'webchat' && !('senderId' in requester) &&
+        typeof ctx.sessionKey === 'string' && ctx.sessionKey.trim() === ctx.sessionKey && /^agent:[^:]+:main$/.test(ctx.sessionKey) &&
+        (!('channelId' in ctx) || ctx.channelId === 'webchat');
+      if (requester?.senderIsOwner !== true || ![requester.channel, ctx.sessionKey, ctx.sessionId, ctx.runId, ctx.toolCallId].every(nonempty) ||
+          (!nonempty(requester.senderId) && !administrativeMain) ||
           !authorizedSession(ctx.sessionKey, api.pluginConfig?.ownerGroupSessions))
         return { allow: false, reason: 'Verified owner browser access requires a complete current native invocation in an authorized conversation' };
       try {

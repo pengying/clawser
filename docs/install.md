@@ -340,6 +340,15 @@ and heartbeat turns remain denied. A shared-admin HTTP agent proxy does not
 establish per-sender ownership. Ordinary browser tools also require a complete
 current native verified owner invocation.
 
+Authenticated administrative API turns may use ordinary browser tools in an
+exact `agent:<agent>:main` session when the native requester has
+`senderIsOwner=true`, channel `webchat`, and no sender ID property. A supplied
+malformed sender ID or contradictory host channel is rejected. This authority
+comes from the authenticated API principal's `operator.admin` scope; human
+attribution and group ownership still require native per-sender identity. The
+complete native lifecycle, active browser binding, profile routing and handoff
+fence continue to apply.
+
 Only the owner's explicit request authorizes returning a link to that **same
 requesting group/thread**. Disclose that any member can claim its one-use bearer
 URL first. Other members cannot invoke browser tools or create, inspect, wait on
