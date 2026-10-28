@@ -37,8 +37,8 @@ const cookie = (req) => (req.headers.cookie || '').split(';').map((s) => s.trim(
 export class HandoffServer {
   streams = new Map();
   closing = new Set();
-  constructor({ backend, store = new LeaseStore(), publicBaseUrl, comparisonProxyUrl } = {}) {
-    this.backend = backend; this.store = store;
+  constructor({ backend, store = new LeaseStore(), publicBaseUrl, comparisonProxyUrl, isBindingCurrent = () => true } = {}) {
+    this.backend = backend; this.store = store; this.isBindingCurrent = isBindingCurrent;
     this.comparisonProxy = comparisonProxyUrl ? new ComparisonProxy(comparisonProxyUrl) : null;
     this.setPublicBase(publicBaseUrl);
     this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_BODY, perMessageDeflate: false });
@@ -50,6 +50,21 @@ export class HandoffServer {
     this.store.on('release', (share) => { const entry = this.streams.get(share.id); if (entry) this.cancelEntry(entry); });
     this.store.on('ended', ({ id }) => this.stopStream(id));
   }
+  bindingCurrent() {
+    if (this.bindingFailed) return false;
+    let current = false;
+    try { current = this.isBindingCurrent() === true; } catch {}
+    if (current) return true;
+    // Latch before retirement: the source guard may itself end shares and
+    // synchronously reenter stream cleanup. Never discard pending input fences.
+    this.bindingFailed = true;
+    for (const entry of this.streams.values()) {
+      entry.accepting = false; entry.connection?.revokeKeyboard?.();
+      if (entry.ws.readyState < WebSocket.CLOSING) entry.ws.close(4003, 'browser_configuration_changed');
+    }
+    return false;
+  }
+  requireBinding() { if (!this.bindingCurrent()) throw fail('Browser configuration changed', 409); }
   setPublicBase(value) {
     if (!value) { this.publicBaseUrl = undefined; return; }
     const url = new URL(value);
@@ -76,7 +91,9 @@ export class HandoffServer {
   originAllowed(req) { return [this.publicBaseUrl || this.localUrl].includes(req.headers.origin); }
   viewerMetrics(id) { return this.streams.get(id)?.display?.snapshot() || null; }
   async createShare({ owner, profile, targetId, permission = 'control', ttlMs = 300_000 }) {
+    this.requireBinding();
     const tab = (await this.backend.list(profile)).find((tab) => tab.targetId === targetId);
+    this.requireBinding();
     if (!tab) throw new Error('Selected HTTP(S) tab is unavailable');
     const invite = this.store.create({ owner, target: { profile, targetId }, permission, ttlMs });
     const url = (this.publicBaseUrl || this.localUrl) + '/s/' + invite.id + '/#invite=' + invite.secret;
@@ -98,9 +115,11 @@ export class HandoffServer {
       }
       if (!route) throw fail('Not found', 404);
       const [, id, action] = route;
+      this.requireBinding();
       if (req.method === 'POST') {
         if (!this.originAllowed(req)) throw fail('Origin rejected', 403);
         const input = await body(req);
+        this.requireBinding();
         if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail('Invalid request');
         if (action === 'claim') {
           let session;
@@ -120,6 +139,7 @@ export class HandoffServer {
         if (!entry?.ready || entry.failed || entry.ws.readyState !== WebSocket.OPEN) throw fail('Browser stream is not ready. Wait for the view to connect before taking control.', 409);
         try {
           await this.store.takeControl(share);
+          this.requireBinding();
           if (this.streams.get(id) !== entry || !entry.ready || entry.failed || entry.ws.readyState !== WebSocket.OPEN) {
             this.store.releaseControl(share); throw new Error('Browser connection changed. Take control again after reconnecting.');
           }
@@ -135,6 +155,7 @@ export class HandoffServer {
     if (this.comparisonProxy?.matches(req.url)) { this.comparisonProxy.upgrade(req, socket, head); return; }
     let share;
     try {
+      this.requireBinding();
       const route = new URL(req.url, 'http://localhost').pathname.match(/^\/s\/([a-f0-9]{32})\/stream$/);
       if (!route || !this.originAllowed(req) || this.streams.has(route[1])) throw new Error('Denied');
       share = this.store.authorize(route[1], cookie(req));
@@ -144,7 +165,7 @@ export class HandoffServer {
       const entry = { ws, share, connectionId: randomBytes(16).toString('hex'), lastInput: 0, ready: false, accepting: false, failed: false, executing: false, queue: Promise.resolve(), pending: 0, gestureHeld: false };
       this.streams.set(share.id, entry);
       const send = (value) => {
-        if (ws.readyState !== WebSocket.OPEN) return false;
+        if (!this.bindingCurrent() || ws.readyState !== WebSocket.OPEN) return false;
         // Receiver pacing bounds normal display traffic; a non-reading peer
         // must also be unable to accumulate unlimited control/error replies.
         if (ws.bufferedAmount > 1_000_000) { ws.terminate(); return false; }
@@ -192,7 +213,7 @@ export class HandoffServer {
         entry.pending++;
         const receivedAt = performance.now();
         entry.queue = entry.queue.then(async () => {
-          if (entry.failed || !alive() || ws.readyState !== WebSocket.OPEN || !entry.ready || !entry.accepting || share.mode !== 'control' || packet.controlId !== share.controlId)
+          if (!this.bindingCurrent() || entry.failed || !alive() || ws.readyState !== WebSocket.OPEN || !entry.ready || !entry.accepting || share.mode !== 'control' || packet.controlId !== share.controlId)
             throw new Error('Take control before sending input');
           entry.executing = true;
           this.store.gate.beginInput(share.id);
@@ -204,7 +225,7 @@ export class HandoffServer {
             for (const input of inputs) {
               // A batch saves network round trips, not browser checks. Stop
               // between edits if handback, expiry, or disconnect occurred.
-              if (entry.failed || !alive() || ws.readyState !== WebSocket.OPEN || !entry.ready || !entry.accepting || share.mode !== 'control' || packet.controlId !== share.controlId)
+              if (!this.bindingCurrent() || entry.failed || !alive() || ws.readyState !== WebSocket.OPEN || !entry.ready || !entry.accepting || share.mode !== 'control' || packet.controlId !== share.controlId)
                 throw Object.assign(new Error('Take control before sending input'), { definitive: true });
               if (input.kind === 'pointer' && input.phase === 'down') {
                 if (entry.gestureHeld) throw Object.assign(new Error('A gesture is already active'), { definitive: true });
@@ -217,7 +238,8 @@ export class HandoffServer {
               }
             }
             reply('inputAck', { ...(result && Object.hasOwn(result, 'focus') ? { focus: result.focus } : {}),
-              ...(result && Object.hasOwn(result, 'picker') ? { picker: result.picker } : {}) });
+              ...(result && Object.hasOwn(result, 'picker') ? { picker: result.picker } : {}),
+              ...(result && Object.hasOwn(result, 'keyboard') ? { keyboard: result.keyboard } : {}) });
           }
           catch (error) {
             if (!error.definitive) {
@@ -245,8 +267,9 @@ export class HandoffServer {
         }).catch((error) => rejectInput(error.message)).finally(() => { entry.executing = false; entry.pending--; entry.display.flush(); });
       });
       entry.opening = this.backend.open(share.target, {
-        onFrame: (frame) => { if (alive()) entry.display.frame(frame); else ws.close(4001, 'expired'); },
-        onMetadata: (metadata) => { if (alive()) entry.display.metadata(metadata); },
+        isInputAllowed: () => this.bindingCurrent() && !entry.failed && alive() && ws.readyState === WebSocket.OPEN && entry.ready && entry.accepting && share.mode === 'control',
+        onFrame: (frame) => { if (!this.bindingCurrent()) return; if (alive()) entry.display.frame(frame); else ws.close(4001, 'expired'); },
+        onMetadata: (metadata) => { if (!this.bindingCurrent()) return; if (alive()) entry.display.metadata(metadata); },
         onClose: () => {
           if (ws.readyState >= WebSocket.CLOSING) return;
           if (entry.executing || entry.gestureHeld) {
@@ -286,6 +309,7 @@ export class HandoffServer {
   }
   cancelEntry(entry) {
     entry.accepting = false;
+    entry.connection?.revokeKeyboard?.();
     if (entry.cancelQueued) return entry.cancelQueued;
     entry.queue = entry.queue.catch(() => { this.store.gate.poison(); }).then(async () => {
       await this.cancelHeld(entry);

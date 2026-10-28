@@ -1,5 +1,6 @@
 import { WebSocket } from 'ws';
 import { randomBytes } from 'node:crypto';
+import { FrameKeyboard } from './frame-keyboard.mjs';
 import { interactionCollector } from './interaction-metadata.mjs';
 import { pickerOpen, pickerApply, pickerCancel } from './native-picker.mjs';
 
@@ -20,6 +21,14 @@ const pickerRegion = (document, regionId) => {
 export function validateInput(event) {
   if (!event || typeof event !== 'object' || Array.isArray(event)) throw new Error('Invalid input');
   if (event.kind === 'focus') return { kind: 'focus' };
+  if (event.kind === 'nativeKeyboardOpen' && /^[a-f0-9]{32}$/.test(event.document || ''))
+    return { kind: 'nativeKeyboardOpen', document: event.document };
+  if (event.kind === 'nativeEdit' && /^[a-f0-9]{32}$/.test(event.keyboardToken || '') &&
+      EDIT_OPERATIONS.includes(event.operation) &&
+      (event.operation !== 'insert' || typeof event.text === 'string' && event.text.length <= 4096) &&
+      (event.operation !== 'key' || Object.hasOwn(KEYS, event.key)))
+    return { kind: 'nativeEdit', keyboardToken: event.keyboardToken, operation: event.operation,
+      ...(event.operation === 'insert' ? { text: event.text } : event.operation === 'key' ? { key: event.key } : {}) };
   if (event.kind === 'pickerOpen' && pickerRegion(event.document, event.regionId))
     return { kind: 'pickerOpen', document: event.document, regionId: event.regionId };
   if (event.kind === 'pickerApply' && /^[a-f0-9]{32}$/.test(event.pickerToken || '')) {
@@ -74,11 +83,14 @@ export class CdpConnection {
       try { msg = JSON.parse(String(raw)); } catch { return; }
       if (msg.id) {
         const entry = this.requests.get(msg.id);
-        if (!entry) return;
+        if (!entry || (msg.sessionId || undefined) !== entry.sessionId) return;
         clearTimeout(entry.timer); this.requests.delete(msg.id);
         if (msg.error) entry.reject(Object.assign(new Error('Browser command failed'), { definitive: true, method: entry.method }));
         else entry.resolve(msg.result);
-      } else this.listeners.get(msg.method)?.(msg.params);
+      } else {
+        for (const listener of this.listeners.get(msg.method + ':' + (msg.sessionId || '')) || []) listener(msg.params);
+        for (const listener of this.listeners.get(msg.method + ':*') || []) listener(msg.params, msg.sessionId);
+      }
     });
     this.socket.on('error', () => { this.firstFailure ||= { code: 'transport_error' }; });
     this.socket.on('close', () => {
@@ -95,8 +107,14 @@ export class CdpConnection {
     });
     return this;
   }
-  on(method, listener) { this.listeners.set(method, listener); }
-  send(method, params = {}) {
+  on(method, listener, sessionId = '') {
+    const key = method + ':' + sessionId;
+    if (!this.listeners.has(key)) this.listeners.set(key, new Set());
+    this.listeners.get(key).add(listener);
+    return () => this.listeners.get(key)?.delete(listener);
+  }
+  onAny(method, listener) { return this.on(method, listener, '*'); }
+  send(method, params = {}, sessionId) {
     if (this.socket?.readyState !== WebSocket.OPEN) return Promise.reject(Object.assign(new Error('Browser disconnected'), { method,
       causeCode: this.firstFailure?.code || 'disconnected', causeMethod: this.firstFailure?.method }));
     const id = ++this.sequence;
@@ -109,8 +127,8 @@ export class CdpConnection {
         this.close();
       }, this.commandTimeoutMs);
       timer.unref();
-      this.requests.set(id, { resolve, reject, timer, method });
-      this.socket.send(JSON.stringify({ id, method, params }));
+      this.requests.set(id, { resolve, reject, timer, method, sessionId });
+      this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
   }
   close() { this.socket?.terminate(); }
@@ -132,7 +150,7 @@ export class CdpBrowser {
       webSocketDebuggerUrl: tab.webSocketDebuggerUrl,
     }));
   }
-  async open(target, { onFrame, onClose, onMetadata = () => {} }) {
+  async open(target, { onFrame, onClose, onMetadata = () => {}, isInputAllowed = () => true }) {
     const tab = (await this.list(target.profile)).find((tab) => tab.targetId === target.targetId);
     if (!tab) throw new Error('Selected browser tab is unavailable');
     const base = this.profiles[target.profile];
@@ -142,9 +160,9 @@ export class CdpBrowser {
     const cdp = await new CdpConnection().connect(wsUrl);
     let width = 1, height = 1, pageScale = 1, closed = false, url = tab.url, metadataTimer;
     let contextId, documentId = randomBytes(16).toString('hex'), activeFocus, activePicker, latestMap, gesture, dragData, dragEntered = false;
-    let metadataQueue = Promise.resolve(), polling = false;
+    let metadataQueue = Promise.resolve(), polling = false, keyboard;
     const failure = (message) => Object.assign(new Error(message), { definitive: true });
-    const finish = () => { if (!closed) { closed = true; clearInterval(metadataTimer); cdp.close(); onClose(); } };
+    const finish = () => { if (!closed) { closed = true; keyboard?.revoke(); clearInterval(metadataTimer); cdp.close(); onClose(); } };
     const collect = () => {
       const work = metadataQueue.catch(() => {}).then(async () => {
         if (closed) throw failure('Browser disconnected');
@@ -165,7 +183,7 @@ export class CdpBrowser {
           activeFocus = { ...focused, document: map.document, token: randomBytes(16).toString('hex') };
         if (!activePicker || activePicker.document !== map.document || activePicker.id !== map.pickerFocus) activePicker = null;
         onMetadata({ interactions: { document: map.document, regions: map.regions, focus: activeFocus,
-          pickerFocus: activePicker && { ...activePicker }, timestamp: Date.now() } });
+          pickerFocus: activePicker && { ...activePicker }, keyboard: keyboard?.current() || null, timestamp: Date.now() } });
         return activeFocus;
       });
       metadataQueue = work;
@@ -220,6 +238,10 @@ export class CdpBrowser {
       }
       gesture = null;
     };
+    keyboard = new FrameKeyboard(cdp, { document: () => documentId, isInputAllowed, onChange: (token) => {
+      if (!closed) onMetadata({ interactions: { document: documentId, regions: latestMap?.regions || [], focus: activeFocus || null,
+        pickerFocus: activePicker && { ...activePicker }, keyboard: token, timestamp: Date.now() } });
+    } });
     cdp.on('Input.dragIntercepted', ({ data }) => {
       if (!gesture || gesture.pointerType !== 'mouse') return;
       // Drag data stays on the backend; never expose files/page data to the viewer.
@@ -249,6 +271,7 @@ export class CdpBrowser {
       // Recheck after subscribing: the selected tab could have navigated since /json/list.
       const tree = await cdp.send('Page.getFrameTree');
       url = tree.frameTree.frame.url;
+      await keyboard.start(tree.frameTree.frame.id);
       if (!isWebPage(url)) throw new Error('Only HTTP(S) browser pages can be shared');
       onMetadata({ url, title: tab.title });
       await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 70, maxWidth: 1600, maxHeight: 1200, everyNthFrame: 1 });
@@ -265,7 +288,21 @@ export class CdpBrowser {
       async input(raw) {
         const event = validateInput(raw);
         if (closed) throw new Error('Browser disconnected');
+        if (!['nativeKeyboardOpen', 'nativeEdit', 'focus'].includes(event.kind)) keyboard.revoke();
         await prepareForInput(event);
+        if (event.kind === 'nativeKeyboardOpen') return { keyboard: await keyboard.activate(event.document) };
+        if (event.kind === 'nativeEdit') {
+          await keyboard.validate(event.keyboardToken);
+          // No asynchronous gap between this final lifecycle/lease check and
+          // dispatch. Focus validation and native input still are not atomic.
+          keyboard.assert(event.keyboardToken);
+          if (event.operation === 'insert') await cdp.send('Input.insertText', { text: event.text });
+          else {
+            if (event.operation === 'key' || event.operation === 'enter') keyboard.revoke();
+            await key(event.operation === 'key' ? event.key : { backspace: 'Backspace', delete: 'Delete', enter: 'Enter' }[event.operation]);
+          }
+          return { keyboard: keyboard.current() };
+        }
         if (event.kind === 'focus') return { focus: await collect() };
         if (event.kind === 'pickerOpen') {
           await collect();
@@ -354,6 +391,7 @@ export class CdpBrowser {
         }
       },
       cancelGesture,
+      revokeKeyboard() { keyboard.revoke(); },
       cancelPicker() {
         // Revoke server-side authority before the optional isolated-world cleanup
         // starts, so a delayed cleanup can never revive or race an apply.
@@ -362,6 +400,7 @@ export class CdpBrowser {
         return pickerAction(pickerCancel(current.token)).catch(() => {}).then(() => collect().catch(() => {}));
       },
       async close() {
+        keyboard.revoke();
         if (closed) return;
         clearInterval(metadataTimer);
         if (activePicker && contextId) {

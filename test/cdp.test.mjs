@@ -277,3 +277,16 @@ test('edit operation allowlist preserves exact types, text bounds and inherited-
   assert.throws(() => validateInput({ kind: 'edit', focusToken, operation: 'insert', text: 'x'.repeat(4097) }), /unsupported input/);
   assert.throws(() => validateInput({ kind: 'edit', focusToken, operation: 'insert', text: new String('hello') }), /unsupported input/);
 });
+
+test('manual frame keyboard inputs require explicit activation and a distinct bounded token', () => {
+  const document = 'd'.repeat(32), keyboardToken = 'e'.repeat(32);
+  assert.deepEqual(validateInput({ kind: 'nativeKeyboardOpen', document }), { kind: 'nativeKeyboardOpen', document });
+  assert.deepEqual(validateInput({ kind: 'nativeEdit', keyboardToken, operation: 'insert', text: '😀' }),
+    { kind: 'nativeEdit', keyboardToken, operation: 'insert', text: '😀' });
+  for (const event of [
+    { kind: 'nativeKeyboardOpen' }, { kind: 'nativeKeyboardOpen', document: 'stale' },
+    { kind: 'nativeEdit', focusToken: keyboardToken, operation: 'insert', text: 'x' },
+    { kind: 'nativeEdit', keyboardToken, operation: 'insert', text: 'x'.repeat(4097) },
+    { kind: 'nativeEdit', keyboardToken, operation: 'key', key: 'F12' },
+  ]) assert.throws(() => validateInput(event), /invalid|unsupported/i);
+});
