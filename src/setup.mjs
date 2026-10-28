@@ -254,7 +254,7 @@ async function resources(o, p, saved, d) {
   const receiptPath = join(p.runtime, 'ownership.json');
   if (await stat(receiptPath, d)) { await privatePath(receiptPath, 'file', d); receipt = await readJson(receiptPath, d); }
   const container = await inspectDocker(['inspect', o.containerName], d);
-  for (const [kind, name] of [['network', o.containerName + '-net'], ['volume', o.containerName + '-profile']]) {
+  for (const [kind, name] of [['network', ''.concat(o.containerName) + '-net'], ['volume', ''.concat(o.containerName) + '-profile']]) {
     const item = await inspectDocker([kind, 'inspect', name], d);
     if (item && (!saved || !receipt?.ownerId || item.Labels?.[runtimeLabel] !== receipt.ownerId)) throw new Error('Refusing unowned Docker ' + ''.concat(kind) + ': ' + ''.concat(name));
   }

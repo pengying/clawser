@@ -103,6 +103,25 @@ test('dry-run checks readiness and plans without downloads, writes, builds or co
   assert.deepEqual(h.config, {});
 });
 
+test('coercible container names keep string-hint Docker resource identities', async t => {
+  const h = await harness(t);
+  const hints = [];
+  const containerName = {
+    startsWith() { return false; },
+    [Symbol.toPrimitive](hint) { hints.push(hint); return hint === 'string' ? 'desktop' : 'different'; },
+  };
+  const result = await runClawser([...h.args, '--container-name', containerName, '--dry-run'], h.deps);
+  assert.equal(result.dryRun, true);
+  const inspections = h.calls.filter(call => call.command === 'docker' && call.args.includes('inspect'));
+  assert.equal(inspections[0].args.at(-1), containerName);
+  assert.deepEqual(inspections.slice(1).map(call => call.args.slice(-3)), [
+    ['network', 'inspect', 'desktop-net'], ['volume', 'inspect', 'desktop-profile'],
+  ]);
+  assert.ok(hints.length >= 4);
+  assert.ok(hints.every(hint => hint === 'string'));
+  await assert.rejects(fs.lstat(h.stateDir), { code: 'ENOENT' });
+});
+
 test('binds every nested OpenClaw command to the trusted current host entrypoint', async t => {
   const h = await harness(t);
   const command = '/trusted node/bin/node', entrypoint = '/trusted OpenClaw "host"/openclaw.mjs';
