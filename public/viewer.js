@@ -106,9 +106,15 @@ function zoomTo(value, anchor = { x: viewport.clientWidth / 2, y: viewport.clien
 $('zoomIn').onclick = () => zoomTo(zoom * 1.25);
 $('zoomOut').onclick = () => zoomTo(zoom / 1.25);
 $('zoomReset').onclick = () => { zoomTo(1, { x: 0, y: 0 }); viewport.scrollTo(0, 0); };
-$('menu').onclick = () => {
-  $('panel').hidden = !$('panel').hidden; $('menu').setAttribute('aria-expanded', String(!$('panel').hidden));
-};
+function setPanelOpen(open) {
+  $('panel').hidden = !open; $('menu').setAttribute('aria-expanded', String(open));
+}
+$('menu').onclick = () => setPanelOpen($('panel').hidden);
+document.addEventListener('pointerdown', (event) => {
+  if ($('panel').hidden) return;
+  const path = event.composedPath();
+  if (!path.includes($('panel')) && !path.includes($('menu'))) setPanelOpen(false);
+}, { capture: true });
 $('dragMode').onclick = () => { dragOnce = !dragOnce; $('dragMode').setAttribute('aria-pressed', String(dragOnce)); $('dragMode').textContent = dragOnce ? 'Drag enabled for next gesture' : 'Drag once'; };
 $('keyboardButton').onclick = () => {
   if (!interactions?.focus || performance.now() - interactionsAt > 1500) { status('Tap a visible text field first.', true); return; }
