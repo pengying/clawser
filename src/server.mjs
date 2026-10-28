@@ -59,7 +59,7 @@ export class HandoffServer {
     // synchronously reenter stream cleanup. Never discard pending input fences.
     this.bindingFailed = true;
     for (const entry of this.streams.values()) {
-      entry.accepting = false; entry.connection?.stopCaptureAssist?.(); entry.connection?.revokeKeyboard?.();
+      entry.accepting = false; entry.captureAssist?.stop(); entry.connection?.revokeKeyboard?.();
       if (entry.ws.readyState < WebSocket.CLOSING) entry.ws.close(4003, 'browser_configuration_changed');
     }
     return false;
@@ -186,16 +186,16 @@ export class HandoffServer {
         let inputs, packet;
         const reply = (type, extra = {}) => send({ type, id: packet?.id, connectionId: entry.connectionId, controlId: packet?.controlId, ...extra });
         const rejectInput = (message) => {
-          entry.failed = true; entry.accepting = false; entry.connection?.stopCaptureAssist?.();
+          entry.failed = true; entry.accepting = false; entry.captureAssist?.stop();
           if (!entry.failureReplied) { entry.failureReplied = true; reply('error', { error: message, recoveryRequired: Boolean(this.store.gate.poisonReason) }); }
           if (ws.readyState < WebSocket.CLOSING) ws.close(4003, 'input_failed');
         };
         try {
           packet = JSON.parse(String(raw));
-          if (packet.type === 'displayAck') { entry.display.ack(packet); entry.connection?.captureDemandChanged?.(); return; }
+          if (packet.type === 'displayAck') { entry.display.ack(packet); entry.captureAssist?.demandChanged(); return; }
           if (packet.type === 'captureVisibility') {
             if (packet.connectionId !== entry.connectionId || !['visible', 'hidden'].includes(packet.visibility)) throw new Error();
-            entry.display.visibility = packet.visibility; entry.connection?.captureDemandChanged?.(); return;
+            entry.display.visibility = packet.visibility; entry.captureAssist?.demandChanged(); return;
           }
           if (packet.type !== 'input') throw new Error();
           if (share.mode !== 'control') { rejectInput('Take control before sending input'); void this.cancelEntry(entry).catch(() => this.store.gate.poison()); return; }
@@ -271,12 +271,17 @@ export class HandoffServer {
         }).catch((error) => rejectInput(error.message)).finally(() => { entry.executing = false; entry.pending--; entry.display.flush(); });
       });
       entry.opening = this.backend.open(share.target, {
+        onCaptureAssist: (assist) => {
+          entry.captureAssist = assist;
+          if (!this.bindingCurrent() || this.streams.get(share.id) !== entry || !alive() || ws.readyState !== WebSocket.OPEN) assist.stop();
+        },
         getCaptureState: () => ({
           live: this.bindingCurrent() && this.streams.get(share.id) === entry && alive() && !entry.failed &&
             !this.store.gate.poisonReason && ws.readyState === WebSocket.OPEN,
           // A running human input may itself need a concurrent compositor paint.
-          // Only reader visibility/ACK/buffer demand gates capture work here.
-          demand: entry.ready && entry.display.visibility === 'visible' && !entry.display.inFlight && ws.bufferedAmount < 64_000,
+          // Initial metadata ACK establishes reader demand before backend readiness.
+          // Input remains gated on entry.ready; capture never bypasses the ACK.
+          demand: entry.display.visibility === 'visible' && !entry.display.inFlight && ws.bufferedAmount < 64_000,
           control: entry.accepting && share.mode === 'control' ? share.controlId : null,
         }),
         isInputAllowed: () => this.bindingCurrent() && !entry.failed && alive() && ws.readyState === WebSocket.OPEN && entry.ready && entry.accepting && share.mode === 'control',
@@ -298,7 +303,7 @@ export class HandoffServer {
         entry.connection = connection;
         // Do not await cleanup from opening: cleanup itself waits for opening.
         if (!alive() || ws.readyState !== WebSocket.OPEN) { void this.cleanup(entry); return; }
-        entry.ready = true; entry.connection?.captureDemandChanged?.(); send({ type: 'ready', connectionId: entry.connectionId, inputWindow: 4, ...this.store.state(share) });
+        entry.ready = true; entry.captureAssist?.demandChanged(); send({ type: 'ready', connectionId: entry.connectionId, inputWindow: 4, ...this.store.state(share) });
       }).catch(() => { ws.close(4002, 'browser_unavailable'); });
     });
   }
@@ -321,7 +326,7 @@ export class HandoffServer {
   }
   cancelEntry(entry) {
     entry.accepting = false;
-    entry.connection?.releaseCaptureControl?.();
+    entry.captureAssist?.release();
     entry.connection?.revokeKeyboard?.();
     if (entry.cancelQueued) return entry.cancelQueued;
     entry.queue = entry.queue.catch(() => { this.store.gate.poison(); }).then(async () => {
@@ -335,7 +340,7 @@ export class HandoffServer {
   cleanup(entry) {
     if (entry.cleanup) return entry.cleanup;
     entry.ready = entry.accepting = false;
-    entry.connection?.stopCaptureAssist?.();
+    entry.captureAssist?.stop();
     const work = entry.cleanup = (async () => {
       await entry.opening;
       await this.cancelEntry(entry);

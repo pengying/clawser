@@ -1,3 +1,4 @@
+const retired = () => Object.assign(new Error('Capture preparation retired'), { definitive: true });
 // A screenshot is a discard-only compositor paint request. Ordinary screencast
 // events remain the sole source of displayed pixels and geometry.
 export class PaintAssist {
@@ -18,10 +19,32 @@ export class PaintAssist {
   frame() {
     if (this.stopped) return;
     this.lastFrame = this.now(); this.frames++;
-    if (this.pending && !this.pending.explicit) this.pending = null;
+    if (this.pending && !this.pending.explicit && !this.pending.preparation) this.pending = null;
     this.arm();
   }
   noteDispatch() { this.lastDispatch = this.now(); }
+  prepare() {
+    const state = this.state();
+    if (!state || !this.active) return Promise.reject(retired());
+    if (this.pending?.preparation) return this.pending.preparation.promise;
+    let resolve, reject;
+    const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+    const token = state.control ? { document: this.document, control: this.control, id: state.control } : null;
+    const preparation = { promise, resolve, reject, token };
+    this.pending = { ...this.pending, due: this.now(), document: this.document, preparation };
+    this.arm(); return promise;
+  }
+  settlePreparation(work, error) {
+    const preparation = work?.preparation;
+    if (!preparation || preparation.done) return;
+    preparation.done = true;
+    if (error) preparation.reject(error); else preparation.resolve();
+  }
+  workValid(work) {
+    return !this.stopped && this.active && work.document === this.document &&
+      (!work.preparation?.token || this.valid(work.preparation.token)) &&
+      (work.explicit ? this.valid(work.token) : work.preparation || work.frame === this.frames);
+  }
   inputStarted() {
     const state = this.state();
     if (!this.active || !state?.control) return null;
@@ -36,20 +59,23 @@ export class PaintAssist {
   }
   hint(token) {
     const due = this.now() + 100;
-    this.pending = { due: Math.min(due, this.pending?.due ?? Infinity), explicit: true,
+    this.pending = { ...this.pending, due: Math.min(due, this.pending?.due ?? Infinity), explicit: true,
       token, sequence: ++this.sequence, document: this.document };
     this.arm();
   }
   release() {
     this.control++;
-    if (this.pending?.explicit) this.pending = null;
+    if (this.pending?.explicit || this.pending?.preparation?.token) { this.settlePreparation(this.pending, retired()); this.pending = null; }
+    if (this.flightWork?.preparation?.token) this.settlePreparation(this.flightWork, retired());
     this.arm();
   }
   navigationStarted() {
-    this.document++; this.control++; this.active = false; this.pending = null; this.cancelTimer();
+    this.document++; this.control++; this.active = false;
+    this.settlePreparation(this.pending, retired()); this.settlePreparation(this.flightWork, retired());
+    this.pending = null; this.cancelTimer();
   }
   navigationCommitted() {
-    if (!this.stopped) { this.active = true; this.lastFrame = this.now(); this.arm(); }
+    if (!this.stopped) { this.navigationStarted(); this.active = true; this.lastFrame = this.now(); this.arm(); }
   }
   demandChanged() { this.arm(); }
   cancelTimer() { if (this.timer !== undefined) this.clearTimer(this.timer); this.timer = undefined; }
@@ -57,10 +83,10 @@ export class PaintAssist {
     this.cancelTimer();
     const state = this.state();
     if (!state || !this.active || this.inFlight || !state.demand) return;
-    if (this.pending?.explicit && !this.valid(this.pending.token)) this.pending = null;
+    if (this.pending && !this.workValid(this.pending)) { this.settlePreparation(this.pending, retired()); this.pending = null; }
     const due = this.pending?.due ?? Math.max(this.lastFrame, this.lastDispatch) + 2000;
     const at = Math.max(due, this.lastDispatch + 200);
-    this.timer = this.setTimer(() => { this.timer = undefined; this.flush(); }, Math.max(0, at - this.now()));
+    this.timer = this.setTimer(() => { this.timer = undefined; this.flush(); }, Math.max(0, Math.ceil(at - this.now())));
     this.timer?.unref?.();
   }
   flush() {
@@ -69,9 +95,9 @@ export class PaintAssist {
     if (!state.demand) return; // One pending hint survives; ACK/visibility wakes it.
     if (!this.pending) this.pending = { due: this.now(), explicit: false, document: this.document, frame: this.frames };
     const work = this.pending; this.pending = null;
-    if (work.explicit && !this.valid(work.token)) { this.arm(); return; }
-    const valid = () => !this.stopped && this.active && work.document === this.document &&
-      (work.explicit ? this.valid(work.token) : work.frame === this.frames);
+    if (!this.workValid(work)) { this.settlePreparation(work, retired()); this.arm(); return; }
+    const valid = () => this.workValid(work);
+    this.flightWork = work;
     const context = {
       isCurrent: () => valid() && this.state()?.demand === true,
       onDispatch: () => { if (!context.isCurrent() || this.now() < this.lastDispatch + 200) return false; this.noteDispatch(); return true; },
@@ -82,12 +108,19 @@ export class PaintAssist {
           // Demand can disappear while layout metrics are pending. Preserve one
           // obligation, without replacing a newer input-completion generation.
           if (!this.pending) this.pending = work;
-          else this.pending.due = Math.min(this.pending.due, work.due);
-        }
-      }).catch(error => { this.stop(); this.onError(error); })
-      .finally(() => { this.inFlight = null; this.arm(); });
+          else {
+            this.pending.due = Math.min(this.pending.due, work.due);
+            if (work.preparation && !this.pending.preparation) this.pending.preparation = work.preparation;
+            else if (work.preparation && work.preparation !== this.pending.preparation)
+              this.pending.preparation.promise.then(() => this.settlePreparation(work), error => this.settlePreparation(work, error));
+          }
+        } else if (result !== false && valid()) this.settlePreparation(work);
+        else this.settlePreparation(work, retired());
+      }).catch(error => { this.stop(error); this.onError(error); })
+      .finally(() => { this.flightWork = null; this.inFlight = null; this.arm(); });
   }
-  stop() {
+  stop(error = retired()) {
+    this.settlePreparation(this.pending, error); this.settlePreparation(this.flightWork, error);
     this.stopped = true; this.active = false; this.document++; this.control++;
     this.pending = null; this.cancelTimer();
   }

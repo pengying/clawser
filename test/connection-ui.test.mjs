@@ -232,7 +232,7 @@ async function openFixture(t, options = {}) {
           });
         }
         emit(message) { this.onmessage?.({ data: JSON.stringify(message) }); }
-        send() {}
+        send(data) { (fixture.sent ||= []).push(JSON.parse(data)); }
         close() {
           if (this.readyState === FixtureSocket.CLOSED) return;
           if (this.plan.endsWith('-stuck')) { this.readyState = FixtureSocket.CLOSING; return; }
@@ -392,4 +392,13 @@ test('Done aborts a pending initial state request and prevents later startup', {
   assert.equal(await evaluate('fixture.lastAbortName'), 'AbortError');
   await pause(150);
   assert.equal(await evaluate('fixture.sockets.length'), 0, 'no stream opens after Done');
+});
+
+
+test('visible startup can resume capture demand before input readiness', { skip: !existsSync(chromePath) }, async t => {
+  const { evaluate, waitFor } = await openFixture(t, { socketPlans: ['connecting'], realStartupDeadline: true });
+  await waitFor('fixture.sockets.length === 1', 'opening stream exists');
+  await evaluate(`(()=>{const s=fixture.sockets[0];s.readyState=1;s.emit({type:'metadata',connectionId:'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',displayId:1,title:'Dummy startup'});Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});document.dispatchEvent(new Event('visibilitychange'))})()`);
+  assert.equal(await evaluate('fixture.sent.some(message=>message.type === "captureVisibility" && message.connectionId === "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" && message.visibility === "visible")'), true);
+  assert.equal(await evaluate('document.getElementById("control").disabled'), true, 'capture identity does not grant input readiness');
 });

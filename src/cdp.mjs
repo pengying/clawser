@@ -151,7 +151,7 @@ export class CdpBrowser {
       webSocketDebuggerUrl: tab.webSocketDebuggerUrl,
     }));
   }
-  async open(target, { onFrame, onClose, onMetadata = () => {}, isInputAllowed = () => true, getCaptureState = () => ({ live: true, demand: true, control: 'standalone' }) }) {
+  async open(target, { onFrame, onClose, onMetadata = () => {}, isInputAllowed = () => true, getCaptureState = () => ({ live: true, demand: true, control: 'standalone' }), onCaptureAssist = () => {} }) {
     const tab = (await this.list(target.profile)).find((tab) => tab.targetId === target.targetId);
     if (!tab) throw new Error('Selected browser tab is unavailable');
     const base = this.profiles[target.profile];
@@ -161,9 +161,14 @@ export class CdpBrowser {
     const cdp = await new CdpConnection().connect(wsUrl);
     let width = 1, height = 1, pageScale = 1, closed = false, url = tab.url, metadataTimer;
     let contextId, documentId = randomBytes(16).toString('hex'), activeFocus, activePicker, latestMap, gesture, dragData, dragEntered = false;
-    let metadataQueue = Promise.resolve(), polling = false, keyboard, paints, topFrameId, paintRead;
+    let metadataQueue = Promise.resolve(), polling = false, keyboard, paints, topFrameId;
     const failure = (message) => Object.assign(new Error(message), { definitive: true });
-    const finish = () => { if (!closed) { closed = true; paints?.stop(); keyboard?.revoke(); clearInterval(metadataTimer); cdp.close(); onClose(); } };
+    const finish = (error) => { if (!closed) {
+      closed = true;
+      paints?.stop(error instanceof Error ? error : Object.assign(new Error('Browser disconnected'), {
+        causeCode: cdp.firstFailure?.code, causeMethod: cdp.firstFailure?.method }));
+      keyboard?.revoke(); clearInterval(metadataTimer); cdp.close(); onClose();
+    } };
     const collect = () => {
       const work = metadataQueue.catch(() => {}).then(async () => {
         if (closed) throw failure('Browser disconnected');
@@ -196,8 +201,8 @@ export class CdpBrowser {
       if (result.exceptionDetails) throw failure('Picker is unavailable or changed');
       return result.result.value;
     };
-    const captureViewport = async (context) => {
-      if (closed || !isWebPage(url) || context && !context.isCurrent()) return false;
+    const capturePaint = async (context) => {
+      if (closed || !isWebPage(url) || !context.isCurrent()) return false;
       const generation = documentId;
       const metrics = await cdp.send('Page.getLayoutMetrics');
       const viewport = metrics.cssVisualViewport;
@@ -214,21 +219,13 @@ export class CdpBrowser {
       if (pixelsWide > 8192 || pixelsHigh > 8192 || pixelsWide * pixelsHigh > 16_777_216)
         throw failure('Browser viewport is too large for bounded capture');
       if (closed || generation !== documentId || !isWebPage(url)) return false;
-      if (context ? !context.onDispatch() : !getCaptureState().live) return false;
-      if (!context) paints.noteDispatch();
+      if (!context.onDispatch()) return false;
       // Returned bytes are discarded; only ordinary screencast frames display.
       await cdp.send('Page.captureScreenshot', { format: 'jpeg', quality: 70, captureBeyondViewport: false });
       return true;
     };
-    const capturePaint = async (context) => {
-      // Mandatory startup/restore reads and scheduled assistance share one
-      // readback. A scheduled post-input obligation never joins an older read.
-      while (paintRead) await paintRead;
-      const work = captureViewport(context); paintRead = work;
-      try { return await work; }
-      finally { if (paintRead === work) paintRead = null; }
-    };
     paints = new PaintAssist({ paint: capturePaint, getState: getCaptureState, onError: finish });
+    onCaptureAssist(paints);
     const key = async (name) => {
       const [windowsVirtualKeyCode, code] = KEYS[name];
       const args = { key: name === 'Ctrl+A' ? 'a' : name, code, windowsVirtualKeyCode, modifiers: name === 'Ctrl+A' ? 2 : 0 };
@@ -251,7 +248,10 @@ export class CdpBrowser {
         // A restored renderer can acknowledge activation while remaining slow
         // to accept native input. One discarded paint request makes it ready;
         // the input itself is still sent exactly once below.
-        await capturePaint();
+        await paints.prepare();
+        // The readiness read precedes the original native input. Keep a fresh
+        // start obligation so it can unblock that input without waiting for watch.
+        paints.inputStarted();
       }
     };
     // Screencast dimensions are screen DIPs; CDP input uses visual-viewport CSS
@@ -322,13 +322,13 @@ export class CdpBrowser {
       topFrameId = tree.frameTree.frame.id;
       await keyboard.start(topFrameId);
       if (!isWebPage(url)) throw new Error('Only HTTP(S) browser pages can be shared');
+      paints.start();
       onMetadata({ url, title: tab.title });
       await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 70, maxWidth: 1600, maxHeight: 1200, everyNthFrame: 1 });
       // An unchanged background tab may not paint for startScreencast alone.
       // Request the first paint without activating the tab or changing focus.
-      await capturePaint();
+      await paints.prepare();
       await collect();
-      paints.start();
       metadataTimer = setInterval(() => {
         if (polling || closed) return;
         polling = true; void collect().catch(() => {}).finally(() => { polling = false; });

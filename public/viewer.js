@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const base = location.pathname.replace(/\/$/, '');
 let invite = new URLSearchParams(location.hash.slice(1)).get('invite');
 history.replaceState(null, '', location.pathname);
-let socket, state, connectionId, ended = false, rendering = false, frameSeen = false, reconnectTimer, connectionTimer, poll, latestInputTiming, recoveryRequired = false, bootstrapController;
+let socket, state, connectionId, captureConnectionId, ended = false, rendering = false, frameSeen = false, reconnectTimer, connectionTimer, poll, latestInputTiming, recoveryRequired = false, bootstrapController;
 let connectionGeneration = 0, statePollInFlight = false;
 let closeStream = () => { try { socket?.close(); } catch {} };
 let inputQueue = [], inputWindow = 1, sequence = 0, intentSequence = 0, zoom = 1, gestureSequence = 0, pickerIntent = null;
@@ -239,7 +239,7 @@ function connect() {
   if (ended || state?.mode !== 'watch') return;
   clearTimeout(connectionTimer);
   const generation = ++connectionGeneration;
-  frameSeen = rendering = false; connectionId = null; sequence = intentSequence = 0; inputWindow = 1; interactions = latestInputTiming = null;
+  frameSeen = rendering = false; connectionId = captureConnectionId = null; sequence = intentSequence = 0; inputWindow = 1; interactions = latestInputTiming = null;
   let ws;
   try { ws = socket = new WebSocket((location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + base + '/stream'); }
   catch {
@@ -250,7 +250,7 @@ function connect() {
   const retire = (code) => {
     if (!current()) return;
     clearTimeout(connectionTimer); connectionGeneration++;
-    clearInputs(); clearTyping(); clearGestures(); interactions = null; frameSeen = false; connectionId = null;
+    clearInputs(); clearTyping(); clearGestures(); interactions = null; frameSeen = false; connectionId = captureConnectionId = null;
     update({ ...state, mode: 'watch', controlId: undefined });
     if (code === 4001) { finish('This invitation expired, was revoked, or was finished.'); return; }
     if (code === 4002) { finish('The selected browser tab is no longer available.'); return; }
@@ -276,6 +276,8 @@ function connect() {
   ws.onmessage = ({ data }) => {
     if (!current() || closing) return;
     let msg; try { msg = JSON.parse(data); } catch { return; }
+    if (['ready', 'metadata', 'frame'].includes(msg.type) && /^[a-f0-9]{32}$/.test(msg.connectionId || ''))
+      captureConnectionId = msg.connectionId;
     if (msg.type === 'ready') {
       connectionId = msg.connectionId; inputWindow = Number.isSafeInteger(msg.inputWindow) ? Math.max(1, Math.min(4, msg.inputWindow)) : 1; update(msg);
       if (!readySeen) {
@@ -530,8 +532,8 @@ function suspend() {
 }
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) suspend();
-  if (!ended && connectionId && socket?.readyState === WebSocket.OPEN)
-    socket.send(JSON.stringify({ type: 'captureVisibility', connectionId, visibility: document.visibilityState }));
+  if (!ended && captureConnectionId && socket?.readyState === WebSocket.OPEN)
+    socket.send(JSON.stringify({ type: 'captureVisibility', connectionId: captureConnectionId, visibility: document.visibilityState }));
 });
 window.addEventListener('pagehide', () => { suspend(); socket?.close(); });
 setInterval(() => { if (state && !ended) $('expiry').textContent = Math.max(0, Math.ceil((state.expiresAt - Date.now()) / 1000)) + 's remaining'; }, 1000);

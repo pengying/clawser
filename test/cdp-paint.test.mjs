@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { performance } from 'node:perf_hooks';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -7,20 +8,21 @@ import { CdpBrowser, CdpConnection } from '../src/cdp.mjs';
 import { HandoffServer } from '../src/server.mjs';
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(fn,label,timeout=2000){const end=Date.now()+timeout;while(Date.now()<end){const value=await fn();if(value)return value;await pause(10);}throw new Error(label);}
-async function fixture(t,{holdPaint=false,viewport={pageX:0,pageY:0,clientWidth:800,clientHeight:600}}={}){
+async function fixture(t,{holdPaint=false,viewport={pageX:0,pageY:0,clientWidth:800,clientHeight:600},minimized=false}={}){
  let captures=0,wheels=0,visual='before',heldInput,peer;const commands=[];
  const server=createServer((_req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify([{type:'page',id:'owned',url:'http://fixture.invalid',webSocketDebuggerUrl:`ws://127.0.0.1:${server.address().port}/owned`}]))});
  const sockets=new WebSocketServer({server});
  const finishInput=()=>{if(heldInput){peer.send(JSON.stringify({id:heldInput,result:{}}));heldInput=null;visual='after';}};
  sockets.on('connection',socket=>{peer=socket;socket.on('message',raw=>{
-  const command=JSON.parse(String(raw)),{id,method}=command;commands.push(command);
+  const command=JSON.parse(String(raw)),{id,method}=command;command.at=performance.now();commands.push(command);
   if(method==='Input.dispatchMouseEvent'&&command.params.type==='mouseWheel'){wheels++;heldInput=id;return;}
   if(method==='Page.captureScreenshot'&&++captures>1){if(holdPaint)return;finishInput();}
+  if(method==='Browser.setWindowBounds')minimized=false;
   const result=method==='Page.getFrameTree'?{frameTree:{frame:{id:'top',url:'http://fixture.invalid'}}}
    :method==='Page.createIsolatedWorld'?{executionContextId:1}
    :method==='Page.getLayoutMetrics'?{cssVisualViewport:viewport}
    :method==='Runtime.evaluate'?{result:{value:command.params.expression==='globalThis.devicePixelRatio'?1:{document:'f'.repeat(32),regions:[],focus:null}}}
-   :method==='Browser.getWindowForTarget'?{windowId:1,bounds:{windowState:'normal'}}
+   :method==='Browser.getWindowForTarget'?{windowId:1,bounds:{windowState:minimized?'minimized':'normal'}}
    :method==='Page.captureScreenshot'?{data:'PRIVATE_SCREENSHOT_DATA'}:{};
   socket.send(JSON.stringify({id,result}));
   if(method==='Page.captureScreenshot') socket.send(JSON.stringify({method:'Page.screencastFrame',params:{sessionId:1,data:captures===2&&wheels?'before':visual,metadata:{deviceWidth:800,deviceHeight:600}}}));
@@ -86,4 +88,51 @@ test('oversized paint readback fails closed without clipping or emulation change
  await assert.rejects(ctx.backend.open({profile:'own',targetId:'owned'},{onFrame(){},onClose(){}}),/too large/);
  assert.equal(ctx.commands.some(command=>command.method==='Page.captureScreenshot'),false);
  assert.equal(ctx.commands.some(command=>command.method.startsWith('Emulation.')),false);
+});
+
+test('startup plus immediate minimized restore share the global screenshot cooldown',async t=>{
+ const ctx=await fixture(t,{minimized:true});
+ const connection=await ctx.backend.open({profile:'own',targetId:'owned'},{onFrame(){},onClose(){}});t.after(()=>connection.close());
+ await connection.input({kind:'scroll',x:.5,y:.5,deltaX:0,deltaY:300});
+ const shots=ctx.commands.filter(command=>command.method==='Page.captureScreenshot');
+ assert.ok(shots.length>=2);assert.ok(shots.every((shot,n)=>!n||shot.at-shots[n-1].at>=190),'startup/restore/scheduled captures all honor 200ms dispatch cooldown');
+ const wheel=ctx.commands.find(command=>command.method==='Input.dispatchMouseEvent'&&command.params.type==='mouseWheel');
+ assert.ok(shots.find(shot=>shot.at>wheel.at)?.at-wheel.at<600,'required restore paint cannot consume the later native-input start obligation');
+ assert.equal(ctx.wheels(),1);
+});
+test('hidden or unread startup and restore perform zero readbacks until demand returns',async t=>{
+ const ctx=await fixture(t,{minimized:true}),state={live:true,demand:false,control:'owned-control'};let assist;
+ const opened=ctx.backend.open({profile:'own',targetId:'owned'},{onFrame(){},onClose(){},getCaptureState:()=>state,onCaptureAssist:value=>{assist=value;}});
+ await pause(250);
+ assert.equal(ctx.captures(),0,'opening cannot bypass reader demand');assert.ok(assist,'controller is registered before opening completes');
+ state.demand=true;assist.demandChanged();const connection=await opened;t.after(()=>connection.close());
+ state.demand=false;const input=connection.input({kind:'scroll',x:.5,y:.5,deltaX:0,deltaY:300});
+ await pause(300);assert.equal(ctx.captures(),1,'restore cannot bypass reader demand');assert.equal(ctx.wheels(),0,'original input waits for required readiness paint');
+ state.demand=true;assist.demandChanged();await input;assert.equal(ctx.wheels(),1);
+});
+
+async function openingStream(t){
+ const ctx=await fixture(t),handoff=new HandoffServer({backend:ctx.backend});await handoff.start();t.after(()=>handoff.close());
+ const invite=await handoff.createShare({owner:'owner',profile:'own',targetId:'owned'}),base=handoff.localUrl+'/s/'+invite.id;
+ const claim=await fetch(base+'/claim',{method:'POST',headers:{origin:handoff.localUrl,'content-type':'application/json'},body:JSON.stringify({token:new URL(invite.url).hash.slice(8)})});
+ const cookie=claim.headers.get('set-cookie').split(';')[0],ws=new WebSocket(base.replace('http:','ws:')+'/stream',{headers:{cookie,origin:handoff.localUrl}}),messages=[];
+ ws.on('error',()=>{});ws.on('message',raw=>messages.push(JSON.parse(String(raw))));t.after(()=>ws.terminate());
+ await until(()=>messages.find(msg=>msg.displayId),'initial metadata available without screenshot');
+ return{...ctx,handoff,ws,messages,invite,entry:handoff.streams.get(invite.id)};
+}
+test('initial metadata ACK bootstraps visible reading demand without a startup capture exception',async t=>{
+ const ctx=await openingStream(t),first=ctx.messages.find(msg=>msg.displayId);
+ await pause(150);assert.equal(ctx.captures(),0);assert.equal(ctx.entry.ready,false);
+ ctx.ws.send(JSON.stringify({type:'displayAck',connectionId:first.connectionId,displayId:first.displayId,visibility:'hidden'}));
+ await pause(150);assert.equal(ctx.captures(),0);
+ ctx.ws.send(JSON.stringify({type:'captureVisibility',connectionId:first.connectionId,visibility:'visible'}));
+ // Any additional metadata must also be acknowledged before readback.
+ const ack=raw=>{const msg=JSON.parse(String(raw));if(msg.displayId)ctx.ws.send(JSON.stringify({type:'displayAck',connectionId:msg.connectionId,displayId:msg.displayId,visibility:'visible'}));};ctx.ws.on('message',ack);
+ if(ctx.entry.display.inFlight)ctx.ws.send(JSON.stringify({type:'displayAck',connectionId:first.connectionId,displayId:ctx.entry.display.inFlight.id,visibility:'visible'}));
+ await until(()=>ctx.entry.ready,'visible metadata reader enables first paint');assert.equal(ctx.captures(),1);assert.equal(ctx.wheels(),0);
+});
+test('disconnect before initial reader ACK retires blocked opening without capture or deadlock',async t=>{
+ const ctx=await openingStream(t);assert.equal(ctx.captures(),0);ctx.ws.terminate();
+ await until(()=>!ctx.handoff.streams.has(ctx.invite.id),'blocked backend opening retired after disconnect');
+ assert.equal(ctx.captures(),0);assert.equal(ctx.handoff.store.gate.poisonReason,null);
 });

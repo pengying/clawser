@@ -84,3 +84,33 @@ test('navigation during read preserves only new-document watch authority',async(
  scheduler.navigationStarted();scheduler.navigationCommitted();scheduler.inputCompleted(input);held.resolve();await settle();
  await clock.tick(1999);assert.deepEqual(calls,[100]);await clock.tick(1);assert.deepEqual(calls,[100,2100]);scheduler.stop();
 });
+
+for(const phase of ['pending','in-flight'])test(`commit without a start event retires ${phase} input and late completion`,async()=>{
+ const held=deferred(),{clock,calls,scheduler}=fixture(()=>held.promise),input=scheduler.inputStarted();
+ if(phase==='in-flight')await clock.tick(100);
+ scheduler.navigationCommitted();scheduler.inputCompleted(input);held.resolve();await settle();
+ await clock.tick(500);assert.equal(calls.length,phase==='in-flight'?1:0,'old completion cannot request new-document capture');
+ await clock.tick(2000);assert.equal(calls.length,phase==='in-flight'?2:1,'new-document watch remains available');scheduler.stop();
+});
+test('mandatory startup and restore preparation share demand, cooldown and in-flight bounds',async()=>{
+ const {clock,calls,scheduler,state}=fixture();state.demand=false;
+ const initial=scheduler.prepare();await clock.tick(1000);assert.deepEqual(calls,[]);
+ state.demand=true;scheduler.demandChanged();await clock.tick(0);await initial;assert.deepEqual(calls,[1000]);
+ const restored=scheduler.prepare();await clock.tick(199);assert.deepEqual(calls,[1000]);await clock.tick(1);await restored;assert.deepEqual(calls,[1000,1200]);scheduler.stop();
+});
+test('close and navigation reject blocked mandatory preparation without late revival',async()=>{
+ for(const action of ['stop','navigationCommitted']){
+  const {clock,calls,scheduler,state}=fixture();state.demand=false;const prepared=scheduler.prepare();const rejected=assert.rejects(prepared,/preparation|retired/i);
+  scheduler[action]();await rejected;state.demand=true;scheduler.demandChanged();await clock.tick(500);assert.deepEqual(calls,[]);scheduler.stop();
+ }
+});
+
+test('blocked mandatory preparations coalesce without abandoning either caller',async()=>{
+ const held=deferred();let first=true;
+ const {clock,scheduler,state}=fixture(()=>{if(first){first=false;return held.promise;}return true;});
+ let firstDone=false,secondDone=false;
+ scheduler.prepare().then(()=>{firstDone=true;},()=>{});await clock.tick(0);
+ scheduler.prepare().then(()=>{secondDone=true;},()=>{});state.demand=false;held.resolve(false);await settle();
+ state.demand=true;scheduler.demandChanged();await clock.tick(200);
+ assert.equal(firstDone,true);assert.equal(secondDone,true);scheduler.stop();
+});

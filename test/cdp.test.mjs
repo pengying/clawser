@@ -72,14 +72,14 @@ test('a minimized renderer is restored and repainted before atomic wheel dispatc
   await connection.input({ kind: 'scroll', x: .5, y: .5, deltaX: 0, deltaY: 20 });
 
   const input = commands.slice(start).filter(({ method }) => method !== 'Page.screencastFrameAck');
-  assert.deepEqual(input.map(({ method }) => method), [
+  assert.deepEqual(input.filter(({ method }) => !['Page.getLayoutMetrics', 'Runtime.evaluate'].includes(method)).map(({ method }) => method), [
     'Browser.getWindowForTarget', 'Browser.setWindowBounds', 'Page.bringToFront',
-    'Page.getLayoutMetrics', 'Runtime.evaluate', 'Page.captureScreenshot', 'Input.dispatchMouseEvent',
+    'Page.captureScreenshot', 'Input.dispatchMouseEvent',
   ]);
   assert.equal(input[0].params.targetId, 'tab');
   assert.deepEqual(input[1].params, { windowId: 7, bounds: { windowState: 'normal' } });
-  assert.deepEqual(input[5].params, { format: 'jpeg', quality: 70, captureBeyondViewport: false });
-  assert.equal(input[6].params.type, 'mouseWheel');
+  assert.deepEqual(input.find(({ method }) => method === 'Page.captureScreenshot').params, { format: 'jpeg', quality: 70, captureBeyondViewport: false });
+  assert.equal(input.at(-1).params.type, 'mouseWheel');
 });
 
 test('a normal renderer is activated without a recovery repaint', async (t) => {
@@ -104,8 +104,8 @@ test('an unacknowledged readiness repaint never dispatches the original input', 
   await assert.rejects(connection.input({ kind: 'scroll', x: .5, y: .5, deltaX: 0, deltaY: 20 }), /disconnected/i);
 
   const input = fixture.commands.slice(start);
-  assert.deepEqual(input.filter(({ method }) => method !== 'Page.screencastFrameAck').map(({ method }) => method), [
-    'Browser.getWindowForTarget', 'Browser.setWindowBounds', 'Page.bringToFront', 'Page.getLayoutMetrics', 'Runtime.evaluate', 'Page.captureScreenshot',
+  assert.deepEqual(input.filter(({ method }) => !['Page.screencastFrameAck', 'Page.getLayoutMetrics', 'Runtime.evaluate'].includes(method)).map(({ method }) => method), [
+    'Browser.getWindowForTarget', 'Browser.setWindowBounds', 'Page.bringToFront', 'Page.captureScreenshot',
   ]);
   assert.equal(input.some(({ method }) => method.startsWith('Input.')), false);
 });

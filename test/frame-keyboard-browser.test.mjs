@@ -69,7 +69,7 @@ async function fixture(t) {
     ws.on('error', () => {}); t.after(() => ws.terminate());
     messages = []; ws.on('message', raw => {
       const msg = JSON.parse(String(raw)); messages.push(msg);
-      if (msg.displayId) ws.send(JSON.stringify({ type: 'displayAck', connectionId: msg.connectionId, displayId: msg.displayId }));
+      if (msg.displayId) ws.send(JSON.stringify({ type: 'displayAck', connectionId: msg.connectionId, displayId: msg.displayId, visibility: 'visible' }));
     });
     await until(() => messages.find(msg => msg.type === 'ready'), 'server stream ready');
     const entry = handoff.streams.get(invite.id);
@@ -94,8 +94,9 @@ test('native Keyboard supports OOPIF, nested OOPIF and same-process cross-origin
   for (const mode of ['opaque', 'nested', 'sameprocess']) {
     await ctx.open(mode); const token = await ctx.activate();
     await ctx.edit(token, mode + ' 😀 日本');
+    await until(async()=>await ctx.evaluate('dummy')===mode+' 😀 日本','cross-process dummy input message');
     assert.equal(await ctx.evaluate('dummy'), mode + ' 😀 日本');
-    await ctx.edit(token, ' twice'); assert.equal(await ctx.evaluate('dummy'), mode + ' 😀 日本 twice');
+    await ctx.edit(token, ' twice'); await until(async()=>await ctx.evaluate('dummy')===mode+' 😀 日本 twice','second cross-process dummy input message'); assert.equal(await ctx.evaluate('dummy'), mode + ' 😀 日本 twice');
   }
 });
 
