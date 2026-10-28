@@ -68,6 +68,10 @@ Ask OpenClaw in your private owner conversation:
 3. Complete the manual step and press **Done**.
 4. The agent takes a fresh browser observation before continuing.
 
+Each controller/profile supports one active invitation. Requests from other
+authorized chats receive a busy response and are not queued. Separate dedicated
+controllers operate independently.
+
 The entire dedicated browser profile is shared, including its other tabs and
 dialogs. Use a profile whose contents you intend the recipient to see. CAPTCHA,
 login and form completion are manual human actions; support varies by site and

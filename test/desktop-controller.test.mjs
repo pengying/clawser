@@ -429,3 +429,60 @@ test('a missing requested task refuses invitation instead of focusing an arbitra
   await assert.rejects(c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30,targetId:'missing'}),/target|requested|available/i);
   assert.equal(c.gate.holder,null);assert.equal(Object.keys(c.ledger.leases).length,0);assert.deepEqual(events,[]);assert.deepEqual(wire.methods,[]);
 });
+
+for (const boundary of ['admission', 'rpc', 'receipt', 'observation', 'observation-receipt', 'journal', 'completion-journal']) test(`retirement records a bounded diagnostic code for ${boundary} without changing fencing`, async t => {
+  const { controller: c, runtime, stateDir } = await setup(t);
+  const lease = await c.request('create', { owner, profile: 'human', permission: 'control', ttlSeconds: 30 });
+  await c.supervisor.promote({ ownedId: lease.id, probeId: lease.id });
+  const privateError = 'PRIVATE_FIXTURE_MUST_NOT_BE_STORED';
+  const expected = boundary === 'admission' ? 'input_fence_admission' : boundary === 'rpc' ? 'input_fence_rpc' : boundary === 'receipt' ? 'input_fence_receipt'
+    : boundary.startsWith('observation') ? 'browser_observation' : 'journal_persistence';
+  if (boundary === 'admission') c.gate.holder = 'other-fixture-owner';
+  if (boundary === 'rpc') runtime.stopViewerAndSettle = async () => { throw new Error(privateError); };
+  if (boundary === 'receipt') runtime.stopViewerAndSettle = async () => ({ epoch: 100, heldInputCleared: false, privateError });
+  if (boundary === 'observation') c.observe = async () => { throw new Error(privateError); };
+  if (boundary === 'observation-receipt') c.observe = async () => ({ snapshotObserved: false, privateError });
+  if (boundary.includes('journal')) {
+    const persist = c.persist.bind(c); let failed = false;
+    c.persist = async () => {
+      if (!failed && (boundary === 'journal' || c.ledger.leases[lease.id].state === 'ended')) { failed = true; throw new Error(privateError); }
+      return persist();
+    };
+  }
+  const result = await c.request('revoke', { owner, id: lease.id });
+  assert.equal(result.recoveryCode, expected);
+  assert.equal(result.mode, 'recovery_required'); assert.equal(result.resumeAllowed, false); assert.equal(result.recoveryRequired, true);
+  assert.equal(result.inputFenced, boundary.startsWith('observation') || boundary === 'completion-journal');
+  await assert.rejects(c.request('automationEnter', { callKey: 'must-remain-blocked' }), /recovery|uncertain/);
+  const contents = await readFile(join(stateDir, 'ledger.json'), 'utf8');
+  const durable = JSON.parse(contents);
+  assert.equal(durable.leases[lease.id].recoveryCode, expected);
+  assert.equal(durable.leases[lease.id].state, 'recovery_required'); assert.deepEqual(durable.calls, {});
+  assert.equal(contents.includes(privateError), false); assert.equal(JSON.stringify(result).includes(privateError), false);
+});
+
+test('a proven ended row clears its diagnostic while the existing poisoned gate remains latched', async t => {
+  const { controller: c, runtime, stateDir } = await setup(t);
+  const lease = await c.request('create', { owner, profile: 'human', permission: 'control', ttlSeconds: 30 });
+  await c.supervisor.promote({ ownedId: lease.id, probeId: lease.id });
+  const stop = runtime.stopViewerAndSettle;
+  runtime.stopViewerAndSettle = async () => { throw new Error('fixture transport failure'); };
+  await c.request('revoke', { owner, id: lease.id });
+  assert.equal(c.status(c.ledger.leases[lease.id]).recoveryCode, 'input_fence_rpc');
+  runtime.stopViewerAndSettle = stop;
+  await c.retire(lease.id, { reconcile: true });
+  const row = c.ledger.leases[lease.id], result = c.status(row);
+  assert.equal(row.state, 'ended'); assert.equal(row.recoveryCode, undefined); assert.equal(result.recoveryCode, undefined);
+  assert.equal(result.resumeAllowed, false); assert.equal(result.recoveryRequired, true);
+  assert.equal(JSON.parse(await readFile(join(stateDir, 'ledger.json'), 'utf8')).leases[lease.id].recoveryCode, undefined);
+});
+
+test('status never exposes an unrecognized or non-string recovery code from the journal', async t => {
+  const { controller: c } = await setup(t);
+  const lease = await c.request('create', { owner, profile: 'human', permission: 'watch', ttlSeconds: 30 });
+  const row = c.ledger.leases[lease.id]; row.state = 'recovery_required';
+  for (const code of ['PRIVATE_FIXTURE', { toString: () => 'input_fence_rpc' }, null, ['input_fence_rpc']]) {
+    row.recoveryCode = code;
+    assert.equal(Object.hasOwn(c.status(row), 'recoveryCode'), false);
+  }
+});

@@ -8,6 +8,7 @@ import { DesktopRpcServer } from './desktop-rpc.mjs';
 
 const receiptFlags=['vncProcessesExited','xClientsAbsent','heldInputCleared','xSyncComplete'];
 const recoveryMessage='Browser input outcome uncertain; operator recovery is required';
+const recoveryCodes=new Set(['input_fence_admission','input_fence_rpc','input_fence_receipt','browser_observation','journal_persistence']);
 const validateActor=(actor,id,role)=>{if(actor?.leaseId!==id||actor.role!==role||!Number.isSafeInteger(actor.epoch)||actor.epoch<1||typeof actor.displayGeneration!=='string'||!actor.displayGeneration||typeof actor.browserGeneration!=='string'||!actor.browserGeneration)throw new Error('Viewer authority identity is invalid');};
 const inputFenced=receipt=>receipt?.vncProcessesExited===true&&receipt?.xClientsAbsent===true&&((receipt.readOnly===true&&receipt.inputResetRequired===false)||receiptFlags.every(key=>receipt[key]===true));
 export const safeCompletion=row=>inputFenced(row.receipt)&&((row.mayBeWritable===false&&row.receipt.readOnly===true)||row.receipt.snapshotObserved===true);
@@ -211,23 +212,27 @@ export class DesktopController {
     if(reason)row.reason ||= reason;
     if(row.retirement)return row.retirement;
     const retirement=(async()=>{
+      let recoveryCode='input_fence_admission';
       try{
         const readOnly=row.mayBeWritable===false;
         if(readOnly)this.gate.release(id); // Cancels only this lease's pending acquisition.
         if(!readOnly&&!reconcile&&this.gate.holder!==id){if(this.gate.poisonReason&&this.gate.holder===null)this.gate.holder=id;else await this.gate.acquire(id);}
-        row.state='retiring';row.recoveryStage='input_fence';await this.persist();
+        row.state='retiring';row.recoveryStage='input_fence';recoveryCode='journal_persistence';await this.persist();
+        recoveryCode='input_fence_rpc';
         const receipt=await this.runtimeOperation(()=>this.runtime.stopViewerAndSettle({leaseId:id,mayBeWritable:!readOnly}));
+        recoveryCode='input_fence_receipt';
         if(!Number.isSafeInteger(receipt.epoch)||receipt.epoch<1||(Number.isSafeInteger(row.epoch)&&receipt.epoch<=row.epoch)||receipt.leaseId!==id||receipt.vncProcessesExited!==true||receipt.xClientsAbsent!==true||(readOnly?(receipt.readOnly!==true||receipt.inputResetRequired!==false):receiptFlags.some(key=>receipt[key]!==true))||!receipt.displayGeneration||(row.displayGeneration&&row.displayGeneration!==receipt.displayGeneration)||(row.browserGeneration&&receipt.browserGeneration&&row.browserGeneration!==receipt.browserGeneration))throw new Error('Input retirement was not proven');
         row.receipt={leaseId:id,...Object.fromEntries(receiptFlags.map(key=>[key,receipt[key]===true])),readOnly,inputResetRequired:!readOnly,displayGeneration:receipt.displayGeneration,browserGeneration:receipt.browserGeneration,epoch:receipt.epoch,snapshotObserved:false};
-        if(!readOnly){row.recoveryStage='browser_observation';await this.persist();
+        if(!readOnly){row.recoveryStage='browser_observation';recoveryCode='journal_persistence';await this.persist();
+        recoveryCode='browser_observation';
         const observation=await this.runtimeOperation(()=>this.observe(this.runtime,row));
         if(observation?.snapshotObserved!==true||observation.displayGeneration!==receipt.displayGeneration||(receipt.browserGeneration&&observation.browserGeneration!==receipt.browserGeneration))throw new Error('Fresh browser observation was not proven');
         // Copy only nonsecret fence fields into the journal.
         row.receipt={leaseId:id,...Object.fromEntries(receiptFlags.map(key=>[key,true])),displayGeneration:receipt.displayGeneration,browserGeneration:observation.browserGeneration||receipt.displayGeneration,epoch:receipt.epoch,readOnly:false,inputResetRequired:true,snapshotObserved:true,...observedContext(observation)};}
-        row.state='ended';delete row.recoveryStage;row.completedAt=Date.now();row.reason||='ended';
-        await this.persist();this.actors.delete(id);
+        row.state='ended';delete row.recoveryStage;delete row.recoveryCode;row.completedAt=Date.now();row.reason||='ended';
+        recoveryCode='journal_persistence';await this.persist();this.actors.delete(id);
         if(!reconcile)this.gate.release(id);
-      }catch(error){row.state='recovery_required';row.reason||='retirement_failed';row.completedAt=Date.now();this.poison();await this.persist().catch(()=>{});throw new Error(recoveryMessage);}
+      }catch(error){row.state='recovery_required';row.recoveryCode=recoveryCode;row.reason||='retirement_failed';row.completedAt=Date.now();this.poison();await this.persist().catch(()=>{});throw new Error(recoveryMessage);}
     })();
     // A promise is process-local and must never enter the durable JSON journal.
     Object.defineProperty(row,'retirement',{value:retirement,writable:true,configurable:true,enumerable:false});
@@ -236,14 +241,14 @@ export class DesktopController {
   async ended(session,status){
     const row=this.ledger.leases[session.id];if(!row)return;row.reason=session.reason||row.reason||'ended';
     if(status?.mode==='cleanup_failed'){row.state='recovery_required';row.recoveryStage ||= 'gateway_cleanup';this.poison();}
-    try{await this.persist();}catch(error){row.state='recovery_required';row.recoveryStage='completion_persistence';this.poison();await this.persist().catch(()=>{});throw error;}
+    try{await this.persist();}catch(error){row.state='recovery_required';row.recoveryStage='completion_persistence';row.recoveryCode='journal_persistence';this.poison();await this.persist().catch(()=>{});throw error;}
   }
   async clipboard(id,text){const row=this.ledger.leases[id];if(!row||row.state!=='control'||this.gate.holder!==id||this.gate.poisonReason)throw new Error('Clipboard requires current human control');return this.runtimeOperation(async()=>{if(row.state!=='control')throw new Error('Clipboard authority ended');return text===undefined?this.runtime.clipboardRead({leaseId:id,epoch:row.epoch}):this.runtime.clipboardWrite(text,{leaseId:id,epoch:row.epoch});});}
   owned(owner,id){ownerParts(owner);const row=this.ledger.leases[id];if(!row||row.owner!==owner)throw new Error('Lease belongs to another owner session');return row;}
   status(row){
     const gatewaySession=this.gateway.sessions.get(row.id);
     const mode=row.state==='recovery_required'?'recovery_required':row.state==='ended'?'ended':gatewaySession?.mode||row.state;
-    return{id:row.id,profile:this.profile,scope:'browser-profile',permission:row.permission,mode,epoch:row.epoch,expiresAt:row.expiresAt,...(row.targetId?{targetId:row.targetId}:{}),...(row.reason?{reason:row.reason}:{}),browserGeneration:row.browserGeneration,displayGeneration:row.displayGeneration,resumeAllowed:row.state==='ended'&&safeCompletion(row)&&!this.gate.poisonReason,recoveryRequired:row.state==='recovery_required'||!!this.gate.poisonReason,inputFenced:inputFenced(row.receipt),snapshotObserved:row.receipt?.snapshotObserved===true,...observedContext(row.receipt||{}),...(row.recoveryStage?{recoveryStage:row.recoveryStage}:{})};
+    return{id:row.id,profile:this.profile,scope:'browser-profile',permission:row.permission,mode,epoch:row.epoch,expiresAt:row.expiresAt,...(row.targetId?{targetId:row.targetId}:{}),...(row.reason?{reason:row.reason}:{}),browserGeneration:row.browserGeneration,displayGeneration:row.displayGeneration,resumeAllowed:row.state==='ended'&&safeCompletion(row)&&!this.gate.poisonReason,recoveryRequired:row.state==='recovery_required'||!!this.gate.poisonReason,inputFenced:inputFenced(row.receipt),snapshotObserved:row.receipt?.snapshotObserved===true,...observedContext(row.receipt||{}),...(row.recoveryStage?{recoveryStage:row.recoveryStage}:{}),...(row.state==='recovery_required'&&recoveryCodes.has(row.recoveryCode)?{recoveryCode:row.recoveryCode}:{})};
   }
   async revokeAll(reason){
     if(reason!=='plugin_stop')throw new Error('Unsupported bulk revocation reason');

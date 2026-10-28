@@ -301,6 +301,13 @@ unsuitable for this opt-in.
 Subagents, cron, hooks, heartbeat and other automated group turns remain denied.
 Private owner sessions retain their existing V2 continuation behavior.
 
+Different authorized chats can request handoffs, but each controller/profile
+allows one active invitation. A second request receives a busy response; requests
+are not queued. Status and revocation remain bound to the requesting owner
+session. Separate dedicated controllers, such as personal and family instances,
+operate independently. During human control, the normal browser-tool gate pauses
+agent browser calls for that controller.
+
 The verified owner may explicitly request a link and have it returned in that
 same requesting group/thread. Disclose that any member seeing it can redeem the
 one-use bearer invitation; the first claiming browser wins. Other members cannot
