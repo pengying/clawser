@@ -150,3 +150,30 @@ browser URLs, sender IDs or invitation secrets in the repository.
 3. Report the live backend/browser selections, measured latency, tested controls,
    optional noVNC route, preservation/rollback state and any remaining limits.
    Do not claim the earlier OOM or Funnel hypothesis proved every historical stall.
+
+## Integration checkpoints
+
+- Resolver, owner policy, setup, native-frame keyboard and configuration guards
+  are integrated. Independent specification and Astra quality/security reviews
+  approved the core and the capture/activation deltas without P0–P2 findings.
+- The integrated suite passed 542 tests with zero failures/skips, plus all 25
+  optional desktop runtime contract tests. The native 2026.10.7 fixture passed
+  initial enable and both noVNC/CDP hot switches without restarting its Gateway
+  or managed Chrome, preserving its tabs and denying pending-generation access.
+- A strict existing-headful-Chrome test passed one local and two Cloudflare
+  cycles on the same owned dummy tab. It covered typing, password/textarea/
+  contenteditable, IME/paste, keyboard reopen, select/color controls, opaque-frame
+  keyboard, scrolling and safe Done. Browser identities and original tab URL
+  hashes were preserved. Public visible response across 28 samples was 110 ms
+  median / 157 ms p95. The viewer ran on the host through the actual public URL;
+  this does not establish physical-phone or remote-network performance.
+- Buffered-link delivery was pressure-tested: the old guide conflicted with
+  end-of-turn delivery; the revised guide ends the turn with the link and checks
+  fresh status on the next owner turn. The owner's Done message never substitutes
+  for backend-specific safe handback.
+- The local deterministic scanner completely inspected all 66 candidate archive
+  files with zero partial/uninspected files and a passing gate. The runtime status
+  contract tests remain shipped and run in a focused file with shared fixtures.
+
+Remaining at this checkpoint: authenticated administrative-main compatibility,
+final native/packaging checks, live profile migration and distribution.
