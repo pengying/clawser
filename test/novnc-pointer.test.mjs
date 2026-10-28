@@ -92,7 +92,7 @@ function attachPeer(socket, peers) {
         if (pending[0] === 3 && peer.frames++ === 0) socket.send(framebuffer());
         if (pending[0] === 4) peer.keys.push({ down: pending[1], keysym: pending.readUInt32BE(4) });
         if (pending[0] === 6) peer.clipboards.push(pending.subarray(8, length).toString('latin1'));
-        if (pending[0] === 5) peer.pointers.push({ mask: pending[1], x: pending.readUInt16BE(2), y: pending.readUInt16BE(4) });
+        if (pending[0] === 5) peer.pointers.push({ mask: pending[1], x: pending.readUInt16BE(2), y: pending.readUInt16BE(4), at: performance.now() });
       }
       pending = pending.subarray(length);
     }
@@ -520,5 +520,78 @@ test('Drag once sends mapped mouse down/move/up and releases on pinch, cancel an
   await evaluate(`document.querySelector('#done').click()`);
   await waitFor(`document.querySelector('#status').textContent.includes('Test browser destroyed.')`, 'Done completes');
   await released(before, 'Done releases the remote button before ending access');
+  await touch('touchEnd', []);
+});
+
+test('a stationary touch holds the remote button until lift; taps still click and early swipes still scroll', {
+  skip: !assets ? 'set NOVNC_ASSETS_DIR to the noVNC 1.7.0 source tree' : !existsSync(chromePath) ? 'Chrome unavailable' : false,
+}, async (t) => {
+  const { cdp, evaluate, waitFor, peers, url } = await fixture(t);
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  await cdp.send('Page.navigate', { url });
+  await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'RFB connected');
+  await evaluate(`document.querySelector('#collapse').click()`);
+  const peer = peers.at(-1), status = () => evaluate(`document.querySelector('#status').textContent`);
+  const touch = (type, points) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([x, y], id) => ({ x, y, id, radiusX: 1, radiusY: 1, force: 1 })) });
+  const pressed = async (before) => {
+    for (let n = 0; n < 100 && !peer.pointers.slice(before).some(event => event.mask === 1); n++) await pause(10);
+    return peer.pointers.slice(before).find(event => event.mask === 1);
+  };
+  const rect = await evaluate(`(() => {const r=document.querySelector('canvas').getBoundingClientRect();return {left:r.left,top:r.top,scale:Number(document.querySelector('#zoom-level').dataset.scale)};})()`);
+  let before = peer.pointers.length;
+  await touch('touchStart', [[195, 422]]);
+  await pause(120);
+  assert.equal(peer.pointers.length, before, 'a touch sends nothing before the hold delay');
+  const down = await pressed(before);
+  assert.ok(down, 'a finger kept within the tap slop presses the remote button');
+  assert.ok(Math.abs(down.x - (195 - rect.left) / rect.scale) <= 2 && Math.abs(down.y - (422 - rect.top) / rect.scale) <= 2, 'the hold presses at the contact point');
+  assert.match(await status(), /^Holding…/);
+  for (const point of [[196, 423], [194, 421], [195, 422]]) { await pause(200); await touch('touchMove', [point]); }
+  while (performance.now() - down.at < 1100) await pause(20);
+  assert.equal(peer.pointers.at(-1).mask, 1, 'the button stays down while the finger rests');
+  await touch('touchEnd', []);
+  for (let n = 0; n < 100 && peer.pointers.at(-1)?.mask !== 0; n++) await pause(10);
+  const held = peer.pointers.slice(before), up = held.at(-1);
+  t.diagnostic(JSON.stringify({ heldMs: up.at - down.at, masks: held.map(event => event.mask) }));
+  assert.equal(up.mask, 0, 'lifting releases the remote button');
+  assert.ok(up.at - down.at >= 1000, 'the remote button is held for the whole second');
+  assert.ok(held.slice(1, -1).filter(event => event.mask === 1).length >= 1, 'small jitter is forwarded as held-button movement');
+  assert.deepEqual(held.filter(event => event.mask !== 1), [up], 'the hold neither scrolls nor releases early');
+  assert.equal(await evaluate('Boolean(document.captureElement)'), false, 'upstream mouse capture is released');
+  assert.match(await status(), /^Hold released/);
+
+  before = peer.pointers.length;
+  await touch('touchStart', [[195, 422]]); await touch('touchEnd', []);
+  await pause(400);
+  assert.deepEqual(peer.pointers.slice(before).map(event => event.mask), [1, 0], 'a quick tap is still exactly one click');
+
+  before = peer.pointers.length;
+  await touch('touchStart', [[195, 422]]);
+  await touch('touchMove', [[195, 400]]);
+  await touch('touchMove', [[195, 380]]);
+  await pause(400);
+  await touch('touchEnd', []);
+  await pause(100);
+  const swipe = peer.pointers.slice(before);
+  assert.ok(swipe.some(event => event.mask & 0x78), 'an early swipe still scrolls');
+  assert.ok(swipe.every(event => (event.mask & 7) === 0), 'a finger resting after an early swipe never presses the button');
+
+  before = peer.pointers.length;
+  await touch('touchStart', [[195, 422]]);
+  assert.ok(await pressed(before), 'a second hold presses again');
+  await evaluate(`Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); document.dispatchEvent(new Event('visibilitychange')); delete document.hidden;`);
+  for (let n = 0; n < 100 && peer.pointers.at(-1)?.mask !== 0; n++) await pause(10);
+  assert.equal(peer.pointers.at(-1).mask, 0, 'hiding the page releases a held button');
+  await touch('touchEnd', []);
+  await pause(100);
+  assert.equal(peer.pointers.at(-1).mask, 0, 'the lift after a hidden-page release sends no extra click');
+
+  before = peer.pointers.length;
+  await touch('touchStart', [[195, 422]]);
+  assert.ok(await pressed(before), 'a third hold presses again');
+  await evaluate(`document.querySelector('#done').click()`);
+  await waitFor(`document.querySelector('#status').textContent.includes('Test browser destroyed.')`, 'Done completes');
+  assert.equal(peer.pointers.at(-1).mask, 0, 'Done releases a held button before ending access');
   await touch('touchEnd', []);
 });
