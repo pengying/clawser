@@ -16,8 +16,8 @@ not supported by this first validated installer.
 
 ## ClawHub installation
 
-ClawHub currently serves v0.3.5. The v0.4.1 upload is waiting on a registry
-scanner execution error. Use the tagged Git installation below for v0.4.1's
+ClawHub currently serves v0.3.5. The v0.4.1 upload is waiting on a hosted registry
+scanner execution error. Use the tagged Git installation below for v0.4.2's
 owner-requested group handoffs, recovery tooling and viewer fixes.
 
 ```sh
@@ -34,7 +34,7 @@ same setup and persistent browser as the GitHub distribution.
 ## Tagged Git installation
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.4.1 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.4.2 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup
 openclaw clawser doctor
@@ -83,13 +83,13 @@ installation is described in [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Release archive alternative
 
-Download `pengying-clawser-0.4.1.tgz` and `SHA256SUMS` from the
-[v0.4.1 release](https://github.com/pengying/clawser/releases/tag/v0.4.1) into the
+Download `pengying-clawser-0.4.2.tgz` and `SHA256SUMS` from the
+[v0.4.2 release](https://github.com/pengying/clawser/releases/tag/v0.4.2) into the
 same directory, then:
 
 ```sh
 sha256sum --check SHA256SUMS
-openclaw plugins install ./pengying-clawser-0.4.1.tgz --force --accept-capabilities
+openclaw plugins install ./pengying-clawser-0.4.2.tgz --force --accept-capabilities
 openclaw clawser setup
 openclaw clawser doctor
 ```
@@ -162,9 +162,9 @@ it may not exist yet immediately after setup.
    Replace the unit placeholder with the exact name reported for your instance.
 3. Keep the current installation source. For a ClawHub installation, install the
    reviewed version with `openclaw plugins install
-   clawhub:@pengying/clawser@0.4.1 --force --accept-capabilities --no-enable`.
+   clawhub:@pengying/clawser@0.3.5 --force --accept-capabilities --no-enable`.
    For a Git installation, use `openclaw plugins install
-   git:github.com/pengying/clawser@v0.4.1 --force --accept-capabilities --no-enable`.
+   git:github.com/pengying/clawser@v0.4.2 --force --accept-capabilities --no-enable`.
    Replace the version when upgrading. Changing installation source can change
    durable paths and requires an operator migration. While disabled, use its
    standalone `bin/clawser.mjs` entry point shown above to run `setup --dry-run`

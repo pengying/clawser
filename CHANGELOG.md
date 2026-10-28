@@ -1,5 +1,10 @@
 # Changes
 
+## 0.4.2
+
+- Generate new controller user units with `KillMode=mixed` so service stop preserves singleton authority through graceful input retirement, with bounded cleanup of remaining processes.
+- Keep read-only desktop status checks independent of the mutation lock while retaining ownership validation, so diagnostics cannot block handback at that lock.
+
 ## 0.4.1
 
 - Add explicit offline operator reconciliation for a failed control handback, retaining strict input-fence and fresh-observation checks without restarting the browser.

@@ -27,13 +27,13 @@ session, `flock`, and outbound HTTPS. Start your OpenClaw Gateway before setup. 
 not validated for this release.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.4.1 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.4.2 --force --accept-capabilities
 openclaw clawser setup
 openclaw clawser doctor
 ```
 
 The install command explicitly accepts Clawser’s declared plugin capabilities.
-ClawHub currently serves v0.3.5. Its v0.4.1 publication is waiting on a scanner
+ClawHub currently serves v0.3.5. Its v0.4.1 publication is waiting on a hosted scanner
 execution error; use the tagged Git installation above for the latest fixes.
 
 Setup verifies prerequisites, downloads checksum-pinned cloudflared and noVNC,

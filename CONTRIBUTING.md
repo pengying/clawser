@@ -74,7 +74,7 @@ npm ci --ignore-scripts
 npm test
 npm run test:runtime
 npm pack --ignore-scripts
-openclaw plugins install ./pengying-clawser-0.4.1.tgz --force --accept-capabilities
+openclaw plugins install ./pengying-clawser-0.4.2.tgz --force --accept-capabilities
 openclaw clawser setup --dry-run
 ```
 
