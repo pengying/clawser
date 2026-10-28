@@ -383,7 +383,7 @@ function systemdArgument(value) {
 function unit(p, d) {
   const marker = p.marker.replace(/%/g, '%%');
   const command = [d.execPath, p.controllerScript, p.config].map(systemdArgument).join(' ');
-  return `# Managed by Clawser; ownership is recorded in ${marker}\n[Unit]\nDescription=Clawser private browser handoff controller\nAfter=network-online.target docker.service\n\n[Service]\nType=simple\nExecStart=${command}\nUMask=0077\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=180\n\n[Install]\nWantedBy=default.target\n`;
+  return `# Managed by Clawser; ownership is recorded in ${marker}\n[Unit]\nDescription=Clawser private browser handoff controller\nAfter=network-online.target docker.service\n\n[Service]\nType=simple\nKillMode=mixed\nExecStart=${command}\nUMask=0077\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=180\n\n[Install]\nWantedBy=default.target\n`;
 }
 
 async function reloadPlugin(d) {

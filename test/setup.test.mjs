@@ -308,6 +308,7 @@ test('setup preserves other profiles, plugin configuration and allowlists', asyn
   const service = await fs.readFile(result.servicePath, 'utf8');
   assert.match(service, /ExecStart="\/node \\"quoted\\" %% \$\$PATH"/);
   assert.equal(service.includes('/bin/sh'), false);
+  assert.match(service, /^KillMode=mixed$/m, 'initial stop signals must preserve the controller’s child authority lock');
   assert.match(service, /TimeoutStopSec=180\n/);
 });
 
