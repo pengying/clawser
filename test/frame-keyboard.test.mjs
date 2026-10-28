@@ -101,3 +101,33 @@ test('detaching a loading child does not leave a permanent navigation barrier', 
   await keyboard.settled();
   assert.ok((await keyboard.activate('doc')).token);
 });
+
+for (const startupCommand of ['Page.enable', 'Page.getFrameTree']) test(`child startup navigation cannot skip recursive observation while ${startupCommand} is pending`, async () => {
+  const cdp = new Browser(), keyboard = new FrameKeyboard(cdp, { document: () => 'doc', onChange() {} });
+  await keyboard.start('top');
+  const held = deferred(); cdp.hold = { method: startupCommand, ...held };
+  cdp.event('Target.attachedToTarget', { sessionId: 'child-session', targetInfo: { type: 'iframe', targetId: 'child' } });
+  await new Promise(resolve => setImmediate(resolve));
+  cdp.event('Page.frameStartedLoading', { frameId: 'child' }, 'child-session');
+  held.resolve(); await keyboard.settled();
+  cdp.event('Page.frameStoppedLoading', { frameId: 'child' }, 'child-session');
+  await keyboard.settled();
+  assert.ok(keyboard.sessions.get('child-session').ready);
+  assert.equal(cdp.commands.filter(command => command.method === 'Target.setAutoAttach' && command.session === 'child-session').length, 1,
+    'a ready child must have completed its own recursive attachment setup');
+});
+
+test('nested frame typing stays unavailable until child recursive attachment setup completes', async () => {
+  const cdp = new Browser(), keyboard = new FrameKeyboard(cdp, { document: () => 'doc', onChange() {} });
+  await keyboard.start('top');
+  const held = deferred(); cdp.hold = { method: 'Target.setAutoAttach', ...held };
+  cdp.event('Target.attachedToTarget', { sessionId: 'child-session', targetInfo: { type: 'iframe', targetId: 'child' } });
+  await new Promise(resolve => setImmediate(resolve));
+  cdp.event('Page.frameStartedLoading', { frameId: 'child' }, 'child-session');
+  cdp.event('Page.frameStoppedLoading', { frameId: 'child' }, 'child-session');
+  await new Promise(resolve => setImmediate(resolve));
+  try {
+    assert.equal(keyboard.sessions.get('child-session').ready, false, 'a stopped navigation cannot bypass pending recursive attachment');
+    await assert.rejects(keyboard.activate('doc'), /frame|keyboard/i);
+  } finally { held.resolve(); await keyboard.settled(); }
+});

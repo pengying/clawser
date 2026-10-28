@@ -32,7 +32,7 @@ export class FrameKeyboard {
       }
       const state = { session: event.sessionId, parent, ready: false, generation: 0 };
       this.sessions.set(event.sessionId, state);
-      this.track(this.prepare(state, true));
+      this.track(this.prepare(state));
     });
     cdp.onAny('Target.detachedFromTarget', (event, parent) => {
       if (!owns(parent) || !this.sessions.has(event.sessionId)) return;
@@ -70,14 +70,22 @@ export class FrameKeyboard {
   }
   async settled() { while (this.pending.size) await Promise.all([...this.pending]); }
   async start(topFrame) { this.topFrame = topFrame; await this.cdp.send('Target.setAutoAttach', autoAttach); await this.settled(); }
-  async prepare(state, initial = false) {
+  async observe(state) {
+    await this.cdp.send('Page.enable', {}, state.session);
+    if (this.sessions.get(state.session) !== state) return;
+    await this.cdp.send('Target.setAutoAttach', autoAttach, state.session);
+    if (this.sessions.get(state.session) === state) state.observing = true;
+  }
+  async prepare(state) {
     const generation = state.generation;
-    if (initial) await this.cdp.send('Page.enable', {}, state.session);
+    // All readiness attempts share the complete setup phase. Navigation can
+    // supersede a frame-tree snapshot, but must never skip recursive attachment.
+    await (state.setup ||= this.observe(state));
+    if (!state.observing) return;
     const { frameTree } = await this.cdp.send('Page.getFrameTree', {}, state.session);
     if (this.sessions.get(state.session) !== state || generation !== state.generation || !frameTree?.frame?.id) return;
     state.frameId = frameTree.frame.id;
     state.parentFrame = frameTree.frame.parentId;
-    if (initial) await this.cdp.send('Target.setAutoAttach', autoAttach, state.session);
     if (this.sessions.get(state.session) === state && generation === state.generation && !this.loading.has(state.frameId)) state.ready = true;
   }
   revoke() { this.epoch++; const hadToken = this.active; this.active = null; if (hadToken) this.onChange?.(null); }
