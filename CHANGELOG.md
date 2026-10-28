@@ -1,5 +1,10 @@
 # Changes
 
+## 0.3.5
+
+- Simplify JavaScript string construction and input-operation definitions for complete SkillSpector inspection.
+- Preserve browser protocol text, key dispatch, input validation and setup escaping with regression coverage.
+
 ## 0.3.4
 
 - Verify read-only cleanup independence from active automation without assuming disk writes finish within 100 milliseconds.
