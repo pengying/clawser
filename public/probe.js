@@ -504,6 +504,7 @@ keyboardInput.addEventListener('blur', () => {
 
 let touchGesture;
 let dragOnce = false;
+const holdDelayMs = 250;
 const midpoint = (touches) => ({ x: (touches[0].clientX + touches[1].clientX) / 2, y: (touches[0].clientY + touches[1].clientY) / 2 });
 const touchDistance = (touches) => Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
 function setDragOnce(enabled) {
@@ -519,10 +520,19 @@ document.getElementById('drag-once').addEventListener('click', () => {
 function mouseOptions(x, y, buttons) {
   return { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, buttons };
 }
+const holdsButton = gesture => gesture.kind === 'drag' || gesture.kind === 'hold';
+function beginHold(gesture) {
+  if (gesture !== touchGesture || gesture.moved || !controlReady || accessEnded) return;
+  gesture.kind = 'hold';
+  gesture.remoteDown = true;
+  status.textContent = 'Holding… Lift to release.';
+  gesture.canvas.dispatchEvent(new MouseEvent('mousedown', mouseOptions(gesture.x, gesture.y, 1)));
+}
 function releaseTouchDrag(gesture = touchGesture) {
+  clearTimeout(gesture?.holdTimer);
   if (!gesture?.remoteDown) return;
   gesture.remoteDown = false;
-  if (controlReady && !accessEnded) status.textContent = 'Drag finished. Swipe to scroll. Pinch to zoom.';
+  if (controlReady && !accessEnded) status.textContent = (gesture.kind === 'hold' ? 'Hold released.' : 'Drag finished.') + ' Swipe to scroll. Pinch to zoom.';
   // Route up through noVNC's window capture proxy so it also removes the
   // capture overlay and flushes any queued held-button movement.
   window.dispatchEvent(new MouseEvent('mouseup', mouseOptions(gesture.lastX, gesture.lastY, 0)));
@@ -532,6 +542,7 @@ function cancelTouchInput() {
   touchGesture = undefined;
   setDragOnce(false);
 }
+document.addEventListener('visibilitychange', () => { if (document.hidden) cancelTouchInput(); });
 function beginPinch(touches) {
   releaseTouchDrag();
   setDragOnce(false);
@@ -588,7 +599,7 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
         touchGesture.remoteDown = true;
         status.textContent = 'Dragging in the browser. Lift to finish; pinch to cancel.';
         canvas.dispatchEvent(new MouseEvent('mousedown', mouseOptions(touchGesture.x, touchGesture.y, 1)));
-      }
+      } else if (controlReady && !accessEnded) touchGesture.holdTimer = setTimeout(beginHold, holdDelayMs, touchGesture);
     }
     return;
   }
@@ -603,12 +614,13 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
       gesture.wheelX += gesture.lastX - x;
       gesture.wheelY += gesture.lastY - y;
       gesture.lastX = x; gesture.lastY = y;
-      if (gesture.kind === 'drag') {
+      if (holdsButton(gesture)) {
         if (gesture.remoteDown) window.dispatchEvent(new MouseEvent('mousemove', mouseOptions(x, y, 1)));
         return;
       }
       const dx = x - gesture.x, dy = y - gesture.y;
       gesture.moved ||= Math.hypot(dx, dy) > 8;
+      if (gesture.moved) clearTimeout(gesture.holdTimer);
       if (gesture.moved && gesture.kind === 'pan') {
         viewport.scrollLeft = gesture.left - dx;
         viewport.scrollTop = gesture.top - dy;
@@ -620,7 +632,7 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
   const gesture = touchGesture;
   releaseTouchDrag(gesture);
   touchGesture = undefined;
-  if (gesture.pinch || gesture.kind === 'drag' || gesture.moved || !controlReady || accessEnded) return;
+  if (gesture.pinch || holdsButton(gesture) || gesture.moved || !controlReady || accessEnded) return;
   gesture.canvas.dispatchEvent(new MouseEvent('mousedown', mouseOptions(gesture.x, gesture.y, 1)));
   // noVNC's window capture proxy must receive mouseup to release its overlay.
   window.dispatchEvent(new MouseEvent('mouseup', mouseOptions(gesture.x, gesture.y, 0)));
