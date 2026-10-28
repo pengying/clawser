@@ -186,15 +186,6 @@ working user systemd session, `flock`, `tar`, and outbound access for Docker/Deb
 builds and noVNC. Remote Docker contexts are unsupported. The browser runtime
 has a 3 GiB memory limit and 512 MiB shared memory; allow space for the image build.
 
-Setup also resolves the host display tools `Xvfb`, `x11vnc` and, optionally,
-`openbox`, without `sudo`. It uses installed copies first, then
-`brew install x11vnc xorg-server` when Homebrew is present. On Debian or Ubuntu
-it falls back to `apt-get download` and `dpkg -x` into
-`<state-dir>/clawser-novnc/root`. Otherwise it prints the distro install command.
-The receipt records each binary's path, sha256, source and version. Doctor fails
-if any of them changes and never reinstalls. Without `openbox`, setup warns and
-popups open unmanaged.
-
 ```sh
 openclaw clawser setup --novnc --dry-run
 openclaw clawser setup --novnc

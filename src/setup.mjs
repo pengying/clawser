@@ -7,7 +7,6 @@ import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DesktopRpcClient } from './desktop-rpc.mjs';
 import { DesktopRuntime } from '../runtime/desktop/index.mjs';
-import { describeHostPlan, installHostDeps, planHostDeps, verifyHostDeps } from './host-deps.mjs';
 import { activationSummary, captureSetupActivation, inspectSetupActivation, logSetupActivation, requireActiveActivation, waitForSetupActivation } from './setup-activation.mjs';
 
 export const ARTIFACTS = Object.freeze({
@@ -284,7 +283,7 @@ async function ownedFiles(p, saved, d) {
       if (!checksum || sha256(await d.fs.readFile(path)) !== checksum) throw new Error('Refusing unowned or changed ' + ''.concat(name) + ': ' + ''.concat(path));
     } else if (checksum) throw new Error('Owned ' + ''.concat(name) + ' is missing: ' + ''.concat(path));
   }
-  for (const path of [p.state, p.runtime, dirname(p.binary), dirname(p.assets), p.hostDeps]) {
+  for (const path of [p.state, p.runtime, dirname(p.binary), dirname(p.assets), ...(d.hostDependencies ? [p.hostDeps] : [])]) {
     if (await stat(path, d)) await privatePath(path, 'directory', d);
   }
 }
@@ -426,14 +425,15 @@ async function reloadPlugin(d) {
 
 const hostHelpers = { stat, noSymlinks, privatePath };
 
-// A root published by an interrupted setup is adopted only when it still matches its durable intent.
+// An extraction published by an interrupted setup is adopted only while it matches its durable intent.
 async function hostPlan(saved, p, d) {
   try { return await d.hostResolver.plan(saved?.hostDeps ?? (saved?.pendingHostDeps && await stat(p.hostRoot, d) ? saved.pendingHostDeps : undefined), p, d, hostHelpers); }
   catch (error) { throw new Error('host dependencies: ' + error.message); }
 }
 
 async function hostInstall(host, saved, p, warnings, d) {
-  const { record, warnings: late } = await d.hostResolver.install(host, p, d, hostHelpers, async pending => { saved.pendingHostDeps = pending; await saveMarker(saved, p, d); });
+  const intend = async pending => { saved.pendingHostDeps = pending; await saveMarker(saved, p, d); };
+  const { record, warnings: late } = await d.hostResolver.install(host, p, d, hostHelpers, { intend, previous: saved.hostDeps });
   warnings.push(...late);
   if (same(record, saved.hostDeps) && !own(saved, 'pendingHostDeps')) return;
   saved.hostDeps = record; delete saved.pendingHostDeps;
@@ -457,7 +457,7 @@ async function install(o, p, saved, service, host, warnings, d) {
   catch (error) { if (error.code === 'EEXIST') throw new Error('Clawser setup is already locked; inspect the existing setup process before retrying'); throw error; }
   try {
     for (const path of [p.state, p.runtime, dirname(p.binary), dirname(p.assets)]) await d.fs.mkdir(path, { recursive: true, mode: 0o700 });
-    await hostInstall(host, saved, p, warnings, d);
+    if (host) await hostInstall(host, saved, p, warnings, d);
     await assets(p, saved, d);
     if (saved.imageId) {
       const current = await d.run('docker', [dockerHost, 'image', 'inspect', '--format', '{{.Id}}', saved.imageId]);
@@ -520,9 +520,11 @@ async function diagnose(o, p, saved, d, checks) {
       if (sha256(await d.fs.readFile(p.binary)) !== d.artifacts.cloudflared.sha256) throw new Error('Installed cloudflared checksum changed');
       if (!saved.assetsDigest || await treeDigest(p.assets, d) !== saved.assetsDigest) throw new Error('Installed noVNC assets checksum changed');
     });
-    let warnings = [];
-    await check('host dependencies', async () => { warnings = await d.hostResolver.verify(saved.hostDeps, p, d, hostHelpers); });
-    checks.push(...warnings.map(message => ({ name: 'window manager', ok: true, warning: true, message })));
+    if (d.hostDependencies) {
+      let warnings = [];
+      await check('host dependencies', async () => { warnings = await d.hostResolver.verify(saved.hostDeps, p, d, hostHelpers); });
+      checks.push(...warnings.map(message => ({ name: 'window manager', ok: true, warning: true, message })));
+    }
     await check('desktop image', async () => {
       if (!saved.imageId || (await d.run('docker', [dockerHost, 'image', 'inspect', '--format', '{{.Id}}', saved.imageId])).trim() !== saved.imageId) throw new Error('Owned desktop image is missing or changed');
     });
@@ -543,7 +545,7 @@ export async function runClawser(argv, deps = {}) {
     env: process.env, homeDir: homedir(), uid: process.getuid?.(), platform: process.platform,
     arch: process.arch, nodeVersion: process.versions.node, execPath: process.execPath,
     packageDir: resolve(dirname(fileURLToPath(import.meta.url)), '..'),
-    isPortFree: portFree, controllerHealth, now: Date.now, hostResolver: { plan: planHostDeps, install: installHostDeps, verify: verifyHostDeps }, sleep: ms => new Promise(accept => setTimeout(accept, ms)),
+    isPortFree: portFree, controllerHealth, now: Date.now, hostDependencies: false, sleep: ms => new Promise(accept => setTimeout(accept, ms)),
     log: message => process.stdout.write(`${message}\n`), ...deps,
   };
   // OpenClaw executes plugin modules from temporary captures. Only its trusted
@@ -582,6 +584,11 @@ export async function runClawser(argv, deps = {}) {
     return runCdpSetup(o, d, { prerequisites, configSection, stat, noSymlinks, privatePath, readJson, download, atomicPrivate, reloadPlugin });
   }
   if (new Set([o.port, o.cdpPort, o.vncPort]).size !== 3) throw new Error('Controller, CDP and VNC ports must differ');
+  // Off until the host display backend exists; the Docker desktop neither needs nor records host binaries.
+  if (d.hostDependencies && !d.hostResolver) {
+    const hostDeps = await import('./host-deps.mjs');
+    d.hostResolver = { plan: hostDeps.planHostDeps, install: hostDeps.installHostDeps, verify: hostDeps.verifyHostDeps, describe: hostDeps.describeHostPlan };
+  }
   const p = locations(o, d);
   const checks = await prerequisites(d);
   if (o.command === 'doctor') {
@@ -607,13 +614,13 @@ export async function runClawser(argv, deps = {}) {
     return prefix + `${message}`;
   }).join('\n'));
   const saved = await marker(o, p, d);
-  const host = await hostPlan(saved, p, d), warnings = [...host.warnings];
+  const host = d.hostDependencies ? await hostPlan(saved, p, d) : undefined, warnings = [...host?.warnings ?? []];
   const patch = await configPatch(o, p, saved, d);
   const service = await audit(o, p, saved, d);
   if (o.dryRun) {
-    d.log(`Dry run: resolve host display dependencies, verify pinned cloudflared/noVNC, build the Chromium image, start ${p.serviceUnit}, merge the ${o.profile} profile, and reload browser-handoff.\nHost dependencies: ${describeHostPlan(host).join('; ')}\nState: ${o.stateDir}\nNo files, downloads, services, or configuration were changed.`);
+    d.log(`Dry run: verify pinned cloudflared/noVNC, build the Chromium image, start ${p.serviceUnit}, merge the ${o.profile} profile, and reload browser-handoff.` + (host ? `\nHost dependencies: ${d.hostResolver.describe(host).join('; ')}` : '') + `\nState: ${o.stateDir}\nNo files, downloads, services, or configuration were changed.`);
     for (const message of warnings) d.log('Warning: ' + message);
-    return { ok: true, command: o.command, dryRun: true, stateDir: o.stateDir, serviceUnit: p.serviceUnit, servicePath: p.servicePath, patch, hostDependencies: describeHostPlan(host), warnings };
+    return { ok: true, command: o.command, dryRun: true, stateDir: o.stateDir, serviceUnit: p.serviceUnit, servicePath: p.servicePath, patch, ...(host ? { hostDependencies: d.hostResolver.describe(host), warnings } : {}) };
   }
   // Validate with OpenClaw before downloading or writing anything. Config is
   // never edited directly; supported patch operations preserve its own backups.
@@ -622,5 +629,5 @@ export async function runClawser(argv, deps = {}) {
   for (const message of warnings) d.log('Warning: ' + message);
   d.log(`Clawser is configured. Controller unit: ${p.serviceUnit}\nState: ${o.stateDir}\nContainer: ${o.containerName}; its browser profile is retained across reruns.\nBefore browser work, ask the owner session to run browser_handoff action=tabs to verify the active plugin connection.`);
   logSetupActivation(activation, d);
-  return { ok: true, command: o.command, backend: 'novnc', activation: activationSummary(activation), dryRun: false, stateDir: o.stateDir, serviceUnit: p.serviceUnit, servicePath: p.servicePath, warnings };
+  return { ok: true, command: o.command, backend: 'novnc', activation: activationSummary(activation), dryRun: false, stateDir: o.stateDir, serviceUnit: p.serviceUnit, servicePath: p.servicePath, ...(host ? { warnings } : {}) };
 }
