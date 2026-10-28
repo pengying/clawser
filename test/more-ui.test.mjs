@@ -109,7 +109,26 @@ test('More dismisses on outside mouse and touch while preserving local controls 
   await open(); await click('#menu');
   assert.equal(await isOpen(), false, 'More still toggles itself closed');
   const beforeBlank = inputs.length;
-  await open(); await touch({ x: 20, y: 300 });
+  // Font metrics can move this panel across the old fixed (20, 300) point.
+  await evaluate('document.querySelector("#panel").style.fontFamily = "monospace"');
+  await open();
+  const blank = await evaluate(`(() => {
+    const viewport = document.querySelector('.viewport'), panel = document.querySelector('#panel');
+    const view = viewport.getBoundingClientRect(), panelBounds = panel.getBoundingClientRect();
+    const canvas = document.querySelector('#screen').getBoundingClientRect();
+    const point = { x: (view.left + panelBounds.left) / 2, y: (Math.max(view.top, canvas.bottom) + view.bottom) / 2 };
+    const hit = document.elementFromPoint(point.x, point.y);
+    window.blankTouchReceived = false;
+    document.addEventListener('pointerdown', event => {
+      window.blankTouchReceived = event.pointerType === 'touch' && event.target === viewport;
+    }, { capture: true, once: true });
+    return { point, viewport: hit === viewport, panel: panel.contains(hit),
+      menu: document.querySelector('#menu').contains(hit), canvas: document.querySelector('#screen').contains(hit) };
+  })()`);
+  assert.deepEqual({ viewport: blank.viewport, panel: blank.panel, menu: blank.menu, canvas: blank.canvas },
+    { viewport: true, panel: false, menu: false, canvas: false }, 'blank tap is outside all controls and the canvas');
+  await touch(blank.point);
+  await waitFor(() => evaluate('window.blankTouchReceived === true'), 'blank-space touch pointer reaches the viewer');
   assert.equal(await isOpen(), false, 'touching outside the canvas and menu dismisses More');
   assert.equal(inputs.length, beforeBlank, 'blank viewer space creates no remote action');
   await click('#done');
