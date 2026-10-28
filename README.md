@@ -1,167 +1,170 @@
 # Clawser
 
-**Let a human take over the agent’s browser from a phone, then hand the same browser back.**
+**Let a human take over the agent’s existing browser tab from a phone, then hand it back.**
 
-Clawser gives OpenClaw a temporary HTTPS link to a dedicated Chromium desktop.
-Open it in a regular mobile browser to see tabs, the address bar, popups and native
-dialogs. Take control for a CAPTCHA, login or sensitive form step, press **Done**,
-and let the agent continue with the browser’s existing tabs and session.
+Clawser gives OpenClaw a temporary HTTPS link to a selected tab in its already
+configured default Chromium browser. Open the link in a regular mobile browser,
+take control for a CAPTCHA, login or sensitive form step, then press **Done**.
+The agent checks the page again and continues the pending task in that same tab.
 
-- Full-screen viewer with movable, collapsible controls, pinch/pan and zoom buttons.
-- Touch scrolling, **Drag once**, a mobile keyboard and Unicode text input.
-- Plain-text clipboard transfer during control, with a manual fallback when the
-  phone browser denies clipboard access. No file transfer or automatic clipboard sync.
-- A persistent browser profile: finishing a handoff does not discard its cookies,
-  tabs or open dialogs.
-- Browser-tool coordination: human input is retired and checked before automation
-  resumes; an uncertain handback keeps browser automation paused.
+Default setup uses the existing **OpenClaw browser connection**, which is not
+automatically your everyday OS Chrome profile. It never launches another browser,
+creates a Chrome user-data directory, copies cookies, guesses a CDP port or falls
+back to a different browser. Keep the configured browser running.
 
-The recipient needs no VPN or app installation. The host runs the browser in
-Docker and exposes the authenticated viewer through a Cloudflare HTTPS tunnel.
+- Selected-tab viewing through CDP screencast images, with touch scrolling,
+  pinch/pan, zoom, a mobile keyboard and device paste.
+- Phone controls for supported native HTML selects and classic RGB color fields.
+- Explicit **Keyboard** control after tapping a cross-origin frame field; this
+  grants manual keyboard input to the focused frame, not verified field autofill.
+- Browser-tool coordination that keeps automation paused when human input or
+  handback is uncertain. Done preserves the browser, tabs, cookies and profile.
+- Optional `--novnc` setup for a dedicated Docker desktop when you need browser
+  chrome, all tabs, popup switching, native OS dialogs or system clipboard access.
+
+The recipient needs no VPN or app installation. A Cloudflare HTTPS tunnel exposes
+only the authenticated viewer, never the Gateway or browser debugging endpoint.
 
 ## Install
 
-The first supported desktop release targets **Linux x86_64**, **Node.js 24.16+ on 24.x, or 26.1+** and
-**OpenClaw 2026.10.4+**. The host needs Docker access, a working user systemd
-session, `flock`, and outbound HTTPS. Start your OpenClaw Gateway before setup. Other operating systems and ARM hosts are
-not validated for this release.
+The validated host is **Linux x86_64**, **Node.js >=24.16 <25 or >=26.1**, and
+**OpenClaw 2026.10.4+** with the native trusted-tool-policy API. Native fixtures
+cover 2026.10.4 and 2026.10.7. Other operating systems and ARM hosts are unverified.
+Start your OpenClaw Gateway and the configured attach-only browser before setup.
+Default setup needs no Docker, user systemd, `flock`, `tar` or noVNC download.
+
+These instructions describe the planned **v0.5.0** release; its Git install
+command requires the tag to be published. Tagged Git installation is the
+recommended distribution. ClawHub currently serves **v0.3.5**; the hosted v0.4.1
+SkillSpector run failed before a verdict. Do not expect v0.5.0 on ClawHub.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.4.2 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.5.0 --force --accept-capabilities
+openclaw clawser setup --dry-run
 openclaw clawser setup
 openclaw clawser doctor
 ```
 
-The install command explicitly accepts Clawser’s declared plugin capabilities.
-ClawHub currently serves v0.3.5. Its v0.4.1 publication is waiting on a hosted scanner
-execution error; use the tagged Git installation above for the latest fixes.
+`--accept-capabilities` accepts the declared tool and trusted browser-policy
+contracts through OpenClaw. Use the supported native capability-acceptance flow
+for installs, updates and enabling; do not hand-write acknowledgement settings.
 
-Setup verifies prerequisites, downloads checksum-pinned cloudflared and noVNC,
-builds the browser image, installs a private user service and merges the required
-OpenClaw settings. The initial image build can take several minutes. Review the
-plan first with `openclaw clawser setup --dry-run`.
+Setup validates the current default profile’s explicit loopback CDP origin and
+`attachOnly=true`, verifies a checksum-pinned cloudflared download, configures
+the viewer and reloads the plugin. Use `--browser-profile NAME` to select another
+**existing configured connection** and make it the OpenClaw default; this does
+not create a Chrome profile. An incompatible or unavailable connection fails
+with guidance, without starting or substituting a browser.
 
-Setup makes the dedicated `handoff` browser profile the OpenClaw default. Use
-`--no-default-profile` to keep your current default and select `handoff` explicitly
-for the task. Standard setup uses the same noVNC full-browser viewer in private
-conversations and allowed groups/channels. Keep the task in that profile: setup
-does not transfer existing headless tabs, unfinished forms or personal browser
-cookies into the desktop.
-
-Follow the activation/reload instructions printed by setup, then run `doctor`.
-See [installation and maintenance](docs/install.md) for release archives, custom
-ports, upgrades, disable/uninstall and recovery.
-
-The ClawHub package is **`@pengying/clawser`**. The plugin ID remains
-`browser-handoff` and the agent tool remains `browser_handoff`, preserving
-existing OpenClaw configuration.
+Follow setup’s printed activation instructions, then run `doctor` and ask the
+owner session to list tabs. See [installation and maintenance](docs/install.md)
+for connection requirements, the optional noVNC desktop, upgrades and recovery.
+The package is **`@pengying/clawser`**, the plugin ID is `browser-handoff` and the
+agent tool is `browser_handoff`.
 
 ## Use it
 
 Ask OpenClaw in your private owner conversation:
 
-> Open the site in the handoff browser. If you need me to log in or solve a
-> CAPTCHA, send me a Clawser link and wait for me to finish.
+> Use my configured default browser. If you need me to log in or solve a CAPTCHA,
+> send me a Clawser link for that tab and wait for me to finish.
 
 1. Open the private link on your phone. It starts in watch mode.
-2. Press **Take control** if the invitation permits control.
+2. Press **Take control** if the invitation permits it.
 3. Complete the manual step and press **Done**.
-4. The agent takes a fresh browser observation before continuing.
+4. The agent waits for safe handback and takes a fresh browser snapshot.
 
-Each controller/profile supports one active invitation. Requests from other
-authorized chats receive a busy response and are not queued. Separate dedicated
-controllers operate independently.
+CDP shares the **selected tab**. Full browser UI, native OS dialogs and automatic
+popup switching require the optional noVNC desktop, which shares the **entire
+profile**, including all tabs, dialogs and the system clipboard during control.
+Choose a browser whose contents you intend to share. noVNC offers explicit
+plain-text clipboard transfer with a manual fallback, without file transfer or
+automatic clipboard sync. Device paste works in CDP;
+it does not synchronize or copy the remote OS clipboard. Phone autofill and
+passkeys do not automatically transfer to the remote browser.
 
-The entire dedicated browser profile is shared, including its other tabs and
-dialogs. Use a profile whose contents you intend the recipient to see. CAPTCHA,
-login and form completion are manual human actions; support varies by site and
-phone. A phone’s native autofill or passkeys do not automatically transfer into
-the remote browser.
+CAPTCHA, login and form completion are manual human actions. Support varies by
+site and phone. The CDP viewer uses screencast images, not native video; there are
+no guarantees about frame rate, network latency or a site’s automation detection.
+Physical iOS Safari coverage remains unverified.
 
-An invitation is a **bearer credential**. Deliver it privately by default. An
-operator can explicitly allow owner-requested delivery in the same requesting
-group/thread with `ownerGroupSessions`; any member of that group can claim the
-one-use link. Keep links out of other chats, logs, issue reports and durable agent
-memory. One browser can redeem it, and only one viewer connection is allowed at a
-time. Reopening it in
-the same browser can resume its valid viewer cookie; another browser needs a new
-invitation. Control always requires the explicit **Take control** button.
+An invitation is a **one-use bearer credential**, with one viewer connection at
+a time. Reopening it in the same browser can resume its valid viewer cookie;
+another browser needs a new invitation. Control requires **Take control**.
+Deliver links privately by default and keep them out of logs, issues, other chats
+and durable agent memory.
 
-Invitations last **five minutes by default**, with a configurable lifetime from
-30 seconds to **30 minutes**. Done, revocation, disconnect or absolute expiry
-ends viewer access. There is **no human-inactivity timeout**: pausing to read a
-page does not end access before the absolute deadline. A dropped connection may
-take a heartbeat interval to detect. Creating a fresh tunnel can take up to
-90 seconds; a link is returned only after public readiness checks.
+Invitations expire after **five minutes by default**, configurable from 30 to
+1800 seconds. Done, revocation, disconnect or absolute expiry ends viewer access.
+There is **no human-inactivity timeout**. A dropped connection may take a
+heartbeat interval to detect. First-link tunnel readiness can take up to 90
+seconds. Ending a handoff leaves the browser, tabs, cookies and profile intact;
+CDP has no browser idle-cleanup lifecycle.
 
-## Safety and limits
+CDP allows invitations for different tabs (up to 100), one invitation per same
+tab, and **one human control session per Gateway**. Another takeover receives a
+busy response; there is no queue. noVNC allows one active invitation per controller.
+Use distinct browser connections for personal and family Gateways. Sharing one
+Chrome instance across multiple Gateways is unsupported: there is no cross-process
+control coordination.
 
-The public HTTPS origin serves the viewer. The Gateway, local CDP endpoint, raw
-VNC endpoint and controller socket must never be exposed through it. Docker
-publishes CDP/VNC on loopback, and the controller uses an owner-only Unix socket.
-Local Docker access remains a powerful host privilege.
+## Agent tool and browser routing
 
-During takeover, Clawser coordinates OpenClaw’s normal browser tools. It does not
-stop arbitrary shell commands, independent CDP clients or a separate desktop
-operator. Agents must not bypass the browser-tool gate. If input retirement or a
-fresh browser observation cannot be established, keep automation paused and
-follow the recovery instructions.
-
-The dedicated Chromium runtime keeps Chromium’s sandbox enabled and restricts
-ordinary browser egress. These controls do not guarantee containment of a
-compromised browser or safety of every website. There are no guarantees about
-mobile network latency, Cloudflare reachability or a site’s automation detection.
-Physical iOS Safari coverage is still unverified.
-
-See [SECURITY.md](SECURITY.md) for the trust model, disclosure and verification
-scope, and [runtime documentation](runtime/desktop/README.md) for technical details.
-
-## Agent tool
-
-`browser_handoff` is available to a verified owner in private direct/main sessions.
-Groups are disabled by default. The operator may opt exact group/channel base
-session keys into `ownerGroupSessions`; only native verified owner turns with
-per-sender and conversation identity may invoke it there. Native user turns may
-omit provenance or explicitly use external-user provenance. Nonowners,
-unidentified callers, sandboxes and automated group turns remain denied. A
-shared-admin HTTP agent proxy cannot establish per-sender owner authority.
+Both `browser_handoff` and ordinary browser tools require a native verified owner
+invocation in an authorized private conversation or explicitly allowed group.
+Nonowners cannot use either route. Message text, a display name or an HTTP agent
+proxy cannot establish native per-sender owner authority.
 
 | Action | Parameters | Purpose |
 | --- | --- | --- |
-| `tabs` | Optional `profile` | List configured profiles or their browser tabs |
-| `create` | `profile`, optional `targetId`, `permission`, `ttlSeconds`, `reason` | Create a private watch/control invitation |
-| `status` | `id` | Check the current handoff and completion reason |
+| `tabs` | Optional `profile` | Return available configured connections or their tabs |
+| `create` | `profile`, exact `targetId`, optional `permission`, `ttlSeconds` | Create a watch/control invitation for the task tab |
+| `status` | `id` | Check the handoff and completion reason |
 | `wait` | `id`, optional `timeoutSeconds` (1–60) | Wait for completion or receive current status |
 | `revoke` | `id` | End this owner session’s invitation |
 
-Use raw target IDs returned by `tabs`, not OpenClaw display labels such as `t1`.
-The bundled skill guides the agent through authorized delivery, waiting and a fresh
-browser snapshot after handback. Best-effort completion notifications may help
-resume a dormant session; they do not guarantee recovery across process crashes.
+Use the returned profile and raw target ID, not a display label such as `t1`.
+Every ordinary browser call, including the handback snapshot, must use
+`target: "host"` and that profile. Implicit user-profile, sandbox, node, MCP or
+endpoint overrides cannot bypass this route. Missing current APIs or changed
+configuration fail closed.
 
-## Existing-browser mode and group opt-in
+The bundled skill explains delivery and handback. CDP returns `backend: "cdp"`,
+`scope: "tab"`, `continuation: "active-wait"`: keep waiting during the active
+run, require `mode: "ended"` with no `browserGateFault` or recovery requirement,
+then take a fresh gated browser snapshot. After that run ends, a new owner turn
+is required. noVNC returns `backend: "novnc"`, `scope: "browser-profile"` and
+requires `resumeAllowed: true` with no recovery requirement. Ended mode alone is
+insufficient. Its completion notifications are best effort. Done does not prove
+that a CAPTCHA passed or a submission succeeded; never replay uncertain input.
 
-Existing-browser CDP is an explicit compatibility mode. Desktop setup does not
-automatically fall back to it when the desktop is unavailable. It uses the
-selected-tab viewer rather than the noVNC full-browser viewer.
+## Owner-requested groups
 
-To attach an already-running browser without creating a desktop/container, leave
-`desktop.enabled` absent or false and configure `profiles` with loopback CDP
-origins. Each invitation shares only the selected existing tab. Optional
-`cloudflare.enabled` starts an operator-installed `cloudflared` for the viewer;
-`binaryPath` must be absolute. It cannot run alongside `funnel.enabled`. The
-service publishes its HTTPS origin only after allocation, DNS and asset readiness
-checks, and invalidates invitations if its owned tunnel fails. Existing browser
-processes and tabs remain operator-owned.
+Group access is off by default. An operator may allow exact base session keys in
+`ownerGroupSessions`. Only a verified native owner may request a link there, and
+only an explicit owner request permits returning it to that **same requesting
+group/thread**. Any member can claim the one-use bearer link first. Other members
+cannot invoke browser tools, request, inspect or revoke the handoff.
 
-`ownerGroupSessions` defaults to `[]`. Configure exact trusted base session keys,
-with no wildcards. For Google Chat, an allowed base also admits its
-`:thread:<24 lowercase hex>` suffix; thread entries themselves are not allowed.
-The owner-requested link may be returned only to that same requesting group or
-thread, with disclosure that another member can claim it. One-use redemption,
-single-viewer limits, expiry, Done and browser gates still apply. See
-[operator configuration](docs/install.md#existing-browser-cdp-and-owner-requested-groups)
-for a complete example and the native-ingress prerequisite.
+Runtime browser/configuration changes, including removal or changes to the group
+allowlist, retire existing shares. See [group configuration](docs/install.md#owner-requested-groups)
+for native-ingress requirements and exact matching rules.
+
+## Safety and limits
+
+Default CDP runs in the host browser’s normal OS sandbox; it adds no Docker
+isolation. The optional desktop keeps Chromium’s sandbox enabled and restricts
+ordinary browser egress. Neither mode guarantees containment of a compromised
+browser or safety of every website.
+
+Clawser coordinates OpenClaw’s normal browser-tool path. It does not stop
+arbitrary shell commands, independent CDP clients or manual desktop operators.
+Never use those routes to bypass a gate. Keep automation paused and follow
+recovery guidance if input retirement or fresh observation cannot be established.
+
+See [SECURITY.md](SECURITY.md) for the trust model and disclosure, and
+[desktop runtime documentation](runtime/desktop/README.md) for the optional
+noVNC implementation.
 
 ## Development
 
@@ -172,12 +175,11 @@ npm run test:runtime
 npm run check:package
 ```
 
-Browser fixtures require a local Chrome/Chromium executable (`CHROME_BIN`). The
-RFB pointer tests also require the pinned noVNC assets (`NOVNC_ASSETS_DIR`); CI
-downloads and checks them before testing. Full Docker runtime tests are opt-in.
-See [CONTRIBUTING.md](CONTRIBUTING.md) for source installation, test commands and
-release checks. Releases contain a plugin archive and SHA-256 checksums; there is
-no npm registry publication step.
+Browser fixtures require local Chrome/Chromium (`CHROME_BIN`). RFB pointer tests
+also require pinned noVNC assets (`NOVNC_ASSETS_DIR`). Full Docker tests are opt-in.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for source installation and release checks.
+Releases contain a plugin archive and SHA-256 checksums; there is no npm registry
+publication step.
 
-Licensed under [MIT](LICENSE). Third-party runtime licenses are described in
-[runtime/desktop/NOTICE.md](runtime/desktop/NOTICE.md).
+Licensed under [MIT](LICENSE). Third-party desktop runtime licenses are described
+in [runtime/desktop/NOTICE.md](runtime/desktop/NOTICE.md).

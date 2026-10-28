@@ -2,75 +2,120 @@
 
 ## Supported host
 
-The initial desktop release is validated on Linux x86_64 with Node.js 24.16+ on 24.x, or 26.1+,
-OpenClaw 2026.10.4+, Docker access, a working user systemd session and `flock`.
-Use the local Docker daemon at `unix:///var/run/docker.sock`; remote Docker contexts are not supported.
-Start your OpenClaw Gateway before setup so its final plugin reload can finish.
-Run setup as the same user that runs OpenClaw. Do not run it with `sudo`.
+The validated platform is Linux x86_64, Node.js >=24.16 <25 or >=26.1, and
+OpenClaw 2026.10.4+ with its native trusted-tool-policy SDK. Native fixtures cover
+2026.10.4 and 2026.10.7. Windows, macOS and ARM hosts remain unverified.
+Run setup as the OpenClaw user, without `sudo`, with the same OpenClaw
+state/config environment used by the Gateway. Start the Gateway first.
 
-The host needs outbound HTTPS for GitHub downloads, Docker/Debian image builds
-and the Cloudflare tunnel. The browser runtime has a 3 GiB memory limit and a
-512 MiB shared-memory allocation; leave room for the host and image build too.
-The first image build can take several minutes or longer on a slow host. Windows, macOS and ARM hosts are
-not supported by this first validated installer.
-
-## ClawHub installation
-
-ClawHub currently serves v0.3.5. The v0.4.1 upload is waiting on a hosted registry
-scanner execution error. Use the tagged Git installation below for v0.4.2's
-owner-requested group handoffs, recovery tooling and viewer fixes.
-
-```sh
-openclaw plugins install clawhub:@pengying/clawser@0.3.5 --accept-capabilities
-openclaw clawser setup --dry-run
-openclaw clawser setup
-openclaw clawser doctor
-```
-
-The explicit `clawhub:` prefix works with the supported OpenClaw versions.
-ClawHub lists the package after its registry checks finish. The package uses the
-same setup and persistent browser as the GitHub distribution.
+Default CDP setup needs Node, OpenClaw, an already-running compatible Chromium
+CDP connection and outbound HTTPS for pinned cloudflared and the tunnel. It does
+not require Docker, systemd, `flock`, `tar` or a noVNC download. The optional
+[noVNC desktop](#optional-novnc-desktop) has additional requirements.
 
 ## Tagged Git installation
 
+This guide describes the planned v0.5.0 release. The commands below require its
+Git tag or archive to be published. Tagged Git installation is the recommended
+path; v0.5.0 is not claimed to be available on ClawHub.
+
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.4.2 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.5.0 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup
 openclaw clawser doctor
 ```
 
-The Git tag selects a release. `--force` confirms installation or replacement;
-review OpenClaw’s install output and any deployment-specific activation guidance.
-The package is named `@pengying/clawser`, the plugin ID is
-`browser-handoff`, and the public command is `openclaw clawser`.
+The package is `@pengying/clawser`, the plugin ID is `browser-handoff`, and the
+command is `openclaw clawser`. `--force` confirms native Git installation or
+replacement. `--accept-capabilities` accepts the declared tool and trusted
+browser-policy contracts. Installs, updates and enabling must use a supported
+native command with `--accept-capabilities`; never hand-write acknowledgement
+settings to make a contract warning disappear. Review the installation output
+and follow its activation guidance.
 
-Setup downloads cloudflared 2026.10.4 and noVNC 1.7.0 from their upstream projects,
-checks their pinned SHA-256 hashes, builds the sandboxed Chromium image and
-installs a private controller as a user systemd service. It merges the dedicated
-browser profile, plugin settings and tool permission into OpenClaw configuration
-without replacing unrelated entries. Standard setup uses the same noVNC
-full-browser viewer for private owner conversations and authorized groups/channels;
-channel authorization does not choose a different viewer. Setup is a local
-operator command; a chat agent cannot invoke it through `browser_handoff`.
+ClawHub currently serves **v0.3.5**. The hosted v0.4.1 SkillSpector execution
+failed before a verdict; that failure is not a passing scan or a security verdict.
+The older published package can be selected explicitly with
+`openclaw plugins install clawhub:@pengying/clawser@0.3.5 --accept-capabilities`,
+but it does not provide this guide's v0.5.0 CDP-default behavior.
 
-Follow setup’s printed activation/reload instructions. After controller
-maintenance, let an active owner turn settle, then run:
+## Existing browser connection
+
+Default setup reuses OpenClaw's configured default browser connection. This is
+not automatically the Chrome profile used for everyday OS browsing. Configure
+an existing Chromium connection with an explicit loopback HTTP CDP origin and
+`attachOnly=true`, then keep that browser running. For example, this **host
+browser configuration** describes a connection that must already exist:
+
+```json
+{
+  "browser": {
+    "defaultProfile": "existing",
+    "profiles": {
+      "existing": {
+        "driver": "openclaw",
+        "engine": "chromium",
+        "attachOnly": true,
+        "cdpUrl": "http://127.0.0.1:19222"
+      }
+    }
+  }
+}
+```
+
+The name and port are examples; use the operator's actual configured connection.
+A CDP origin cannot contain credentials, paths, queries or fragments. It must
+match any configured CDP port. Custom MCP connection overrides are unsupported.
+Setup verifies the Chromium `/json/version` endpoint. It never launches Chrome,
+creates a Chrome user-data directory, copies cookies, guesses ports or falls
+back to another browser. Missing or incompatible connections fail with guidance.
+
+To select another existing connection and make it the OpenClaw default:
+
+```sh
+openclaw clawser setup --browser-profile existing --dry-run
+openclaw clawser setup --browser-profile existing
+openclaw clawser doctor
+```
+
+This selects an OpenClaw connection; it does not create a browser profile on disk.
+Setup replaces Clawser's share mappings with that one selected connection,
+disables desktop/Funnel mode, configures the authenticated Cloudflare viewer and
+preserves unrelated settings. It downloads cloudflared 2026.10.4 with a pinned
+SHA-256 checksum, then reloads the plugin. It does not own the Chrome process.
+
+The default private setup directory is
+`${OPENCLAW_STATE_DIR:-~/.openclaw}/clawser-cdp`, containing its ownership receipt
+(`setup.json`) and verified `bin/cloudflared`. Runtime tunnel state is kept under
+OpenClaw's private `browser-handoff` state. Keep receipts private and intact.
+Do not repurpose an old desktop state directory for CDP setup.
+
+## Activation and doctor
+
+Follow setup's printed activation/reload instructions, then run:
 
 ```sh
 openclaw plugins reload browser-handoff --wait
 openclaw clawser doctor
 ```
 
-Before resuming browser work, ask the agent in its normal private owner session
-to invoke `browser_handoff` with `action=tabs` and `profile=handoff`. Confirm the
-expected profile’s tabs are available. A healthy service or controller alone
-does not prove the current plugin generation has reconnected. Keep browser work
-paused if this session-level check fails.
+Managed CDP doctor is read-only. It checks prerequisites, receipt ownership,
+pinned cloudflared SHA-256 and executable permissions, the current profile/CDP
+binding, Chromium reachability, local viewer CSS and the public tunnel receipt
+and CSS endpoint. It reports the selected profile and CDP origin. A healthy
+browser alone does not prove the current plugin generation has reconnected.
+Before browser work, ask the verified owner session to call `browser_handoff`
+with `action=tabs`; confirm the returned profile and expected task tab.
 
-If the plugin CLI route is unavailable before activation, locate the installed
-plugin directory with `openclaw plugins inspect browser-handoff`, then run its
-standalone entry point:
+Every ordinary browser call must use `target: "host"` and the returned profile.
+Use the raw target ID from the tab list, never an OpenClaw display label like
+`t1`. Startup/profile-management actions and sandbox, node, user-profile,
+endpoint or MCP routing escapes are unavailable. Missing native APIs or current
+configuration drift fail closed.
+
+If plugin CLI registration is unavailable before activation, locate its directory
+with `openclaw plugins inspect browser-handoff` and use the installed entry point:
 
 ```sh
 node /absolute/path/to/installed-plugin/bin/clawser.mjs setup --dry-run
@@ -78,252 +123,284 @@ node /absolute/path/to/installed-plugin/bin/clawser.mjs setup
 node /absolute/path/to/installed-plugin/bin/clawser.mjs doctor
 ```
 
-Replace the example path with the reported installed location. Developer source
-installation is described in [CONTRIBUTING.md](../CONTRIBUTING.md).
+Replace the example path with the inspected installation location. This does not
+replace the native capability-acceptance step. Developer installation is in
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Release archive alternative
 
-Download `pengying-clawser-0.4.2.tgz` and `SHA256SUMS` from the
-[v0.4.2 release](https://github.com/pengying/clawser/releases/tag/v0.4.2) into the
-same directory, then:
+Once published, download `pengying-clawser-0.5.0.tgz` and `SHA256SUMS` from the
+[v0.5.0 release](https://github.com/pengying/clawser/releases/tag/v0.5.0) into the
+same directory:
 
 ```sh
 sha256sum --check SHA256SUMS
-openclaw plugins install ./pengying-clawser-0.4.2.tgz --force --accept-capabilities
+openclaw plugins install ./pengying-clawser-0.5.0.tgz --force --accept-capabilities
 openclaw clawser setup
 openclaw clawser doctor
 ```
 
-The archive contains plugin/runtime source and browser viewer assets. Setup
-fetches noVNC/cloudflared and builds the browser image separately. It does not
-contain your browser profile or a prebuilt browser binary. Checksums verify the
-archive against the published checksum file; obtain both from the intended
-release.
+The archive contains plugin/runtime source and viewer assets, not your browser
+profile, a prebuilt browser or downloaded cloudflared/noVNC. Obtain the archive
+and checksums from the intended release. Checksums verify against that published
+file; they are not an independent publisher signature.
 
-## Options and persistent state
+## Setup options
 
 ```sh
 openclaw clawser setup --help
 openclaw clawser doctor --help
 ```
 
-| Setup option | Default | Purpose |
+| Option | CDP default | Purpose |
 | --- | --- | --- |
-| `--dry-run` | Off | Show the plan without provisioning or changing configuration |
-| `--state-dir PATH` | `${OPENCLAW_STATE_DIR:-~/.openclaw}/clawser` | Private setup/controller data and verified downloads |
-| `--browser-profile NAME` | `handoff` | Dedicated OpenClaw browser profile |
-| `--port PORT` | `19410` | Loopback viewer listener |
+| `--dry-run` | Off | Validate and show the plan without changing files, downloads, services or configuration |
+| `--state-dir PATH` | `${OPENCLAW_STATE_DIR:-~/.openclaw}/clawser-cdp` | Private CDP receipt and verified download |
+| `--browser-profile NAME` | Existing OpenClaw default | Select an existing connection; setup also makes it default |
+| `--port PORT` | Existing plugin port, otherwise `18796` | Loopback viewer listener |
+| `--novnc` | Off | Explicitly provision or maintain the owned Docker desktop |
+
+Use the same custom state directory for setup and doctor. A first setup rejects
+a busy viewer port. A repeat run permits the busy port only with a completed
+matching receipt, verified binary, current matching configuration and healthy
+local viewer. A public tunnel outage does not prevent that local repeat-run
+check; doctor still reports public readiness failure. Do not delete receipts or
+adopt an unrelated listener to bypass a conflict.
+
+## Optional noVNC desktop
+
+Use this when the task needs full browser UI, automatic popup switching, native
+OS dialogs or remote system clipboard access. It shares the entire dedicated
+profile, including every tab and dialog; it does not move the current tab or
+cookies from another browser. Group/private authorization does not choose the
+backend.
+
+The host additionally needs local Docker at `unix:///var/run/docker.sock`, a
+working user systemd session, `flock`, `tar`, and outbound access for Docker/Debian
+builds and noVNC. Remote Docker contexts are unsupported. The browser runtime
+has a 3 GiB memory limit and 512 MiB shared memory; allow space for the image build.
+
+```sh
+openclaw clawser setup --novnc --dry-run
+openclaw clawser setup --novnc
+openclaw clawser doctor --novnc
+```
+
+This path downloads checksum-pinned cloudflared 2026.10.4 and noVNC 1.7.0, builds
+the sandboxed Chromium image, installs a private user controller service and
+merges its dedicated `handoff` browser connection. The first image build can take
+several minutes. The container is created lazily on the first browser/handoff
+operation. Setup normally makes `handoff` the default; `--no-default-profile`
+keeps the previous default, and the task must select the returned desktop profile
+explicitly. noVNC never automatically falls back to CDP.
+
+| noVNC option | Default | Purpose |
+| --- | --- | --- |
+| `--state-dir PATH` | `${OPENCLAW_STATE_DIR:-~/.openclaw}/clawser` | Desktop ownership, controller configuration and downloads |
+| `--browser-profile NAME` | `handoff` | Owned dedicated OpenClaw browser connection |
+| `--port PORT` | `19410` | Loopback controller/viewer listener |
 | `--cdp-port PORT` | `18812` | Loopback Chromium endpoint |
 | `--vnc-port PORT` | `59092` | Loopback VNC endpoint |
-| `--container-name NAME` | `openclaw-handoff-desktop` | Owned Docker desktop name |
-| `--no-default-profile` | Off | Keep the current OpenClaw default browser profile |
+| `--container-name NAME` | `openclaw-handoff-desktop` | Owned Docker container identity |
+| `--no-default-profile` | Off | Preserve the current OpenClaw default |
 
-Use the same `--state-dir` for setup and doctor when customizing it. Keep the
-same OpenClaw state/config environment for installation, setup and later
-maintenance. Choose unused ports and a distinct container name for a separate
-installation. Do not point a new state directory at an existing desktop container
-or profile volume.
+`--cdp-port`, `--vnc-port`, `--container-name` and `--no-default-profile` require
+`--novnc`. Doctor detects enabled desktop mode, but explicit `--novnc` is useful
+when inspecting the original desktop while CDP is enabled. Repeat custom options.
 
-Setup makes `handoff` the default browser profile unless
-`--no-default-profile` is supplied. That profile has all of its own tabs, cookies,
-logins and dialogs. Existing headless tabs, unfinished forms and personal browser
-cookies are not transferred into the desktop. Start the task in the `handoff`
-profile, or return to its original browser to preserve work already in progress.
-Keep secrets out of files intended for sharing.
+Desktop state includes `setup.json`, `controller.json`, `bin/`, `vendor/` and
+controller socket/ledger/runtime state under `state/`. Its user unit is
+`clawser-desktop-<state-directory-hash>.service`; its profile volume is normally
+`openclaw-handoff-desktop-profile`. Preserve both state and volume. Do not point
+a new receipt at an existing container or delete receipts to evade ownership.
+Done, expiry and controller stop keep the browser/profile. Restarting the
+controller does not renew or restore invitations.
 
-Private setup files include `setup.json`, `controller.json`, verified downloads
-under `bin/` and `vendor/`, and controller socket/ledger/runtime state under
-`state/`. The user service is named
-`clawser-desktop-<state-directory-hash>.service`; setup and doctor identify the
-specific instance. The dedicated browser profile is stored in a Docker volume,
-normally `openclaw-handoff-desktop-profile`. Both the private state directory and
-the profile volume matter for recovery. Do not delete ownership receipts to work
-around a conflict.
+## Switching backends
 
-Done, disconnect and invitation expiry close viewer access while preserving the
-browser/profile. Stopping the controller service also leaves Chromium’s container
-and profile in place. A service restart does not renew or restore old invitations.
-The browser container is created lazily on the first browser/handoff operation;
-it may not exist yet immediately after setup.
+Finish handoffs and pause browser work before switching. There is no transfer of
+tabs, cookies, logins, dialogs or unfinished forms between browsers.
+
+To switch from an owned desktop to CDP, first select an eligible existing
+OpenClaw connection with `setup --browser-profile NAME`. Use the separate CDP
+state directory. CDP setup sets `desktop.enabled=false` while preserving its
+stored desktop identity. This bit change does not stop, adopt or delete Docker
+resources or volumes. Stop an unused owned desktop separately after verifying
+its identity, if desired.
+
+To return to that desktop, run `setup --novnc --dry-run`, then `setup --novnc`
+using its **original installation path, receipt/state directory, profile, ports,
+container name and default-profile choice**. For an untouched default instance:
+
+```sh
+openclaw clawser setup --novnc --state-dir "$HOME/.openclaw/clawser" --dry-run
+openclaw clawser setup --novnc --state-dir "$HOME/.openclaw/clawser"
+openclaw clawser doctor --novnc --state-dir "$HOME/.openclaw/clawser"
+```
+
+Substitute the original state path if `OPENCLAW_STATE_DIR` or options differed.
+Only a matching original owned desktop can be reused. Changing package source or
+installation path can break receipt identity; there is no automatic cross-source
+ownership migration. For a manually managed older noVNC deployment, retain its
+original operator configuration and desktop identity and explicitly enable its
+original `desktop.enabled` setting; a new setup receipt cannot adopt it. Reload,
+run the applicable diagnostics and check the owner-session tabs before resuming.
 
 ## Upgrade
 
-1. Finish active handoffs and pause browser work. Record the current release,
-   setup options, private state location and service name. Back up the private
-   configuration/state and persistent profile using a consistent Docker-volume
-   backup procedure before changing versions.
-2. Disable the plugin and stop its controller before replacing plugin files:
+1. Finish handoffs and pause browser work. Record the release, installation
+   source/path, state/config environment, setup options and browser connection.
+   Back up private configuration/state; back up a noVNC profile with a consistent
+   Docker-volume procedure. Existing CDP browser data remains operator-owned.
+2. Disable the plugin before replacing files. For noVNC also stop its exact
+   controller unit:
 
    ```sh
    openclaw plugins disable browser-handoff
    systemctl --user stop 'clawser-desktop-<state-directory-hash>.service'
    ```
 
-   Replace the unit placeholder with the exact name reported for your instance.
-3. Keep the current installation source. For a ClawHub installation, install the
-   reviewed version with `openclaw plugins install
-   clawhub:@pengying/clawser@0.3.5 --force --accept-capabilities --no-enable`.
-   For a Git installation, use `openclaw plugins install
-   git:github.com/pengying/clawser@v0.4.2 --force --accept-capabilities --no-enable`.
-   Replace the version when upgrading. Changing installation source can change
-   durable paths and requires an operator migration. While disabled, use its
-   standalone `bin/clawser.mjs` entry point shown above to run `setup --dry-run`
-   and then `setup`. Use the **same state directory, profile, ports and container
-   name** as the existing installation. Repeat `--no-default-profile` if you used
-   it before.
-4. Follow the printed activation instructions, enable the plugin if needed, run
-   doctor and complete the owner-session `tabs` check above before resuming.
+   The systemd command is only for noVNC; substitute the reported unit.
+3. Keep the same installation source/path. Once the tag is published, a Git
+   upgrade can use `openclaw plugins install
+   git:github.com/pengying/clawser@v0.5.0 --force --accept-capabilities --no-enable`.
+   While disabled, run the installed standalone setup entry point with
+   `--dry-run`, then setup, retaining the mode and original state/options.
+   noVNC requires `--novnc`; plain setup chooses CDP.
+4. Follow activation guidance and use `--accept-capabilities` if enabling through
+   a native enable command. Reload, run doctor and complete the owner-session
+   tabs check before resuming browser work.
 
-Keep the original state/profile intact if an upgrade reports an ownership or
-configuration conflict. Do not repeatedly force replacement or delete receipts.
-Review the error and restore the previous known release if appropriate. A release
-archive rollback does not roll back browser profile changes or remote website
-actions; check release notes for state-format compatibility.
+Preserve the original state/profile on conflicts. Do not repeatedly force
+replacement or delete ownership evidence. Restore a known release when
+appropriate. Rollback does not undo website actions or browser profile changes;
+check state-format compatibility first.
 
 ## Disable or uninstall while keeping data
 
-Finish the current handoff and pause automation first. Disable the plugin, then
-disable and stop the exact controller unit reported by setup/doctor:
+Finish handoffs and pause automation, then disable the plugin:
 
 ```sh
 openclaw plugins disable browser-handoff
-systemctl --user disable --now 'clawser-desktop-<state-directory-hash>.service'
-```
-
-If `handoff` is the default browser profile, select another existing profile in
-OpenClaw before doing unrelated browser work. Disabling the plugin does not
-change that browser selection.
-
-An already running browser container remains running after the controller stops.
-To stop it as well, verify its exact container identity against the private
-runtime ownership receipt, then stop that container. Skip this step if the
-installation has not started a browser yet. For the default owned container:
-
-```sh
-docker stop --time 8 openclaw-handoff-desktop
-```
-
-Stopping keeps the profile volume. Use your configured name for a custom
-installation, and do not stop a container whose ownership does not match.
-
-To remove the plugin package, inspect OpenClaw’s removal plan and then uninstall:
-
-```sh
 openclaw plugins uninstall browser-handoff --dry-run
 openclaw plugins uninstall browser-handoff
 ```
 
-Keep the private state directory, the disabled unit and the dedicated Docker
-profile volume if you want to recover the session later. Uninstalling the plugin
-does not remove those external resources. Avoid Docker volume pruning and
-profile-directory deletion. Reinstallation with the same state and setup options
-can reuse the owned desktop; follow activation and doctor checks again.
+CDP disable/uninstall does not own, stop or delete Chrome or its tabs/cookies.
+Keep private receipts and operator browser data for recovery. Select an intended
+OpenClaw default before unrelated browser work; disabling does not change it.
 
-## Recovery and troubleshooting
+For noVNC, also disable and stop the exact controller unit:
 
-- **Command missing:** inspect the plugin installation and use the standalone
-  `bin/clawser.mjs` path above until the plugin CLI registration is available.
-- **Docker/systemd prerequisite failure:** run doctor as the OpenClaw user and
-  fix that user’s Docker access or user service session. Do not solve it by
-  running setup as root.
-- **Port, configuration or ownership conflict:** compare the requested setup
-  options with the existing private receipt. Preserve the existing resources and
-  choose a separate identity for an additional installation.
-- **Tunnel not ready:** check host DNS and outbound HTTPS access to Cloudflare.
-  First-link startup allows up to 90 seconds. Do not expose local CDP/VNC or the
-  Gateway as an alternative public endpoint.
-- **Recovery required after uncertain input:** keep browser automation paused.
-  Inspect the owned browser and controller, follow the reported recovery guidance
-  and perform a fresh owner-session observation before issuing more input. Do
-  not clear the ledger or bypass the gate to make the warning disappear.
-- **After a controller restart:** reload `browser-handoff --wait`, run doctor and
-  repeat the owner-session `tabs` check. Old links are not a recovery mechanism.
+```sh
+systemctl --user disable --now 'clawser-desktop-<state-directory-hash>.service'
+```
 
-When reporting an issue, include versions, the redacted doctor result and the
-error text. Do not attach private state, browser profile data, signed-in
-screenshots, invitation URLs or viewer credentials. See [SECURITY.md](../SECURITY.md)
-for vulnerability reporting.
+The browser container may remain running. To stop it, first verify its exact
+identity against the private runtime receipt. For a matching default container,
+`docker stop --time 8 openclaw-handoff-desktop` keeps the profile volume. Skip this
+if no browser was started. Keep the private state, disabled unit and profile
+volume; plugin uninstall does not remove those resources. Avoid volume pruning.
+Reuse requires the original matching installation identity and options.
 
-## Existing-browser CDP and owner-requested groups
+## Owner-requested groups
 
-This is an explicit compatibility mode using the selected-tab viewer, rather
-than the standard noVNC full-browser viewer. Desktop setup does not automatically
-fall back to CDP if the desktop is unavailable. Switching modes does not transfer
-tabs, logins or unfinished forms between browsers.
-
-Use this mode to share a selected tab from an already-running browser without
-running desktop setup. Configure the plugin entry under
-`plugins.entries.browser-handoff.config`, retaining the browser's existing
-loopback CDP origin. Example values below are placeholders, not personal IDs:
+Group access defaults to `ownerGroupSessions: []` in both modes. Configure exact
+trusted base session keys under `plugins.entries.browser-handoff.config`, for
+example:
 
 ```json
 {
-  "profiles": { "existing": "http://127.0.0.1:19222" },
-  "port": 18796,
-  "cloudflare": {
-    "enabled": true,
-    "binaryPath": "/opt/cloudflared/bin/cloudflared",
-    "startupTimeoutMs": 90000
-  },
   "ownerGroupSessions": [
     "agent:example:googlechat:channel:0123456789abcdef01234567"
   ]
 }
 ```
 
-Install and verify the trusted `cloudflared` binary as the operator. The optional
-`cloudflare` block defaults to disabled; its startup timeout defaults to 90000 ms
-and accepts 1000–180000 ms. It uses the service's private stable state directory
-and bound loopback viewer port. Tunnel allocation warms in the background after
-the listener starts, so plugin activation does not wait for network readiness.
-Creating a link awaits that readiness and rechecks the current owner invocation.
-It probes the harmless `/assets/style.css` asset;
-the desktop controller retains `/browser/assets/probe.css`. Only a ready public
-HTTPS viewer origin is published. A tunnel failure removes that origin, stops
-new invitations and retires existing viewer access; normal browser fencing still
-applies. Run only one dynamic public transport: Cloudflare and Funnel cannot
-both be enabled. A fixed `publicBaseUrl` is used when neither dynamic transport is
-enabled. No mode may publicly proxy CDP, the Gateway or raw VNC.
+The value is a placeholder, not a personal identifier. Copy actual keys from
+trusted operator session metadata, without wildcards or thread entries. Google
+Chat permits its base's `:thread:<24 lowercase hex>` suffix; other channels match
+the base exactly. Never infer authority from message text, names or email.
 
-Group access defaults to disabled (`ownerGroupSessions: []`) in both existing-tab
-and desktop modes. Copy each exact group/channel base session key from trusted
-operator session metadata. Wildcards and thread entries are invalid. A Google
-Chat base also admits its bridge's `:thread:<24 lowercase hex>` suffix, never an
-arbitrary suffix or another group's base. Other channels match the base exactly.
-Do not infer authorization from a message's text, display name, email or tool
-parameters.
+Enable only with authenticated native per-message sender identity:
+`senderIsOwner=true`, trusted `requesterSenderId` and `nativeChannelId`, and a
+current nonsandboxed V2 invocation with valid session key/incarnation. Native
+user turns may omit provenance (the SDK external-user default) or explicitly
+use `kind=external_user`. Explicit automated provenance, subagents, cron, hooks
+and heartbeat turns remain denied. A shared-admin HTTP agent proxy does not
+establish per-sender ownership. Ordinary browser tools also require a complete
+current native verified owner invocation.
 
-Enable this only after the channel ingress passes authenticated per-message
-sender identity through the native OpenClaw SDK. The host must supply
-`senderIsOwner=true`, nonempty trusted `requesterSenderId` and `nativeChannelId`,
-and a current nonsandboxed V2 invocation with valid `sessionKey` and `sessionId`.
-Native user turns may omit `inputProvenance` (the SDK's external-input default)
-or explicitly use `kind=external_user`. Explicit `inter_session` or
-`internal_system` provenance and automation markers are denied. A shared-admin
-HTTP `/v1/chat/completions` agent proxy assigns the proxy's authority, so it is
-unsuitable for this opt-in.
-Subagents, cron, hooks, heartbeat and other automated group turns remain denied.
-Private owner sessions retain their existing V2 continuation behavior.
+Only the owner's explicit request authorizes returning a link to that **same
+requesting group/thread**. Disclose that any member can claim its one-use bearer
+URL first. Other members cannot invoke browser tools or create, inspect, wait on
+or revoke handoffs. Ownership remains bound to the requesting session and
+incarnation. Do not post links elsewhere, in logs or durable memory.
 
-Different authorized chats can request handoffs, but each controller/profile
-allows one active invitation. A second request receives a busy response; requests
-are not queued. Status and revocation remain bound to the requesting owner
-session. Separate dedicated controllers, such as personal and family instances,
-operate independently. During human control, the normal browser-tool gate pauses
-agent browser calls for that controller.
+Browser/plugin configuration drift, including changes to `ownerGroupSessions`,
+retires old shares and denies further access until restart/reconciliation.
+Checks run on requests/input/frames, with one-second idle polling for noVNC.
 
-The verified owner may explicitly request a link and have it returned in that
-same requesting group/thread. Disclose that any member seeing it can redeem the
-one-use bearer invitation; the first claiming browser wins. Other members cannot
-request, inspect, wait on or revoke links through `browser_handoff`. Ownership
-stays bound to the original session key and incarnation. Normal one-viewer,
-expiry, Done, session cleanup and input-gate rules remain unchanged. Do not post
-links in other groups, logs or durable memory. Remove an allowlist entry to deny
-further tool calls there; already issued bearer links keep their normal lifetime
-until revoked, Done, disconnection, session end or plugin shutdown.
+CDP permits invitations to different tabs (up to 100), one per same tab and one
+human control session per Gateway. noVNC permits one active invite per controller.
+Competing control is busy, never queued. Use distinct browser connections for
+personal and family Gateways; one Chrome instance across Gateways is unsupported.
+The gate covers normal OpenClaw browser tools, not shell commands or independent
+CDP/manual desktop operators.
+
+## Manual CDP transport configuration
+
+For operator-managed connections without managed setup, leave `desktop.enabled`
+false or absent. The default eligible host connection is included automatically;
+optional plugin `profiles` mappings must exactly match eligible host connections.
+A manually installed trusted cloudflared can be configured with:
+
+```json
+{
+  "desktop": { "enabled": false },
+  "port": 18796,
+  "cloudflare": {
+    "enabled": true,
+    "binaryPath": "/opt/cloudflared/bin/cloudflared",
+    "startupTimeoutMs": 90000
+  }
+}
+```
+
+Install/verify the binary as the operator. `binaryPath` must be absolute.
+Cloudflare is mutually exclusive with Funnel; its startup timeout accepts
+1000–180000 ms. Tunnel allocation warms after the listener starts; invitation
+creation waits for public DNS/asset readiness. A tunnel failure retires viewer
+access. Never expose CDP, the Gateway or raw VNC. Managed CDP doctor requires its
+own setup receipt and is not an adoption tool for manual installations.
+
+## Recovery and troubleshooting
+
+- **Connection unavailable:** keep the configured browser running and verify its
+  actual attach-only loopback connection. Do not guess ports or launch/copy a
+  replacement browser to bypass setup.
+- **Command missing:** inspect the plugin and use its installed standalone CLI
+  until native CLI registration is active.
+- **Docker/systemd prerequisite failure:** these apply only to noVNC. Fix the
+  OpenClaw user's access/session; do not run setup as root.
+- **Port, configuration or ownership conflict:** compare options and receipts.
+  Preserve resources and choose a separate identity for a new installation.
+- **Tunnel not ready:** check DNS/outbound HTTPS. First-link startup allows up to
+  90 seconds. Never expose CDP/VNC or the Gateway as a replacement endpoint.
+- **Recovery required or uncertain input:** keep automation paused. Inspect the
+  original browser/controller and follow the reported recovery guidance. Do not
+  retry/replay input, clear ledgers, bypass the gate or treat another link as
+  recovery. Take a fresh gated observation only after safe handback.
+- **After maintenance:** reload `browser-handoff --wait`, run doctor and repeat
+  the owner-session tabs check. Old invitations are not recovery mechanisms.
+
+Issue reports should contain versions, redacted doctor output and error text,
+not private state, browser data, signed-in screenshots or invitation credentials.
+See [SECURITY.md](../SECURITY.md) for vulnerability reporting.
 
 ## Operator reconciliation after a failed control handback
 
+This offline helper is for the owned noVNC desktop, not CDP handoffs.
 If a control handoff reports `recovery_required`, keep browser automation paused.
 An operator can reconcile one failed lease when the supervisor has already
 retired its viewer and retained a valid input-fence receipt. This preserves the

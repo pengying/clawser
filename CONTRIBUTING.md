@@ -1,6 +1,6 @@
 # Contributing
 
-Use Node.js 24.16+ or 26.1+. Work on disposable browser profiles and synthetic pages.
+Use Node.js >=24.16 <25 or >=26.1. Work on disposable browser profiles and synthetic pages.
 Never test a handoff against someone’s signed-in personal browser or publish live
 invitation links, profile contents or private deployment artifacts.
 
@@ -14,9 +14,11 @@ npm run check:package
 ```
 
 The unit suite includes browser fixtures. Set `CHROME_BIN` to a Chrome/Chromium
-executable; a few fixture tests skip when Chrome is absent, while the native
-picker integration requires it. `npm run test:runtime` exercises the Docker
-adapter and readiness logic with test doubles and does not start containers.
+executable; a few fixture tests skip when Chrome is absent, while native picker
+and CDP keyboard integration require it. The CDP fixtures cover focused-frame
+keyboard authority, stale capability revocation and uncertain-input handling.
+`npm run test:runtime` exercises the Docker adapter and readiness logic with test
+doubles and does not start containers.
 
 For the real noVNC/RFB pointer fixtures, download the pinned source archive:
 
@@ -40,6 +42,17 @@ npm run test:live
 node test/native-browser.mjs
 READINESS_MODES=headless node test/renderer-readiness.mjs
 ```
+
+For the trusted-tool-policy contract, run against an actual supported OpenClaw
+distribution (native fixtures cover 2026.10.4 and 2026.10.7):
+
+```sh
+node test/native-browser-policy-fixture.mjs /absolute/path/to/openclaw/dist
+```
+
+This fixture uses isolated state and checks native owner admission and route
+confinement. Keep browser tests disposable; do not enable or reload a live Gateway
+for routine validation.
 
 These checks create temporary profiles and localhost fixtures. Screenshots and
 results go to `test-artifacts/`, which must stay out of commits and packages.
@@ -67,28 +80,48 @@ names, state directories or profile volumes.
 ## Source installation
 
 The supported user path is the tagged Git install in [the README](README.md).
-For development, create a local archive and install that archive explicitly:
+For development, create a local archive and install its actual filename explicitly
+(replace `VERSION` with the packed version):
 
 ```sh
 npm ci --ignore-scripts
 npm test
 npm run test:runtime
 npm pack --ignore-scripts
-openclaw plugins install ./pengying-clawser-0.4.2.tgz --force --accept-capabilities
+openclaw plugins install ./pengying-clawser-VERSION.tgz --force --accept-capabilities
 openclaw clawser setup --dry-run
 ```
 
-Run setup against a separate OpenClaw state/config and unused ports if a working
-deployment already exists. Installing a plugin, running setup, enabling it and
-reloading a live Gateway change that deployment; tests and packing do not.
+Default setup attaches to an existing configured attach-only Chromium CDP
+connection. Create only disposable development connections and use separate
+OpenClaw state/config and unused viewer ports. `--browser-profile` selects an
+existing connection; setup must not launch Chrome, create a Chrome user-data
+directory or copy cookies. Docker desktop provisioning requires explicit
+`setup --novnc`; its additional tools and resources are not CDP prerequisites.
+Run `doctor` with the same mode/state after setup. Installing a plugin, running
+setup, enabling it and reloading a live Gateway change that deployment; tests and
+packing do not.
 
 ## Changes and releases
 
 Keep `browser-handoff` as the plugin ID and `browser_handoff` as the agent tool
 unless an explicit compatibility migration is planned. Setup is a local operator
 command, never an agent tool with general shell or administrative authority.
-Preserve unrelated OpenClaw configuration and require matching ownership before
-reusing persistent service or Docker resources.
+Preserve unrelated OpenClaw configuration and require matching original receipt,
+installation source/path and identity before reusing persistent service or Docker
+resources. Flipping `desktop.enabled` must not adopt or delete them. Keep distinct
+browser connections for separate Gateways; there is no cross-process human-control
+coordination for a shared Chrome.
+
+The plugin declares a trusted native browser policy as well as its handoff tool.
+Install, update and enable only through supported native OpenClaw commands with
+`--accept-capabilities`; never manufacture acknowledgement configuration. Changes
+must preserve native verified-owner checks on ordinary browser tools and handoff,
+`target="host"` confinement, current-config checks, and fail-closed admission.
+Keep CDP handback (`ended` without gate/recovery fault, then a fresh gated
+snapshot) distinct from noVNC's mandatory `resumeAllowed=true` contract. Frame
+keyboard authority is explicit manual focused-frame input, not verified autofill;
+never collect field values in passive metadata or replay uncertain input.
 
 For a release, update the package version and changelog, run the checks above,
 inspect `npm pack --dry-run` and review the public files for credentials, private
