@@ -222,6 +222,17 @@ a new receipt at an existing container or delete receipts to evade ownership.
 Done, expiry and controller stop keep the browser/profile. Restarting the
 controller does not renew or restore invitations.
 
+### For agents installing Clawser
+
+This applies once the host display backend is enabled. Today's Docker desktop
+needs no host display packages.
+
+1. Run `openclaw clawser setup --novnc --dry-run` first.
+2. If it prints an install command, give it to the owner verbatim and wait.
+   Never run `sudo` or a system package manager yourself.
+3. Rerun setup after the owner confirms the install.
+4. Never install a browser.
+
 ## Switching backends
 
 Finish handoffs and pause browser work before switching. There is no transfer of
