@@ -43,6 +43,27 @@ export class EditingBridge {
   }
 }
 
+// Explicit human opt-in. The token authorizes the currently focused opaque
+// frame, not an editable-field identity. Null DOM focus is expected here.
+export class NativeKeyboardBridge extends EditingBridge {
+  constructor({ emit, reject }) {
+    super({ emit: ({ focusToken, ...event }) => emit({ ...event, kind: 'nativeEdit', keyboardToken: focusToken }), reject });
+  }
+  confirm(id, keyboard) {
+    if (!this.active || id !== this.confirmationId) return;
+    if (!keyboard || keyboard.document !== this.field.document || !/^[a-f0-9]{32}$/.test(keyboard.token || '')) {
+      this.fail('The cross-origin frame changed. Tap it and choose Keyboard again.'); return;
+    }
+    this.token = keyboard.token;
+    const pending = this.pending; this.pending = []; this.characters = 0;
+    for (const edit of pending) this.send(edit);
+  }
+  observe(map) {
+    if (this.active && (map.document !== this.field.document || this.token && map.keyboard?.token !== this.token))
+      this.fail('The cross-origin frame changed. Tap it and choose Keyboard again.');
+  }
+}
+
 export class TextComposer {
   constructor(emit, reject = () => {}) { this.emit = emit; this.reject = reject; this.clear(); }
   clear() { this.composing = false; this.trailingComposition = null; }

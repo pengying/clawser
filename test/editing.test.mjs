@@ -105,3 +105,17 @@ test('composition final beforeinput insertion is not committed again', () => {
   composer.beforeInput({ inputType: 'insertText', data: '本', cancelable: true, preventDefault() {} });
   assert.deepEqual(edits, [['insert', '日本'], ['insert', '本']]);
 });
+
+test('explicit manual keyboard buffers until its separate token ACK and survives focus-null metadata', async () => {
+  const { NativeKeyboardBridge } = await import('../public/editing.js');
+  const sent = [], errors = [];
+  const bridge = new NativeKeyboardBridge({ emit: event => sent.push(event), reject: error => errors.push(error) });
+  bridge.start({ document: 'doc' }, 1); bridge.edit('insert', 'manual 😀');
+  assert.deepEqual(sent, []);
+  bridge.confirm(1, { document: 'doc', token: 'a'.repeat(32) });
+  assert.deepEqual(sent, [{ kind: 'nativeEdit', keyboardToken: 'a'.repeat(32), operation: 'insert', text: 'manual 😀' }]);
+  bridge.observe({ document: 'doc', focus: null, keyboard: { document: 'doc', token: 'a'.repeat(32) } });
+  bridge.edit('backspace'); assert.equal(sent.length, 2); assert.equal(errors.length, 0);
+  bridge.observe({ document: 'doc', focus: null, keyboard: null });
+  bridge.edit('insert', 'stale'); assert.equal(sent.length, 2); assert.equal(errors.length, 1);
+});

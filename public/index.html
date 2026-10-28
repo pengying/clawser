@@ -12,7 +12,7 @@
       <div class="viewport"><canvas id="screen" width="1" height="1" role="img" aria-label="Live remote browser view"></canvas><p id="loading">Connecting to the browser…</p></div>
       <div class="toolbar">
         <button id="control" class="primary" disabled>Take control</button><button id="release" aria-label="Release control and watch" hidden>Watch</button>
-        <button id="keyboardButton" hidden>Keyboard</button>
+        <button id="keyboardButton" title="For a cross-origin frame, this enables typing at its current focus, like a physical keyboard. Navigation or focus-changing keys end permission. The page can change its focus between validation and typing." hidden>Keyboard</button>
         <button id="menu" aria-controls="panel" aria-expanded="false">More</button>
         <button id="done" class="quiet" aria-label="Done and close invitation">Done</button>
       </div>
@@ -22,7 +22,7 @@
       <div class="zoom-controls" aria-label="View zoom"><button id="zoomOut" aria-label="Zoom out">−</button><button id="zoomReset">Fit width</button><button id="zoomIn" aria-label="Zoom in">+</button><button id="fullscreen" hidden>Full screen</button></div>
       <p class="small">Swipe to scroll or move a slider. Pinch to zoom; use two fingers to pan the enlarged view.</p>
       <div id="keyboard" class="keyboard" hidden>
-        <p class="small">Tap a text field to use your keyboard directly. Keyboard reopens the currently focused field. For a mouse-only draggable, enable Drag once before touching it.</p>
+        <p class="small">Tap fields to type. In cross-origin frames, tap a field then choose Keyboard. For a mouse-only draggable, enable Drag once before touching it.</p>
         <button id="dragMode" aria-pressed="false">Drag once</button>
         <div class="keys"><button data-key="Tab">Tab</button><button data-key="Enter">Enter ↵</button><button data-key="Backspace">⌫</button><button data-key="Escape">Esc</button><button data-key="Ctrl+A">Select all</button><button data-key="ArrowLeft">←</button><button data-key="ArrowRight">→</button></div>
       </div>

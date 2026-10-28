@@ -1,4 +1,4 @@
-import { EditingBridge, TextComposer } from '/assets/editing.js';
+import { EditingBridge, NativeKeyboardBridge, TextComposer } from '/assets/editing.js';
 import { NativePickerUI } from '/assets/picker.js';
 const $ = (id) => document.getElementById(id);
 const base = location.pathname.replace(/\/$/, '');
@@ -24,8 +24,10 @@ function status(message, error = false) {
 }
 function wipeProxies() { for (const proxy of proxies) { proxy.value = ''; proxy.blur(); } }
 const bridge = new EditingBridge({ emit: (event) => input(event), reject: (message) => { composer.clear(); wipeProxies(); status(message, true); } });
-const composer = new TextComposer((operation, text) => bridge.edit(operation, text), (message) => status(message, true));
-function clearTyping() { bridge.clear(); composer.clear(); wipeProxies(); }
+const nativeBridge = new NativeKeyboardBridge({ emit: (event) => input(event), reject: (message) => { composer.clear(); wipeProxies(); status(message, true); } });
+const typingBridge = () => nativeBridge.active ? nativeBridge : bridge;
+const composer = new TextComposer((operation, text) => typingBridge().edit(operation, text), (message) => status(message, true));
+function clearTyping() { bridge.clear(); nativeBridge.clear(); composer.clear(); wipeProxies(); }
 const pickerUI = new NativePickerUI({
   onApply(choice) {
     const descriptor = pickerUI.active;
@@ -77,13 +79,13 @@ for (const proxy of proxies) {
   proxy.addEventListener('paste', (event) => {
     if (composer.composing) return;
     const text = event.clipboardData?.getData('text/plain');
-    if (typeof text === 'string') { event.preventDefault(); bridge.edit('insert', text); resetProxy(proxy); }
+    if (typeof text === 'string') { event.preventDefault(); typingBridge().edit('insert', text); resetProxy(proxy); }
   });
   proxy.addEventListener('keydown', (event) => {
     if (event.isComposing || composer.composing) return;
-    if (event.key === 'Enter') { event.preventDefault(); bridge.edit('enter'); }
+    if (event.key === 'Enter') { event.preventDefault(); typingBridge().edit('enter'); }
     else if (['Tab', 'Escape', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) {
-      event.preventDefault(); bridge.key(event.key);
+      event.preventDefault(); typingBridge().key(event.key);
     }
   });
 }
@@ -117,8 +119,17 @@ document.addEventListener('pointerdown', (event) => {
 }, { capture: true });
 $('dragMode').onclick = () => { dragOnce = !dragOnce; $('dragMode').setAttribute('aria-pressed', String(dragOnce)); $('dragMode').textContent = dragOnce ? 'Drag enabled for next gesture' : 'Drag once'; };
 $('keyboardButton').onclick = () => {
-  if (!interactions?.focus || performance.now() - interactionsAt > 1500) { status('Tap a visible text field first.', true); return; }
-  const id = input({ kind: 'focus' }); beginTyping(interactions.focus, id);
+  if (!interactions?.document || performance.now() - interactionsAt > 1500) { status('Tap a visible text field first.', true); return; }
+  if (interactions.focus) {
+    const id = input({ kind: 'focus' }); beginTyping(interactions.focus, id); return;
+  }
+  // Only this explicit Keyboard action can request native typing for an opaque
+  // frame. A tap/focus-null metadata snapshot never activates this capability.
+  clearTyping(); clearPicker();
+  const id = input({ kind: 'nativeKeyboardOpen', document: interactions.document });
+  if (!id) return;
+  nativeBridge.start({ document: interactions.document }, id);
+  const proxy = $('text'); proxy.inputMode = 'text'; resetProxy(proxy); proxy.focus({ preventScroll: true });
 };
 $('fullscreen').hidden = !document.fullscreenEnabled;
 $('fullscreen').onclick = async () => {
@@ -201,7 +212,7 @@ function metadata(msg) {
   if (msg.url) $('url').textContent = msg.url;
   if (msg.interactions) {
     interactions = msg.interactions; interactionsAt = performance.now();
-    bridge.observe(interactions);
+    bridge.observe(interactions); nativeBridge.observe(interactions);
     if (pickerUI.active && (pickerUI.active.document !== interactions.document || pickerUI.active.token !== interactions.pickerFocus?.token)) clearPicker();
     update();
   }
@@ -283,6 +294,10 @@ function connect() {
         if (!latestInputTiming || acknowledged.id > latestInputTiming.id)
           latestInputTiming = { id: acknowledged.id, queueMs: acknowledged.queueMs, roundTripMs: performance.now() - acknowledged.sentAt };
         if (Object.hasOwn(msg, 'focus')) bridge.confirm(acknowledged.localId, msg.focus);
+        if (Object.hasOwn(msg, 'keyboard')) {
+          if (msg.keyboard) nativeBridge.confirm(acknowledged.localId, msg.keyboard);
+          else if (nativeBridge.active) clearTyping();
+        }
         if (Object.hasOwn(msg, 'picker')) confirmPicker(acknowledged.localId, msg.picker);
         flushInputs();
       }
