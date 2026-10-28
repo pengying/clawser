@@ -18,7 +18,7 @@ for (const required of [
   'SECURITY.md', 'CONTRIBUTING.md', 'docs/install.md',
   'src/cli.mjs', 'src/setup.mjs', 'src/desktop-plugin.mjs',
   'src/browser-config.mjs', 'src/browser-policy.mjs', 'src/browser-activation.mjs',
-  'src/cdp-setup.mjs', 'src/setup-activation.mjs', 'src/frame-keyboard.mjs',
+  'src/cdp-setup.mjs', 'src/setup-activation.mjs', 'src/frame-keyboard.mjs', 'src/host-deps.mjs',
   'bin/clawser.mjs', 'bin/desktop-controller.mjs',
   'public/probe.html', 'public/probe.js', 'public/probe.css',
   'skills/browser-handoff/SKILL.md', 'runtime/desktop/Dockerfile',
