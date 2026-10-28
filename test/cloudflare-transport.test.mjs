@@ -143,3 +143,13 @@ test('configured 90-second startup survives a 60-second negative TTL after alloc
   assert.equal(origins.size, 1);
   assert.equal(httpChecks, 1);
 });
+
+test('readiness keeps desktop default and supports only the harmless existing-browser asset', async t => {
+  const paths = [];
+  t.mock.method(globalThis, 'fetch', async url => { paths.push(new URL(url).pathname); return { ok: true, body: { async cancel() {} } }; });
+  const options = { binaryPath: '/fixture/cloudflared', stateDir: '/fixture/state' };
+  await new CloudflareTransport(options).probe('https://fixture.trycloudflare.com', AbortSignal.timeout(1000));
+  await new CloudflareTransport({ ...options, probePath: '/assets/style.css' }).probe('https://fixture.trycloudflare.com', AbortSignal.timeout(1000));
+  assert.deepEqual(paths, ['/browser/assets/probe.css', '/assets/style.css']);
+  for (const probePath of ['/json/version', '//evil.example/', '/s/token/']) assert.throws(() => new CloudflareTransport({ ...options, probePath }), /readiness/);
+});

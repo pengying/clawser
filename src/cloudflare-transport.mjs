@@ -18,12 +18,13 @@ function processCode(child) { return Number.isInteger(child.exitCode) ? 'EXIT_' 
 
 // Transport routing only. The viewer gateway remains responsible for auth.
 export class CloudflareTransport extends EventEmitter {
-  constructor({ binaryPath, stateDir, startupTimeoutMs = 60_000, spawnImpl = spawn, probeImpl, dnsProbeImpl } = {}) {
+  constructor({ binaryPath, stateDir, startupTimeoutMs = 60_000, spawnImpl = spawn, probeImpl, dnsProbeImpl, probePath = '/browser/assets/probe.css' } = {}) {
     super();
     if (!isAbsolute(binaryPath || '') || !isAbsolute(stateDir || '')) throw new Error('Cloudflare transport requires absolute binary/state paths');
+    if (!['/browser/assets/probe.css', '/assets/style.css'].includes(probePath)) throw new Error('Invalid public transport readiness asset');
     Object.assign(this, { binaryPath, stateDir, startupTimeoutMs, spawnImpl });
     this.probe = probeImpl || (async (origin, signal) => {
-      const response = await fetch(`${origin}` + '/browser/assets/probe.css', { signal, redirect: 'error' });
+      const response = await fetch(origin + probePath, { signal, redirect: 'error' });
       await response.body?.cancel();
       if (!response.ok) throw Object.assign(new Error('HTTP health response unsuccessful'), { code: 'HTTP_' + response.status });
       return true;

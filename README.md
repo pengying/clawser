@@ -71,9 +71,12 @@ login and form completion are manual human actions; support varies by site and
 phone. A phone’s native autofill or passkeys do not automatically transfer into
 the remote browser.
 
-An invitation is a **bearer credential**. Deliver it privately and do not put it
-in public chats, logs, issue reports or durable agent memory. One browser can
-redeem it, and only one viewer connection is allowed at a time. Reopening it in
+An invitation is a **bearer credential**. Deliver it privately by default. An
+operator can explicitly allow owner-requested delivery in the same requesting
+group/thread with `ownerGroupSessions`; any member of that group can claim the
+one-use link. Keep links out of other chats, logs, issue reports and durable agent
+memory. One browser can redeem it, and only one viewer connection is allowed at a
+time. Reopening it in
 the same browser can resume its valid viewer cookie; another browser needs a new
 invitation. Control always requires the explicit **Take control** button.
 
@@ -109,7 +112,11 @@ scope, and [runtime documentation](runtime/desktop/README.md) for technical deta
 ## Agent tool
 
 `browser_handoff` is available to a verified owner in private direct/main sessions.
-It is unavailable to groups, unidentified callers, sandboxes and background tasks.
+Groups are disabled by default. The operator may opt exact group/channel base
+session keys into `ownerGroupSessions`; only native verified owner turns with
+per-sender identity and external-user provenance may invoke it there. Nonowners,
+unidentified callers, sandboxes and automated group turns remain denied. A
+shared-admin HTTP agent proxy cannot establish per-sender owner authority.
 
 | Action | Parameters | Purpose |
 | --- | --- | --- |
@@ -120,9 +127,29 @@ It is unavailable to groups, unidentified callers, sandboxes and background task
 | `revoke` | `id` | End this owner session’s invitation |
 
 Use raw target IDs returned by `tabs`, not OpenClaw display labels such as `t1`.
-The bundled skill guides the agent through private delivery, waiting and a fresh
+The bundled skill guides the agent through authorized delivery, waiting and a fresh
 browser snapshot after handback. Best-effort completion notifications may help
 resume a dormant session; they do not guarantee recovery across process crashes.
+
+## Existing-browser mode and group opt-in
+
+To attach an already-running browser without creating a desktop/container, leave
+`desktop.enabled` absent or false and configure `profiles` with loopback CDP
+origins. Each invitation shares only the selected existing tab. Optional
+`cloudflare.enabled` starts an operator-installed `cloudflared` for the viewer;
+`binaryPath` must be absolute. It cannot run alongside `funnel.enabled`. The
+service publishes its HTTPS origin only after allocation, DNS and asset readiness
+checks, and invalidates invitations if its owned tunnel fails. Existing browser
+processes and tabs remain operator-owned.
+
+`ownerGroupSessions` defaults to `[]`. Configure exact trusted base session keys,
+with no wildcards. For Google Chat, an allowed base also admits its
+`:thread:<24 lowercase hex>` suffix; thread entries themselves are not allowed.
+The owner-requested link may be returned only to that same requesting group or
+thread, with disclosure that another member can claim it. One-use redemption,
+single-viewer limits, expiry, Done and browser gates still apply. See
+[operator configuration](docs/install.md#existing-browser-cdp-and-owner-requested-groups)
+for a complete example and the native-ingress prerequisite.
 
 ## Development
 

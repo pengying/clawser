@@ -1,3 +1,5 @@
+import { CloudflareTransport } from './src/cloudflare-transport.mjs';
+import { ownerAuthorized, ownerGuard } from './src/authorization.mjs';
 import { CdpBrowser } from './src/cdp.mjs';
 import { HandoffServer } from './src/server.mjs';
 import { FunnelTransport } from './src/funnel.mjs';
@@ -5,11 +7,6 @@ import { isAbsolute, join } from 'node:path';
 import { registerDesktopPlugin } from './src/desktop-plugin.mjs';
 import { registerClawserCli } from './src/cli.mjs';
 
-const allowed = (ctx) => ctx.senderIsOwner === true && !ctx.sandboxed &&
-  typeof ctx.sessionKey === 'string' && typeof ctx.sessionId === 'string' &&
-  typeof ctx.assertInvocationCurrent === 'function' &&
-  (/^agent:[^:]+:main$/i.test(ctx.sessionKey) || /^agent:[^:]+:[a-z0-9_-]+:(?:direct|dm):.+$/i.test(ctx.sessionKey)) &&
-  !/:group:|:channel:|:subagent:|:cron:|:hook:|:heartbeat:/i.test(ctx.sessionKey);
 const ownerKey = (ctx) => JSON.stringify([ctx.sessionKey, ctx.sessionId]);
 const browserTool = (name) => /(?:^|[.:_])browser(?:_\d+)?$/.test(name || '');
 const callKey = (event, ctx) => {
@@ -22,50 +19,119 @@ const callKey = (event, ctx) => {
   return JSON.stringify([ctx.sessionKey, ctx.sessionId, runId, id, event.toolName]);
 };
 
-export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) => new CdpBrowser(profiles), serverFactory = (options) => new HandoffServer(options), funnelFactory = (options) => new FunnelTransport(options) } = {}) {
+const toolDescriptor = {
+  name: 'browser_handoff', label: 'Browser Handoff',
+  description: 'Owner-authorized temporary browser viewing/takeover links. List configured profile tabs, create one-tab invitations, wait/status, or revoke. Recipients start in watch mode. Browser-tool actions are gated while a human controls the browser. On completion take a fresh browser snapshot. Deliver privately by default. An explicitly allowed group owner request permits delivery only in that same requesting group/thread. Any member can claim the one-use bearer invitation. Keep links out of logs.',
+  parameters: { type: 'object', additionalProperties: false, required: ['action'], properties: {
+    action: { type: 'string', enum: ['tabs', 'create', 'status', 'wait', 'revoke'] },
+    profile: { type: 'string' }, targetId: { type: 'string' }, id: { type: 'string' },
+    permission: { type: 'string', enum: ['watch', 'control'] },
+    ttlSeconds: { type: 'integer', minimum: 30, maximum: 1800 },
+    timeoutSeconds: { type: 'integer', minimum: 1, maximum: 60 },
+  } }
+};
+const liveSymbol = Symbol.for('openclaw.browser-handoff.cdp-live-instances.v1');
+const liveInstances = () => globalThis[liveSymbol] ??= new Map();
+const instanceKey = api => JSON.stringify(api.pluginConfig || {});
+
+export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) => new CdpBrowser(profiles), serverFactory = (options) => new HandoffServer(options), funnelFactory = (options) => new FunnelTransport(options), cloudflareFactory = options => new CloudflareTransport(options) } = {}) {
   return {
     id: 'browser-handoff', name: 'Clawser',
     register(api) {
-      registerClawserCli(api);
+      if (api.registrationMode !== 'tool-discovery') registerClawserCli(api);
       if (['cli-metadata', 'setup-only'].includes(api.registrationMode)) return;
       if (api.pluginConfig?.desktop?.enabled === true) return registerDesktopPlugin(api, { desktopRpcFactory });
-      let service, transport, stopping = false;
-      const completed = new Map(), calls = new Map();
       const config = api.pluginConfig || {};
+      const allowed = ctx => ownerAuthorized(ctx, config);
+      if (api.registrationMode === 'tool-discovery') {
+        api.registerTool({ contextVersion: 2, create(ctx) {
+          if (!allowed(ctx)) return null;
+          const current = ownerGuard(ctx, config);
+          return { ...toolDescriptor, async execute(callId, params, signal) {
+            current();
+            const instance = liveInstances().get(instanceKey(api));
+            if (!instance) throw new Error('Browser Handoff existing-browser service is unavailable');
+            const tool = instance.factory.create(ctx);
+            if (!tool) throw new Error('Owner-authorized access required');
+            return tool.execute(callId, params, signal);
+          } };
+        } }, { name: 'browser_handoff', optional: true });
+        return;
+      }
+      if (api.registrationMode !== undefined && api.registrationMode !== 'full') return;
+      let service, transport, stopping = false, epoch, publication;
+      const unpublish = () => {
+        if (publication && liveInstances().get(publication.key) === publication) liveInstances().delete(publication.key);
+        publication = undefined;
+      };
+      const completed = new Map(), calls = new Map();
       const getService = () => {
         if (!service || stopping) throw new Error('Browser Handoff service is not running');
+        if (!publication || liveInstances().get(publication.key) !== publication) throw new Error('Browser Handoff service is stale or unavailable');
+        if (service.store.gate.poisonReason) { unpublish(); throw new Error('Browser Handoff service fault requires operator recovery'); }
         return service;
       };
       api.registerService({
         id: 'browser-handoff',
         async start(ctx = {}) {
-          stopping = false;
-          service = serverFactory({ backend: backendFactory(config.profiles || {}), publicBaseUrl: config.publicBaseUrl, comparisonProxyUrl: config.comparisonProxyUrl });
-          service.store.on('ended', (event) => {
-            completed.set(event.id, { ...event, mode: 'ended', viewerMetrics: service.viewerMetrics?.(event.id) || null });
+          if (service) throw new Error('Browser Handoff service is already running or stopping');
+          if (config.funnel?.enabled === true && config.cloudflare?.enabled === true) throw new Error('Funnel and Cloudflare transports are mutually exclusive');
+          unpublish(); stopping = false;
+          const started = epoch = Symbol();
+          const dynamic = config.funnel?.enabled === true || config.cloudflare?.enabled === true;
+          const ownedService = service = serverFactory({ backend: backendFactory(config.profiles || {}), publicBaseUrl: dynamic ? undefined : config.publicBaseUrl, comparisonProxyUrl: config.comparisonProxyUrl });
+          let ownedTransport;
+          const current = () => {
+            if (epoch !== started || service !== ownedService || stopping) throw new Error('Browser Handoff service changed during startup');
+          };
+          ownedService.store.on('ended', event => {
+            if (service !== ownedService) return;
+            completed.set(event.id, { ...event, mode: 'ended', viewerMetrics: ownedService.viewerMetrics?.(event.id) || null });
             while (completed.size > 100) completed.delete(completed.keys().next().value);
           });
           try {
-            await service.start({ port: config.port ?? 18796 });
+            await ownedService.start({ port: config.port ?? 18796 }); current();
+            if (dynamic && (typeof ctx.stateDir !== 'string' || !isAbsolute(ctx.stateDir))) throw new Error('Browser Handoff public transport requires a stable service stateDir');
             if (config.funnel?.enabled === true) {
-              if (typeof ctx.stateDir !== 'string' || !isAbsolute(ctx.stateDir)) throw new Error('Browser Handoff Funnel requires a stable service stateDir');
-              transport = funnelFactory({ httpsPort: config.funnel.httpsPort ?? 10000, ownershipFile: join(ctx.stateDir, 'browser-handoff', 'funnel-ownership.json') });
-              service.setPublicBase(await transport.open(new URL(service.localUrl).port * 1));
+              ownedTransport = transport = funnelFactory({ httpsPort: config.funnel.httpsPort ?? 10000, ownershipFile: join(ctx.stateDir, 'browser-handoff', 'funnel-ownership.json') });
+              const origin = await ownedTransport.open(Number(new URL(ownedService.localUrl).port)); current();
+              ownedService.setPublicBase(origin);
+            } else if (config.cloudflare?.enabled === true) {
+              ownedTransport = transport = cloudflareFactory({ binaryPath: config.cloudflare.binaryPath, startupTimeoutMs: config.cloudflare.startupTimeoutMs ?? 60_000, stateDir: join(ctx.stateDir, 'browser-handoff', 'cloudflare'), probePath: '/assets/style.css' });
+              ownedTransport.on('failure', () => {
+                if (epoch !== started || service !== ownedService || transport !== ownedTransport || stopping) return;
+                unpublish(); stopping = true;
+                ownedService.setPublicBase(undefined);
+                for (const share of [...ownedService.store.shares.values()]) ownedService.store.end(share, 'tunnel_exit');
+                // Keep the local service/gate until normal stop. A failed tunnel
+                // must never publish new invitations or bypass browser fencing.
+                void ownedTransport.close().catch(() => api.logger.warn('Browser Handoff could not verify owned public transport shutdown.'));
+              });
+              const origin = await ownedTransport.ensure(Number(new URL(ownedService.localUrl).port)); current();
+              ownedService.setPublicBase(origin);
             }
+            current();
+            publication = { key: instanceKey(api), factory: toolFactory };
+            liveInstances().set(publication.key, publication);
           } catch (error) {
-            stopping = true;
-            try { await service.close(); } catch { api.logger.warn('Browser Handoff startup listener cleanup failed.'); }
-            service = undefined;
-            try { await transport?.close(); } catch { api.logger.warn('Browser Handoff startup cleanup could not verify Funnel route ownership; inspect Tailscale configuration for unresolved exposure.'); }
+            if (epoch === started) { unpublish(); stopping = true; }
+            ownedService.setPublicBase(undefined);
+            try { await ownedService.close(); } catch { api.logger.warn('Browser Handoff startup listener cleanup failed.'); }
+            try { await ownedTransport?.close(); } catch { api.logger.warn('Browser Handoff startup public transport cleanup could not be verified.'); }
+            if (service === ownedService) service = undefined;
+            if (transport === ownedTransport) transport = undefined;
             throw error;
           }
         },
         async stop() {
-          stopping = true;
-          try { await service?.close(); }
+          unpublish(); stopping = true; epoch = undefined;
+          const ownedService = service, ownedTransport = transport;
+          ownedService?.setPublicBase(undefined);
+          try { await ownedService?.close(); }
           finally {
-            try { await transport?.close(); } catch { api.logger.warn('Browser Handoff could not clean up its Funnel route; inspect Tailscale configuration.'); }
-            service = undefined; transport = undefined; calls.clear(); completed.clear();
+            try { await ownedTransport?.close(); } catch { api.logger.warn('Browser Handoff could not verify public transport cleanup; inspect the owned route/process.'); }
+            if (service === ownedService) { service = undefined; calls.clear(); completed.clear(); }
+            if (transport === ownedTransport) transport = undefined;
           }
         },
       });
@@ -93,9 +159,10 @@ export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) =>
           if (sessionKey === key && (!sessionId || incarnation === sessionId)) service.store.end(share, 'session_end');
         }
       });
-      api.registerTool({ contextVersion: 2, create(ctx) {
+      const toolFactory = { contextVersion: 2, create(ctx) {
         if (!allowed(ctx)) return null;
         const owner = ownerKey(ctx);
+        const current = ownerGuard(ctx, config);
         function status(id) {
           const s = getService();
           const share = s.store.shares.get(id);
@@ -108,29 +175,26 @@ export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) =>
           return { id, mode: 'ended', reason: end.reason, browserGateFault: s.store.gate.poisonReason, viewerMetrics: end.viewerMetrics || null };
         }
         return {
-          name: 'browser_handoff', label: 'Browser Handoff',
-          description: 'Owner-private temporary browser viewing/takeover links. List configured profile tabs, create one-tab invitations, wait/status, or revoke. Recipients start in watch mode. Browser-tool actions are gated while a human controls the browser. On completion take a fresh browser snapshot. Do not share invitation URLs in groups or logs.',
-          parameters: { type: 'object', additionalProperties: false, required: ['action'], properties: {
-            action: { type: 'string', enum: ['tabs', 'create', 'status', 'wait', 'revoke'] },
-            profile: { type: 'string' }, targetId: { type: 'string' }, id: { type: 'string' },
-            permission: { type: 'string', enum: ['watch', 'control'] },
-            ttlSeconds: { type: 'integer', minimum: 30, maximum: 1800 },
-            timeoutSeconds: { type: 'integer', minimum: 1, maximum: 60 },
-          } },
+          ...toolDescriptor,
           async execute(_callId, params, signal) {
-            ctx.assertInvocationCurrent();
-            if (!allowed(ctx)) throw new Error('Owner-private access required');
+            current();
             const s = getService();
+            const active = () => {
+              current();
+              if (signal?.aborted) throw new Error('Browser handoff cancelled');
+              if (getService() !== s) throw new Error('Browser Handoff service changed');
+            };
+            active();
             let result;
             if (params.action === 'tabs') {
               if (!params.profile) result = { profiles: Object.keys(config.profiles || {}) };
               else result = { profile: params.profile, tabs: (await s.backend.list(params.profile)).map(({ targetId, title, url }) => ({ targetId, title, url })) };
             } else if (params.action === 'create') {
-              if (!s.publicBaseUrl) throw new Error('Configure publicBaseUrl or explicitly enable Funnel before creating links');
+              if (!s.publicBaseUrl) throw new Error('Configure publicBaseUrl or explicitly enable Funnel or Cloudflare before creating links');
               // Resolve the target first; invocation may have ended while the browser was queried.
               const tab = (await s.backend.list(params.profile)).find((tab) => tab.targetId === params.targetId);
               if (!tab) throw new Error('Selected HTTP(S) browser tab is unavailable');
-              ctx.assertInvocationCurrent();
+              active();
               const ttlSeconds = params.ttlSeconds ?? 300;
               if (!Number.isInteger(ttlSeconds) || ttlSeconds < 30 || ttlSeconds > 1800) throw new Error('Invalid invitation lifetime');
               const invite = s.store.create({ owner, target: { profile: params.profile, targetId: params.targetId }, ttlMs: ttlSeconds * 1000, permission: params.permission || 'control' });
@@ -158,11 +222,12 @@ export function createPlugin({ desktopRpcFactory, backendFactory = (profiles) =>
                 result = status(params.id);
               }
             } else throw new Error('Unsupported handoff action');
-            ctx.assertInvocationCurrent();
+            active();
             return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result };
           },
         };
-      } }, { name: 'browser_handoff', optional: true });
+      } };
+      api.registerTool(toolFactory, { name: 'browser_handoff', optional: true });
     },
   };
 }

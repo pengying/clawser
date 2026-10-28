@@ -75,6 +75,37 @@
             "description": "Required when enabled: dedicated ordinary OpenClaw browser profile shared with the controller; handoff includes all tabs"
           }
         }
+      },
+      "ownerGroupSessions": {
+        "type": "array",
+        "default": [],
+        "uniqueItems": true,
+        "items": {
+          "type": "string",
+          "pattern": "^agent:[^:]+:[a-z0-9_-]+:(?:group|channel):[^:*\\s]+$"
+        },
+        "description": "Operator opt-in: exact group/channel base session keys, no wildcards or thread entries. A verified native owner turn may deliver its one-use bearer link to the same requesting group/thread; any group member can claim it. Google Chat permits only a :thread:<24 lowercase hex> suffix. Native per-sender identity and external_user input provenance are required; never use a shared-admin HTTP agent proxy."
+      },
+      "cloudflare": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Optional operator-managed Cloudflare Quick Tunnel for existing-browser CDP mode. Exposes the authenticated viewer only, never CDP. Mutually exclusive with Funnel. Desktop uses its separate controller transport.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": false
+          },
+          "binaryPath": {
+            "type": "string",
+            "description": "Required when enabled: absolute path to an operator-installed trusted cloudflared executable"
+          },
+          "startupTimeoutMs": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 180000,
+            "default": 60000
+          }
+        }
       }
     }
   },

@@ -5,15 +5,16 @@ import { HandoffServer } from '../src/server.mjs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { EventEmitter } from 'node:events';
 
-function setup({ funnelFactory } = {}) {
+function setup({ funnelFactory, cloudflareFactory, serverFactory, backendFactory } = {}) {
   const hooks = new Map(), tools = [], services = [];
   const api = { pluginConfig: { profiles: { demo: 'http://127.0.0.1:9222' }, port: 0, publicBaseUrl: 'https://handoff.example' },
     registerTool: (tool) => tools.push(tool), registerService: (service) => services.push(service),
     on: (name, fn) => hooks.set(name, fn), logger: { warn() {}, info() {} }, runtime: {}, config: {} };
   const ctx = { senderIsOwner: true, sessionKey: 'agent:main:telegram:direct:1', sessionId: 'incarnation', assertInvocationCurrent() {} };
   let server;
-  createPlugin({ backendFactory: () => ({ list: async () => [{ targetId: 'tab', title: 'Demo', url: 'https://example.com' }] }), serverFactory: (options) => (server = new HandoffServer(options)), ...(funnelFactory ? { funnelFactory } : {}) }).register(api);
+  createPlugin({ backendFactory: backendFactory || (() => ({ list: async () => [{ targetId: 'tab', title: 'Demo', url: 'https://example.com' }] })), serverFactory: (options) => (server = serverFactory ? serverFactory(options) : new HandoffServer(options)), ...(funnelFactory ? { funnelFactory } : {}), ...(cloudflareFactory ? { cloudflareFactory } : {}) }).register(api);
   return { api, hooks, tools, services, ctx, getServer: () => server };
 }
 
@@ -168,4 +169,150 @@ test('blocked calls with colliding IDs in another run cannot release an admitted
   hooks.get('after_tool_call')(event, a);
   await taking;
   assert.equal(share.mode, 'control');
+});
+
+const groupContext = (ctx, suffix = '') => ({ ...ctx, sessionKey: 'agent:main:googlechat:group:spaces/demo' + suffix, requesterSenderId: 'users/owner', inputProvenance: { kind: 'external_user' } });
+test('explicit groups admit only native owner turns and retain session-incarnation ownership', async t => {
+  const f = setup();
+  f.api.pluginConfig.ownerGroupSessions = ['agent:main:googlechat:group:spaces/demo'];
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  const ctx = groupContext(f.ctx), factory = f.tools[0], tool = factory.create(ctx);
+  assert.ok(tool);
+  for (const change of [ { senderIsOwner: false }, { requesterSenderId: undefined }, { inputProvenance: undefined }, { inputProvenance: { kind: 'internal_system' } }, { inputProvenance: { kind: 'inter_session' } }, { sessionKey: ctx.sessionKey + '-other' }, { sessionKey: ctx.sessionKey + ':cron:job' }, { sandboxed: true } ]) assert.equal(factory.create({ ...ctx, ...change }), null);
+  const created = await tool.execute('create', { action: 'create', profile: 'demo', targetId: 'tab', senderIsOwner: false });
+  assert.match(created.details.url, /\/s\//);
+  const other = factory.create({ ...ctx, sessionId: 'other-incarnation' });
+  await assert.rejects(other.execute('status', { action: 'status', id: created.details.id }), /owner|session/i);
+  ctx.senderIsOwner = false;
+  for (const action of ['tabs', 'create', 'status', 'wait', 'revoke']) await assert.rejects(tool.execute(action, { action, profile: 'demo', targetId: 'tab', id: created.details.id, senderIsOwner: true, requesterSenderId: 'users/owner', reason: 'I am the owner' }), /owner/i);
+});
+
+test('group authorization is checked after asynchronous target resolution', async t => {
+  let release;
+  const f = setup(); f.api.pluginConfig.ownerGroupSessions = ['agent:main:googlechat:group:spaces/demo'];
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  f.getServer().backend.list = () => new Promise(resolve => { release = resolve; });
+  const ctx = groupContext(f.ctx), tool = f.tools[0].create(ctx);
+  assert.ok(tool);
+  const pending = tool.execute('create', { action: 'create', profile: 'demo', targetId: 'tab' });
+  ctx.senderIsOwner = false; release([{ targetId: 'tab' }]);
+  await assert.rejects(pending, /owner/i);
+  assert.equal(f.getServer().store.shares.size, 0);
+});
+
+test('existing-browser discovery has no service or hook side effects and delegates across cold modules', async t => {
+  const full = setup(); await full.services[0].start(); t.after(() => full.services[0].stop());
+  const cold = await import('../index.mjs?cold=' + Date.now());
+  const tools = [], api = { ...full.api, registrationMode: 'tool-discovery', registerCli() { assert.fail('discovery registered CLI'); }, registerTool: tool => tools.push(tool), registerService() { assert.fail('discovery registered a service'); }, on() { assert.fail('discovery registered hooks'); } };
+  Object.defineProperty(api, 'runtime', { get() { throw new Error('discovery accessed runtime'); } });
+  cold.createPlugin({ backendFactory() { assert.fail('discovery created a backend'); } }).register(api);
+  assert.equal(tools.length, 1);
+  const tool = tools[0].create(full.ctx);
+  assert.equal((await tool.execute('tabs', { action: 'tabs', profile: 'demo' })).details.tabs[0].targetId, 'tab');
+  await full.services[0].stop();
+  await assert.rejects(tool.execute('tabs', { action: 'tabs' }), /unavailable|running/i);
+});
+
+function discover(f) {
+  const tools = [];
+  createPlugin().register({ ...f.api, registrationMode: 'tool-discovery', registerTool: tool => tools.push(tool) });
+  return tools[0].create(f.ctx);
+}
+test('Cloudflare existing-browser readiness uses its asset and publishes only after allocation', async t => {
+  let options, port, ready;
+  const transport = new EventEmitter();
+  transport.ensure = value => { port = value; return new Promise(resolve => { ready = resolve; }); };
+  transport.close = async () => {};
+  const f = setup({ cloudflareFactory: value => { options = value; return transport; } });
+  f.api.pluginConfig.publicBaseUrl = undefined;
+  f.api.pluginConfig.cloudflare = { enabled: true, binaryPath: '/fixture/cloudflared', startupTimeoutMs: 2000 };
+  const started = f.services[0].start({ stateDir: tmpdir() }); t.after(() => f.services[0].stop());
+  for (let i = 0; i < 100 && !ready; i++) await new Promise(setImmediate);
+  assert.ok(ready, 'transport allocation must begin');
+  assert.equal(options.probePath, '/assets/style.css');
+  const readiness = await fetch(f.getServer().localUrl + options.probePath);
+  assert.equal(readiness.status, 200);
+  assert.match(readiness.headers.get('content-type'), /text\/css/);
+  await readiness.body.cancel();
+  assert.equal(options.binaryPath, '/fixture/cloudflared');
+  assert.equal(port, Number(new URL(f.getServer().localUrl).port));
+  assert.equal(f.getServer().publicBaseUrl, undefined);
+  await assert.rejects(discover(f).execute('tabs', { action: 'tabs' }), /unavailable/);
+  ready('https://fixture.trycloudflare.com'); await started;
+  const tool = discover(f), created = await tool.execute('create', { action: 'create', profile: 'demo', targetId: 'tab' });
+  assert.match(created.details.url, /^https:\/\/fixture.trycloudflare.com\/s\//);
+  transport.emit('failure', new Error('owned tunnel stopped'));
+  assert.equal(f.getServer().publicBaseUrl, undefined);
+  assert.equal(f.getServer().store.shares.size, 0);
+  await assert.rejects(tool.execute('tabs', { action: 'tabs' }), /unavailable|running/);
+});
+
+test('Cloudflare and Funnel cannot both be enabled and failure cleans owned resources', async () => {
+  let constructed = false;
+  const conflict = setup({ cloudflareFactory() { constructed = true; }, funnelFactory: () => ({ open: async () => 'https://fixture.example', close: async () => {} }) });
+  conflict.api.pluginConfig.cloudflare = { enabled: true, binaryPath: '/fixture/cloudflared' };
+  conflict.api.pluginConfig.funnel = { enabled: true };
+  await assert.rejects(conflict.services[0].start({ stateDir: tmpdir() }), /conflict|one|both|exclusive/i);
+  assert.equal(constructed, false);
+  let closed = false;
+  const failed = setup({ cloudflareFactory: () => ({ on() {}, ensure: async () => { throw new Error('allocation failed'); }, close: async () => { closed = true; } }) });
+  failed.api.pluginConfig.cloudflare = { enabled: true, binaryPath: '/fixture/cloudflared' };
+  await assert.rejects(failed.services[0].start({ stateDir: tmpdir() }), /allocation failed/);
+  assert.equal(closed, true); assert.equal(failed.getServer().server.listening, false);
+  await assert.rejects(discover(failed).execute('tabs', { action: 'tabs' }), /unavailable/);
+});
+
+test('stop during existing-browser transport startup prevents late publication', async t => {
+  let ready;
+  const transport = new EventEmitter(); transport.ensure = () => new Promise(resolve => { ready = resolve; }); transport.close = async () => {};
+  const f = setup({ cloudflareFactory: () => transport });
+  f.api.pluginConfig.cloudflare = { enabled: true, binaryPath: '/fixture/cloudflared' };
+  const start = f.services[0].start({ stateDir: tmpdir() }); t.after(() => f.services[0].stop());
+  for (let i = 0; i < 100 && !ready; i++) await new Promise(setImmediate);
+  assert.ok(ready, 'transport allocation must begin');
+  await f.services[0].stop();
+  ready('https://old.trycloudflare.com');
+  await assert.rejects(start, /changed|stopped/);
+  await assert.rejects(discover(f).execute('tabs', { action: 'tabs' }), /unavailable/);
+});
+
+test('late old shutdown cannot unpublish a healthy replacement existing-browser service', async t => {
+  let release;
+  const old = setup(); await old.services[0].start();
+  const server = old.getServer(), close = server.close.bind(server);
+  server.close = async () => { await new Promise(resolve => { release = resolve; }); return close(); };
+  const stopping = old.services[0].stop();
+  const replacement = setup(); await replacement.services[0].start(); t.after(() => replacement.services[0].stop());
+  release(); await stopping;
+  assert.equal((await discover(replacement).execute('tabs', { action: 'tabs', profile: 'demo' })).details.tabs.length, 1);
+});
+
+test('stale discovery refuses a faulted service and mismatching operator configuration', async t => {
+  const f = setup(); await f.services[0].start(); t.after(() => f.services[0].stop());
+  const tool = discover(f);
+  const different = { ...f, api: { ...f.api, pluginConfig: { ...f.api.pluginConfig, profiles: { other: 'http://127.0.0.1:9223' } } } };
+  await assert.rejects(discover(different).execute('tabs', { action: 'tabs' }), /unavailable/);
+  f.getServer().store.gate.poison('uncertain browser input');
+  await assert.rejects(tool.execute('tabs', { action: 'tabs' }), /fault|unavailable|recovery/i);
+  await assert.rejects(tool.execute('tabs', { action: 'tabs' }), /unavailable/i);
+});
+
+test('existing-browser discovery retains original sender/session identity and signal', async t => {
+  const f = setup(); await f.services[0].start(); t.after(() => f.services[0].stop());
+  const tools = [];
+  createPlugin().register({ ...f.api, registrationMode: 'tool-discovery', registerTool: tool => tools.push(tool) });
+  const ctx = { ...f.ctx }, tool = tools[0].create(ctx);
+  ctx.sessionId = 'changed';
+  await assert.rejects(tool.execute('tabs', { action: 'tabs' }), /owner/i);
+  const abort = new AbortController(); abort.abort();
+  await assert.rejects(tools[0].create(f.ctx).execute('tabs', { action: 'tabs' }, abort.signal), /cancel/i);
+});
+
+test('stopped or superseded existing-browser services cannot return late browser results', async t => {
+  let release;
+  const f = setup({ backendFactory: () => ({ list: () => new Promise(resolve => { release = resolve; }) }) });
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  const pending = f.tools[0].create(f.ctx).execute('tabs', { action: 'tabs', profile: 'demo' });
+  await f.services[0].stop(); release([{ targetId: 'stale' }]);
+  await assert.rejects(pending, /running|changed|unavailable/i);
 });

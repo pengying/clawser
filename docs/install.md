@@ -235,3 +235,63 @@ When reporting an issue, include versions, the redacted doctor result and the
 error text. Do not attach private state, browser profile data, signed-in
 screenshots, invitation URLs or viewer credentials. See [SECURITY.md](../SECURITY.md)
 for vulnerability reporting.
+
+## Existing-browser CDP and owner-requested groups
+
+Use this mode to share a selected tab from an already-running browser without
+running desktop setup. Configure the plugin entry under
+`plugins.entries.browser-handoff.config`, retaining the browser's existing
+loopback CDP origin. Example values below are placeholders, not personal IDs:
+
+```json
+{
+  "profiles": { "existing": "http://127.0.0.1:19222" },
+  "port": 18796,
+  "cloudflare": {
+    "enabled": true,
+    "binaryPath": "/opt/cloudflared/bin/cloudflared",
+    "startupTimeoutMs": 90000
+  },
+  "ownerGroupSessions": [
+    "agent:example:googlechat:channel:0123456789abcdef01234567"
+  ]
+}
+```
+
+Install and verify the trusted `cloudflared` binary as the operator. The optional
+`cloudflare` block defaults to disabled; its startup timeout defaults to 60000 ms
+and accepts 1000–180000 ms. It uses the service's private stable state directory
+and bound loopback viewer port. It probes the harmless `/assets/style.css` asset;
+the desktop controller retains `/browser/assets/probe.css`. Only a ready public
+HTTPS viewer origin is published. A tunnel failure removes that origin, stops
+new invitations and retires existing viewer access; normal browser fencing still
+applies. Run only one dynamic public transport: Cloudflare and Funnel cannot
+both be enabled. A fixed `publicBaseUrl` is used when neither dynamic transport is
+enabled. No mode may publicly proxy CDP, the Gateway or raw VNC.
+
+Group access defaults to disabled (`ownerGroupSessions: []`) in both existing-tab
+and desktop modes. Copy each exact group/channel base session key from trusted
+operator session metadata. Wildcards and thread entries are invalid. A Google
+Chat base also admits its bridge's `:thread:<24 lowercase hex>` suffix, never an
+arbitrary suffix or another group's base. Other channels match the base exactly.
+Do not infer authorization from a message's text, display name, email or tool
+parameters.
+
+Enable this only after the channel ingress passes authenticated per-message
+sender identity through the native OpenClaw SDK. The host must supply
+`senderIsOwner=true`, a nonempty trusted `requesterSenderId`, and
+`inputProvenance.kind=external_user` on a current nonsandboxed V2 invocation with
+valid `sessionKey` and `sessionId`. A shared-admin HTTP `/v1/chat/completions`
+agent proxy assigns the proxy's authority, so it is unsuitable for this opt-in.
+Subagents, cron, hooks, heartbeat and other automated group turns remain denied.
+Private owner sessions retain their existing V2 continuation behavior.
+
+The verified owner may explicitly request a link and have it returned in that
+same requesting group/thread. Disclose that any member seeing it can redeem the
+one-use bearer invitation; the first claiming browser wins. Other members cannot
+request, inspect, wait on or revoke links through `browser_handoff`. Ownership
+stays bound to the original session key and incarnation. Normal one-viewer,
+expiry, Done, session cleanup and input-gate rules remain unchanged. Do not post
+links in other groups, logs or durable memory. Remove an allowlist entry to deny
+further tool calls there; already issued bearer links keep their normal lifetime
+until revoked, Done, disconnection, session end or plugin shutdown.

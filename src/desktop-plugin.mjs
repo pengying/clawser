@@ -1,11 +1,7 @@
+import { authorizedSession, ownerAuthorized, ownerGuard } from './authorization.mjs';
 import { isAbsolute } from 'node:path';
 
 const scopeNotice = 'This link exposes the entire dedicated browser profile: all tabs, browser chrome, dialogs, and clipboard during control.';
-const privateSession = (key) => typeof key === 'string' &&
-  (/^agent:[^:]+:main$/i.test(key) || /^agent:[^:]+:[a-z0-9_-]+:(?:direct|dm):.+$/i.test(key)) &&
-  !/:group:|:channel:|:subagent:|:cron:|:hook:|:heartbeat:/i.test(key);
-const allowed = (ctx) => ctx.senderIsOwner === true && !ctx.sandboxed && privateSession(ctx.sessionKey) &&
-  typeof ctx.sessionId === 'string' && !!ctx.sessionId.trim() && typeof ctx.assertInvocationCurrent === 'function';
 const browserTool = (name) => /(?:^|[.:_])browser(?:_\d+)?$/.test(name || '');
 const callKey = (event, ctx) => {
   const values = [ctx.sessionKey, ctx.sessionId, ctx.runId || event.runId, ctx.toolCallId || event.toolCallId];
@@ -19,7 +15,7 @@ const liveInstances = () => globalThis[liveInstancesSymbol] ??= new Map();
 const toolOptions = { name: 'browser_handoff', optional: true };
 const toolDescriptor = {
   name: 'browser_handoff', label: 'Browser Handoff',
-  description: 'Owner-private temporary full-browser viewing or human takeover links for the configured production profile. Includes all tabs, browser chrome, dialogs, and clipboard during control. Use for human CAPTCHA, passwords, 2FA, consent or forms needing human judgment. Share links only privately. Pause browser actions until resumeAllowed=true; then take a fresh normal browser snapshot.',
+  description: 'Owner-authorized temporary full-browser viewing or human takeover links for the configured production profile. Includes all tabs, browser chrome, dialogs, and clipboard during control. Use for human CAPTCHA, passwords, 2FA, consent or forms needing human judgment. Deliver links privately by default. An explicitly allowed group owner request permits delivery only in that same requesting group/thread; any member can claim the one-use bearer invitation. Pause browser actions until resumeAllowed=true; then take a fresh normal browser snapshot.',
   parameters: { type: 'object', additionalProperties: false, required: ['action'], properties: {
     action: { type: 'string', enum: ['tabs', 'create', 'status', 'wait', 'revoke'] },
     profile: { type: 'string' }, targetId: { type: 'string' }, id: { type: 'string' },
@@ -48,12 +44,13 @@ function liveInstanceKey(api) {
 // supervision and the authoritative automation gate live in the controller.
 export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFactory } = {}) {
   const config = api.pluginConfig.desktop;
+  const allowed = ctx => ownerAuthorized(ctx, api.pluginConfig);
   if (api.registrationMode === 'tool-discovery') {
     api.registerTool({ contextVersion: 2, create(ctx) {
       if (!allowed(ctx)) return null;
+      const current = ownerGuard(ctx, api.pluginConfig);
       return { ...toolDescriptor, async execute(callId, params, signal) {
-        ctx.assertInvocationCurrent();
-        if (!allowed(ctx)) throw new Error('Owner-private access required');
+        current();
         let instance;
         try { instance = liveInstances().get(liveInstanceKey(api)); } catch { /* Invalid mappings cannot match a live instance. */ }
         if (!instance) throw new Error('Browser Handoff production controller is unavailable');
@@ -99,7 +96,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
         let identity;
         try { identity = JSON.parse(completion.owner); } catch { await ack(completion.id); continue; }
         const [sessionKey, sessionId] = Array.isArray(identity) ? identity : [];
-        if (identity?.length !== 2 || !privateSession(sessionKey) || typeof sessionId !== 'string' || !sessionId || completion.profile !== config.profile || canceled(completion.owner, sessionKey) || completion.reason === 'session_end' || completion.reason === 'plugin_stop') {
+        if (identity?.length !== 2 || !authorizedSession(sessionKey, api.pluginConfig.ownerGroupSessions) || typeof sessionId !== 'string' || !sessionId || completion.profile !== config.profile || canceled(completion.owner, sessionKey) || completion.reason === 'session_end' || completion.reason === 'plugin_stop') {
           await ack(completion.id); continue;
         }
         const notificationKey = JSON.stringify([completion.owner, completion.id]);
@@ -249,10 +246,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
   const toolFactory = { contextVersion: 2, create(ctx) {
     if (!allowed(ctx)) return null;
     const owner = JSON.stringify([ctx.sessionKey, ctx.sessionId]);
-    const current = () => {
-      ctx.assertInvocationCurrent();
-      if (!allowed(ctx)) throw new Error('Owner-private access required');
-    };
+    const current = ownerGuard(ctx, api.pluginConfig);
     return {
       ...toolDescriptor,
       async execute(_callId, params, signal) {

@@ -26,6 +26,15 @@ control. Control-capable invitations begin in watch mode and require an explicit
 takeover. Reopening a link in the same browser can use its existing authenticated
 cookie until the original expiry; it does not renew the lifetime.
 
+Private owner conversations are the default. An operator may opt exact group
+base session keys into `ownerGroupSessions` only with native authenticated
+per-sender owner authority. The owner can then explicitly request delivery to
+that same group/thread. Any member seeing the bearer URL can claim it first;
+nonowners cannot invoke the agent handoff tool. Message text and tool arguments
+never establish owner identity. Shared-admin HTTP agent proxies are unsuitable
+for this group opt-in. Removing an allowlist entry denies future tool calls but
+does not itself revoke a previously delivered bearer invitation.
+
 Done, revocation, disconnect or absolute expiry retires the viewer. There is no
 human-inactivity timeout. Heartbeats detect failed connections and abandoned
 controller input actors; they do not measure whether the human is interacting.
