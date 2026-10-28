@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { resolveHandoffBrowser } from './browser-config.mjs';
+import { activationSummary, captureSetupActivation, inspectSetupActivation, logSetupActivation, requireActiveActivation, waitForSetupActivation } from './setup-activation.mjs';
 
 const identity = 'clawser-cdp-setup-v1';
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -142,11 +143,11 @@ export async function runCdpSetup(o, d, h) {
   const checks = await h.prerequisites(d, false);
   const check = async (name, work) => {
     try { return await work(); }
-    catch (error) { checks.push({ name, ok: false, message: error.message }); return undefined; }
+    catch (error) { checks.push({ name, ok: false, message: error.message, ...(error.pending ? { pending: true } : {}) }); return undefined; }
     finally { if (!checks.some(row => row.name === name)) checks.push({ name, ok: true }); }
   };
   if (o.command === 'doctor') {
-    let connection;
+    let connection, activation;
     const config = await check('configuration', () => current(d, h));
     const saved = await check('ownership', async () => { const value = await receipt(o, p, d, h); if (!value) throw new Error('No managed CDP setup receipt; run clawser setup'); return value; });
     if (config) {
@@ -155,14 +156,18 @@ export async function runCdpSetup(o, d, h) {
       if (connection) {
         await check('CDP endpoint', () => browserReady(connection, d));
         await check('plugin configuration', async () => { patch(config, connection, port, p, o); configured(config, connection, port, p); });
+        await check('Gateway activation', async () => { activation = await inspectSetupActivation(config, d); requireActiveActivation(activation); });
         await check('viewer service', () => viewerReady('http://127.0.0.1:' + port, d));
-        await check('public transport', () => publicReady(port, d, h));
+        if (activation?.publicTransport === 'warming') checks.push({ name: 'public transport', ok: false, pending: true, message: 'Cloudflare transport is warming; public readiness continues in the background' });
+        else if (activation?.publicTransport === 'failed') checks.push({ name: 'public transport', ok: false, message: 'Cloudflare transport failed; inspect browser-handoff service health' });
+        else await check('public transport', () => publicReady(port, d, h));
       }
     }
     if (saved) await check('pinned cloudflared', () => binary(p, saved, d, h, true));
     if (connection) d.log('Browser connection: ' + connection.profile + '\nCDP: ' + connection.cdpUrl);
+    logSetupActivation(activation, d);
     for (const row of checks) d.log((row.ok ? 'OK ' : 'FAIL ') + row.name + (row.message ? ': ' + row.message : ''));
-    return { ok: checks.every(row => row.ok), command: o.command, backend: 'cdp', checks, stateDir: o.stateDir, ...(connection ? { profile: connection.profile, cdpUrl: connection.cdpUrl } : {}) };
+    return { ok: checks.every(row => row.ok), pending: checks.some(row => row.pending), command: o.command, backend: 'cdp', checks, stateDir: o.stateDir, activation: activationSummary(activation), ...(connection ? { profile: connection.profile, cdpUrl: connection.cdpUrl } : {}) };
   }
   const failed = checks.filter(row => !row.ok);
   if (failed.length) throw new Error(failed.map(row => row.name + ': ' + row.message).join('\n'));
@@ -195,6 +200,7 @@ export async function runCdpSetup(o, d, h) {
   const lock = join(o.stateDir, 'setup.lock');
   try { await d.fs.mkdir(lock, { mode: 0o700 }); }
   catch (error) { if (error.code === 'EEXIST') throw new Error('CDP setup is already locked; inspect the current setup process'); throw error; }
+  let activation;
   try {
     // Re-read under the installation lock. Publication may have completed
     // between preflight and admission of a concurrent setup invocation.
@@ -225,9 +231,12 @@ export async function runCdpSetup(o, d, h) {
     if (latest.profile !== connection.profile || latest.cdpUrl !== connection.cdpUrl) throw new Error('Current browser connection changed during setup; rerun setup');
     const finalPatch = patch(config, latest, port, p, o);
     await viewerPort(config, port, p, o, saved, 'installed', d);
+    const expectedActivation = await captureSetupActivation(config, finalPatch, d);
     await d.run('openclaw', ['config', 'patch', '--stdin'], { input: JSON.stringify(finalPatch) + '\n' });
     await h.reloadPlugin(d);
+    activation = await waitForSetupActivation(expectedActivation, d, () => viewerReady('http://127.0.0.1:' + port, d));
   } finally { await d.fs.rm(lock, { recursive: true }); }
   d.log('Clawser is configured for existing browser connection ' + connection.profile + '.\nState: ' + o.stateDir + '\nRun browser_handoff action=tabs from the owner session to verify the active connection.');
-  return { ok: true, command: o.command, backend: 'cdp', dryRun: false, stateDir: o.stateDir };
+  logSetupActivation(activation, d);
+  return { ok: true, command: o.command, backend: 'cdp', dryRun: false, stateDir: o.stateDir, activation: activationSummary(activation) };
 }

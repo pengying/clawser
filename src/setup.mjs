@@ -7,6 +7,7 @@ import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DesktopRpcClient } from './desktop-rpc.mjs';
 import { DesktopRuntime } from '../runtime/desktop/index.mjs';
+import { activationSummary, captureSetupActivation, inspectSetupActivation, logSetupActivation, requireActiveActivation, waitForSetupActivation } from './setup-activation.mjs';
 
 export const ARTIFACTS = Object.freeze({
   cloudflared: Object.freeze({
@@ -476,17 +477,20 @@ async function install(o, p, saved, service, d) {
     // Re-read arrays immediately before the validated merge so unrelated
     // changes made during a long Docker build are preserved.
     const patch = await configPatch(o, p, saved, d);
+    const intended = { browser: await configSection('browser', d), plugins: await configSection('plugins', d) };
+    const expectedActivation = await captureSetupActivation(intended, patch, d);
     await d.run('openclaw', ['config', 'patch', '--stdin'], { input: JSON.stringify(patch) + '\n' });
     if (saved.pendingInertDesktop) { delete saved.pendingInertDesktop; await saveMarker(saved, p, d); }
     await reloadPlugin(d);
-    return saved;
+    return await waitForSetupActivation(expectedActivation, d, async () => assertHealth(await d.controllerHealth(p.socket), o));
   } finally { await d.fs.rm(lock, { recursive: true }); }
 }
 
 async function diagnose(o, p, saved, d, checks) {
+  let activation;
   const check = async (name, work) => {
     try { await work(); checks.push({ name, ok: true }); }
-    catch (error) { checks.push({ name, ok: false, message: error.message }); }
+    catch (error) { checks.push({ name, ok: false, message: error.message, ...(error.pending ? { pending: true } : {}) }); }
   };
   await check('installation', async () => { if (!saved) throw new Error('No owned Clawser setup found; run clawser setup'); });
   if (saved) {
@@ -501,8 +505,13 @@ async function diagnose(o, p, saved, d, checks) {
       if (!saved.imageId || (await d.run('docker', [dockerHost, 'image', 'inspect', '--format', '{{.Id}}', saved.imageId])).trim() !== saved.imageId) throw new Error('Owned desktop image is missing or changed');
     });
     await check('controller health', async () => { assertHealth(await d.controllerHealth(p.socket), o); });
+    await check('Gateway activation', async () => {
+      activation = await inspectSetupActivation({ browser: await configSection('browser', d), plugins: await configSection('plugins', d) }, d);
+      if (activation.backend !== 'novnc') throw new Error('Gateway activation does not match the requested noVNC backend');
+      requireActiveActivation(activation);
+    });
   }
-  return checks;
+  return activation;
 }
 
 /** Explicit local operator CLI only. Never expose setup as a chat tool. */
@@ -557,14 +566,16 @@ export async function runClawser(argv, deps = {}) {
     let saved;
     try { saved = await marker(o, p, d); }
     catch (error) { checks.push({ name: 'ownership', ok: false, message: error.message }); }
-    await diagnose(o, p, saved, d, checks);
+    const activation = await diagnose(o, p, saved, d, checks);
+    if (saved) d.log('Browser connection: ' + o.profile + '\nCDP: http://127.0.0.1:' + o.cdpPort);
+    logSetupActivation(activation, d);
     for (const row of checks) {
       const status = row.ok ? 'OK' : 'FAIL';
       const name = row.name;
       d.log(`${status} ${name}` + (row.message ? `: ${row.message}` : ''));
     }
     d.log(`Controller unit: ${p.serviceUnit}\nState: ${o.stateDir}\nContainer: ${o.containerName} (profile volume is retained)`);
-    return { ok: checks.every(row => row.ok), command: o.command, checks, stateDir: o.stateDir, serviceUnit: p.serviceUnit, servicePath: p.servicePath };
+    return { ok: checks.every(row => row.ok), pending: checks.some(row => row.pending), command: o.command, backend: 'novnc', activation: activationSummary(activation), ...(saved ? { profile: o.profile, cdpUrl: 'http://127.0.0.1:' + o.cdpPort } : {}), checks, stateDir: o.stateDir, serviceUnit: p.serviceUnit, servicePath: p.servicePath };
   }
   const failed = checks.filter(row => !row.ok);
   if (failed.length) throw new Error(failed.map(row => {
@@ -583,7 +594,8 @@ export async function runClawser(argv, deps = {}) {
   // Validate with OpenClaw before downloading or writing anything. Config is
   // never edited directly; supported patch operations preserve its own backups.
   await d.run('openclaw', ['config', 'patch', '--stdin', '--dry-run'], { input: JSON.stringify(patch) + '\n' });
-  await install(o, p, saved, service, d);
+  const activation = await install(o, p, saved, service, d);
   d.log(`Clawser is configured. Controller unit: ${p.serviceUnit}\nState: ${o.stateDir}\nContainer: ${o.containerName}; its browser profile is retained across reruns.\nBefore browser work, ask the owner session to run browser_handoff action=tabs to verify the active plugin connection.`);
-  return { ok: true, command: o.command, dryRun: false, stateDir: o.stateDir, serviceUnit: p.serviceUnit, servicePath: p.servicePath };
+  logSetupActivation(activation, d);
+  return { ok: true, command: o.command, backend: 'novnc', activation: activationSummary(activation), dryRun: false, stateDir: o.stateDir, serviceUnit: p.serviceUnit, servicePath: p.servicePath };
 }

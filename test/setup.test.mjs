@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runClawser, ARTIFACTS } from '../src/setup.mjs';
+import { activationFixture } from './setup-activation-fixture.mjs';
 
 const execute = promisify(execFile);
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -47,6 +48,7 @@ async function harness(t, config = {}) {
     controllerHealth: async () => ({ ready: true, profile: 'handoff', cdpUrl: 'http://127.0.0.1:18812', recoveryRequired: false }),
     fetch: async url => {
       calls.push({ command: 'fetch', args: [url] });
+      if (activation.diagnostic?.backend === 'cdp' && /^http:\/\/127\.0\.0\.1:\d+\/assets\/style\.css$/.test(url)) return new Response('body {}', { headers: { 'content-type': 'text/css' } });
       return new Response(failChecksum ? 'corrupt' : url === artifacts.cloudflared.url ? binary : archive);
     },
     run: async (command, args, options = {}) => {
@@ -57,7 +59,10 @@ async function harness(t, config = {}) {
         if (args[0] === '--version') return 'OpenClaw 2026.10.4';
         if (args[0] === 'config' && args[1] === 'get') return JSON.stringify(config[args[2]] ?? {});
         if (args[0] === 'config' && args[1] === 'patch') { if (!args.includes('--dry-run')) merge(config, JSON.parse(options.input)); return ''; }
-        if (args[0] === 'plugins' && args[1] === 'reload') { assert.equal(serviceActive, true); return ''; }
+        if (args[0] === 'plugins' && args[1] === 'reload') {
+          if (config.plugins.entries['browser-handoff'].config.desktop.enabled) assert.equal(serviceActive, true);
+          await activation.publish(); return '';
+        }
       }
       if (command === 'docker') {
         const rest = args.filter(arg => !arg.startsWith('--host='));
@@ -78,8 +83,9 @@ async function harness(t, config = {}) {
       return '';
     },
   };
+  const activation = activationFixture(config, deps);
   return {
-    root, stateDir, packageDir, config, deps, calls, logs,
+    root, stateDir, packageDir, config, deps, calls, logs, activation,
     args: ['setup', '--novnc', '--state-dir', stateDir],
     corrupt: () => { failChecksum = true; },
     busy: ports => { busyPorts = ports; },
@@ -92,6 +98,25 @@ test('pins verified upstream downloads', () => {
   assert.equal(ARTIFACTS.cloudflared.sha256, 'ae5e8add7884b0531d66bbca4570d1de491ff6da51e4ebe7eb160cdf241d9e42');
   assert.equal(ARTIFACTS.noVnc.sha256, 'b1003a11b6e6e8d8f7f5e5586daae7f8ca651d8aee0aa155ff9ac841c48f52c6');
   assert.match(ARTIFACTS.noVnc.url, /\/refs\/tags\/v1\.7\.0$/);
+});
+
+test('noVNC setup waits for Gateway activation and doctor does not mistake controller readiness for activation', async t => {
+  const h = await harness(t);
+  await runClawser(h.args, h.deps);
+  h.activation.diagnostic = { ...h.activation.diagnostic, phase: 'awaiting-commit' };
+  const doctor = await runClawser(['doctor', '--novnc', '--state-dir', h.stateDir], h.deps);
+  assert.equal(doctor.ok, false);
+  assert.equal(doctor.pending, true);
+  assert.equal(doctor.activation.phase, 'awaiting-commit');
+  assert.equal(doctor.profile, 'handoff');
+  assert.equal(doctor.cdpUrl, 'http://127.0.0.1:18812');
+  let time = 0;
+  h.deps.now = () => time;
+  h.deps.sleep = async ms => { time += ms; };
+  h.deps.readActivationDiagnostic = async () => undefined;
+  h.logs.length = 0;
+  await assert.rejects(runClawser(h.args, h.deps), /activation is pending/);
+  assert.equal(h.logs.some(line => line.startsWith('Clawser is configured')), false);
 });
 
 test('desktop to CDP to explicit noVNC reuses the original desktop receipt, socket and browser identity', async t => {
@@ -138,9 +163,8 @@ test('owned desktop reenable rejects a non-boolean enable flag even when identit
 
 test('a first CDP installation can switch to its first explicit noVNC installation', async t => {
   const h = await harness(t, { browser: { defaultProfile: 'personal', profiles: { personal: { attachOnly: true, cdpUrl: 'http://127.0.0.1:9333' } } } });
-  const run = h.deps.run, fetch = h.deps.fetch;
+  const fetch = h.deps.fetch;
   h.deps.fetch = (url, options) => url === 'http://127.0.0.1:9333/json/version' ? Response.json({ Browser: 'Chrome/149', webSocketDebuggerUrl: 'ws://127.0.0.1:9333/devtools/browser/test' }) : fetch(url, options);
-  h.deps.run = (command, args, options) => command === 'openclaw' && args[0] === 'plugins' && args[1] === 'reload' && h.config.plugins.entries['browser-handoff'].config.desktop.enabled === false ? '' : run(command, args, options);
   const cdp = await runClawser(['setup'], h.deps);
   const receipt = await fs.readFile(join(cdp.stateDir, 'setup.json'), 'utf8');
   const result = await runClawser(h.args, h.deps);
@@ -230,7 +254,7 @@ test('different execution captures preserve the trusted stable installation in r
   for (const capture of captures) {
     await fs.mkdir(join(capture, 'src'), { recursive: true });
     await fs.mkdir(join(capture, 'runtime/desktop'), { recursive: true });
-    for (const relative of ['src/setup.mjs', 'src/desktop-rpc.mjs', 'runtime/desktop/index.mjs']) await fs.copyFile(new URL(`../${relative}`, import.meta.url), join(capture, relative));
+    for (const relative of ['src/setup.mjs', 'src/setup-activation.mjs', 'src/browser-activation.mjs', 'src/browser-policy.mjs', 'src/browser-config.mjs', 'src/authorization.mjs', 'openclaw.plugin.json', 'src/desktop-rpc.mjs', 'runtime/desktop/index.mjs']) await fs.copyFile(new URL(`../${relative}`, import.meta.url), join(capture, relative));
   }
   const firstModule = await import(pathToFileURL(join(captures[0], 'src/setup.mjs')).href);
   const secondModule = await import(pathToFileURL(join(captures[1], 'src/setup.mjs')).href);

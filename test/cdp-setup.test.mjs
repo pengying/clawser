@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runClawser, ARTIFACTS } from '../src/setup.mjs';
+import { activationFixture } from './setup-activation-fixture.mjs';
 
 function merge(base, patch) {
   for (const [key, value] of Object.entries(patch)) {
@@ -42,12 +43,14 @@ async function harness(t) {
         const directory = join(root, 'openclaw/browser-handoff/cloudflare');
         await fs.mkdir(directory, { mode: 0o700, recursive: true });
         await fs.writeFile(join(directory, 'transport.json'), JSON.stringify({ origin: 'https://fixture.trycloudflare.com', port: 18796, pid: 9999 }), { mode: 0o600 });
+        await activation.publish();
         return '';
       }
       throw new Error('Unexpected CLI request');
     },
   };
-  return { root, config, calls, logs, deps, stateDir: join(root, 'openclaw/clawser-cdp') };
+  const activation = activationFixture(config, deps);
+  return { root, config, calls, logs, deps, activation, stateDir: join(root, 'openclaw/clawser-cdp') };
 }
 
 test('default setup reuses existing normal Chrome without desktop prerequisites or browser changes', async t => {
@@ -313,4 +316,50 @@ test('CDP repeat setup can repair public transport failure through its healthy o
   await assert.rejects(runClawser(['setup'], h.deps), /[Vv]iewer port.*unowned/);
   assert.deepEqual(h.config, original);
   assert.equal(h.calls.some(call => call.args.includes('patch') || call.args.includes('reload')), false);
+});
+
+test('CDP setup does not report configured when reload leaves the new generation awaiting commit', async t => {
+  const h = await harness(t);
+  let time = 0;
+  h.deps.now = () => time;
+  h.deps.sleep = async ms => { time += ms; };
+  h.deps.readActivationDiagnostic = async () => undefined;
+  await assert.rejects(runClawser(['setup'], h.deps), /activation.*pending|awaiting.*commit/i);
+  assert.equal(h.logs.some(line => line.startsWith('Clawser is configured')), false);
+  assert.ok(time >= 30_000 && time <= 31_000);
+});
+
+test('CDP doctor cannot report ready from a viewer alone when Gateway activation is unavailable', async t => {
+  const h = await harness(t);
+  await runClawser(['setup'], h.deps);
+  h.deps.readActivationDiagnostic = async () => undefined;
+  const result = await runClawser(['doctor'], h.deps);
+  assert.equal(result.ok, false);
+  assert.ok(result.checks.some(row => row.name === 'Gateway activation' && !row.ok));
+});
+
+test('CDP setup waits for local active generation while public warming remains explicit in doctor', async t => {
+  const h = await harness(t), run = h.deps.run;
+  let time = 0, waits = 0;
+  h.deps.now = () => time;
+  h.deps.sleep = async ms => {
+    time += ms; waits++;
+    if (waits === 2) await h.activation.publish({ generation: h.activation.diagnostic.generation, publicTransport: 'warming' });
+  };
+  h.deps.run = async (command, args, options) => {
+    const result = await run(command, args, options);
+    if (args[0] === 'plugins' && args[1] === 'reload') await h.activation.publish({ phase: 'awaiting-commit', publicTransport: 'warming' });
+    return result;
+  };
+  const result = await runClawser(['setup'], h.deps);
+  assert.equal(waits, 2);
+  assert.equal(result.activation.phase, 'active');
+  assert.equal(result.activation.publicTransport, 'warming');
+  assert.ok(h.logs.some(line => line.includes('Public transport: warming')));
+  await fs.rm(join(h.root, 'openclaw/browser-handoff/cloudflare/transport.json'));
+  const doctor = await runClawser(['doctor'], h.deps);
+  assert.equal(doctor.pending, true);
+  assert.equal(doctor.activation.phase, 'active');
+  assert.ok(doctor.checks.some(row => row.name === 'public transport' && row.pending && /warming/.test(row.message)));
+  assert.equal(doctor.checks.some(row => /unowned|non-private/.test(row.message ?? '')), false);
 });
