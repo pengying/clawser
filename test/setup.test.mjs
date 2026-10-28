@@ -39,13 +39,10 @@ async function harness(t, config = {}) {
     cloudflared: { ...ARTIFACTS.cloudflared, sha256: digest(binary) },
     noVnc: { ...ARTIFACTS.noVnc, sha256: digest(archive) },
   };
-  const hostBin = join(root, 'host-bin');
-  await fs.mkdir(hostBin);
-  for (const name of ['x11vnc', 'Xvfb', 'openbox']) await fs.writeFile(join(hostBin, name), `${name} fixture`, { mode: 0o755 });
   const calls = [], logs = [];
   let serviceActive = false, servicePath = '', failChecksum = false, busyPorts = [], dockerResources = {};
   const deps = {
-    fs, artifacts, packageDir, env: { XDG_CONFIG_HOME: join(root, 'config') }, homeDir: root, hostPaths: [hostBin], osReleasePath: join(root, 'os-release'),
+    fs, artifacts, packageDir, env: { XDG_CONFIG_HOME: join(root, 'config') }, homeDir: root,
     platform: 'linux', arch: 'x64', nodeVersion: '24.18.0', execPath: '/node "quoted" % $PATH',
     log: message => logs.push(message), isPortFree: async port => !busyPorts.includes(port),
     controllerHealth: async () => ({ ready: true, profile: 'handoff', cdpUrl: 'http://127.0.0.1:18812', recoveryRequired: false }),
@@ -56,7 +53,6 @@ async function harness(t, config = {}) {
     },
     run: async (command, args, options = {}) => {
       calls.push({ command, args, input: options.input, timeoutMs: options.timeoutMs });
-      if (command.startsWith(hostBin + '/')) return `${command.slice(hostBin.length + 1)} 1.0.0`;
       if (command === 'tar' && args.includes('-xzf')) return (await execute(command, args)).stdout;
       if (command === 'tar' && args.includes('-tzf')) return (await execute(command, args)).stdout;
       if (command === 'openclaw') {
@@ -258,7 +254,7 @@ test('different execution captures preserve the trusted stable installation in r
   for (const capture of captures) {
     await fs.mkdir(join(capture, 'src'), { recursive: true });
     await fs.mkdir(join(capture, 'runtime/desktop'), { recursive: true });
-    for (const relative of ['src/setup.mjs', 'src/setup-activation.mjs', 'src/browser-activation.mjs', 'src/browser-policy.mjs', 'src/browser-config.mjs', 'src/authorization.mjs', 'openclaw.plugin.json', 'src/desktop-rpc.mjs', 'src/host-deps.mjs', 'runtime/desktop/index.mjs']) await fs.copyFile(new URL(`../${relative}`, import.meta.url), join(capture, relative));
+    for (const relative of ['src/setup.mjs', 'src/setup-activation.mjs', 'src/browser-activation.mjs', 'src/browser-policy.mjs', 'src/browser-config.mjs', 'src/authorization.mjs', 'openclaw.plugin.json', 'src/desktop-rpc.mjs', 'runtime/desktop/index.mjs']) await fs.copyFile(new URL(`../${relative}`, import.meta.url), join(capture, relative));
   }
   const firstModule = await import(pathToFileURL(join(captures[0], 'src/setup.mjs')).href);
   const secondModule = await import(pathToFileURL(join(captures[1], 'src/setup.mjs')).href);
