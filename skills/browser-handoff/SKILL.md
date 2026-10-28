@@ -33,10 +33,14 @@ cannot establish it. Do not disclose unrelated tabs.
    claim its one-use bearer link. Other members cannot request, inspect or revoke
    it. Never send it elsewhere or put it in logs, durable memory, issues or
    preview-fetch tools. Ask the owner to select **Take control**, then **Done**.
-4. Pause browser actions after creating the intervention link. Repeat
-   `action=wait` with its ID and `timeoutSeconds<=60` while active. Keep the wait
-   alive in CDP mode. Never navigate, type or use another client during human
-   control. Watch-only requests permit work until control is acquired.
+4. Pause browser actions after creating the intervention link. If replies are
+   buffered until the turn ends, or delivery behavior is unknown, deliver the URL
+   in the final reply and end the turn. Ask the owner to reply after pressing
+   Done. Use `action=wait` with `timeoutSeconds<=60` only after URL delivery is
+   confirmed. On the next owner turn, check the existing invitation’s fresh
+   status before any browser action; an owner’s “Done” message is not handback
+   proof. Never navigate, type or use another client during human control.
+   Watch-only requests permit work until control is acquired.
 5. Apply the reported handback contract. **CDP:** require `mode=ended` and no
    `browserGateFault` or recovery requirement. **noVNC:** require
    `resumeAllowed=true` and no recovery requirement; ended mode alone is

@@ -130,10 +130,12 @@ endpoint overrides cannot bypass this route. Missing current APIs or changed
 configuration fail closed.
 
 The bundled skill explains delivery and handback. CDP returns `backend: "cdp"`,
-`scope: "tab"`, `continuation: "active-wait"`: keep waiting during the active
-run, require `mode: "ended"` with no `browserGateFault` or recovery requirement,
-then take a fresh gated browser snapshot. After that run ends, a new owner turn
-is required. noVNC returns `backend: "novnc"`, `scope: "browser-profile"` and
+`scope: "tab"`, `continuation: "active-wait"`. If replies are buffered until
+the turn ends, or delivery behavior is unknown, the agent ends the turn with the
+link and asks you to reply after pressing Done. Active waits are used only after
+link delivery is confirmed. The next owner turn checks the existing invitation:
+require `mode: "ended"` with no `browserGateFault` or recovery requirement, then
+take a fresh gated browser snapshot. Your message alone does not prove handback. noVNC returns `backend: "novnc"`, `scope: "browser-profile"` and
 requires `resumeAllowed: true` with no recovery requirement. Ended mode alone is
 insufficient. Its completion notifications are best effort. Done does not prove
 that a CAPTCHA passed or a submission succeeded; never replay uncertain input.
