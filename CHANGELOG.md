@@ -1,5 +1,11 @@
 # Changes
 
+## 0.6.0
+
+- Support real press-and-hold from a phone in the noVNC viewer. A finger held still for 250 ms presses the remote button, later movement is sent while it is held, and lifting releases it. A quick tap is still one click, and a swipe still scrolls. Pinch, a hidden page, loss of control, Done and disconnect release the button.
+- Keep a noVNC handoff alive when the phone's connection drops, for example when switching apps for a 2FA code. Input is fenced and settled as on Done, the invitation stays valid until it expires, and the same link reconnects in watch mode. Control requires Take control again. Done, revoke, expiry and VNC server failures still end the handoff.
+- Add host display dependency resolution for the upcoming host noVNC backend. It is off by default and does not change setup or doctor in this release.
+
 ## 0.5.0
 
 - Make the existing configured default attach-only Chromium CDP connection the standard setup path. Reuse its selected tab without launching a browser, creating a Chrome profile, copying cookies or falling back to another endpoint.
