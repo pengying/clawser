@@ -93,6 +93,15 @@ Do not repurpose an old desktop state directory for CDP setup.
 
 ## Activation and doctor
 
+Setup waits for a new matching active Gateway generation and local viewer readiness.
+OpenClaw may briefly report `awaiting-commit` while a hot reload publishes its
+configuration; browser tools remain unavailable during that transition. A successful
+reload command alone does not prove activation. `doctor` reports the activation
+phase, selected browser identity and public transport state. `active` with public
+transport `warming` means the local service is ready while Cloudflare finishes
+starting; creating a link waits for public readiness. A terminal activation failure
+requires correcting the reported problem and reloading the plugin.
+
 Follow setup's printed activation/reload instructions, then run:
 
 ```sh

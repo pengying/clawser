@@ -5,6 +5,8 @@
 - Make the existing configured default attach-only Chromium CDP connection the standard setup path. Reuse its selected tab without launching a browser, creating a Chrome profile, copying cookies or falling back to another endpoint.
 - Add a separate private CDP setup receipt, checksum-pinned cloudflared installation and read-only doctor checks for ownership, executable integrity, current browser binding, local viewer and public tunnel readiness. Keep Docker/noVNC desktop setup behind `--novnc`.
 - Require native verified-owner authority for both ordinary browser tools and handoffs, with a declared trusted-tool policy, explicit host routing, current configuration binding and fail-closed endpoint/profile restrictions. Retire shares when browser/plugin configuration or group authorization changes.
+- Separate service preparation from activation during native hot reloads; require a fresh matching published configuration, generation-safe readiness diagnostics and local backend checks before setup reports success.
+- Recover stalled Chrome screencast painting with bounded, reader-demanded discarded viewport captures, without retrying input or changing browser geometry.
 - Support explicit mobile Keyboard control of the focused opaque/cross-origin frame, with bounded capabilities revoked on navigation, stale state or loss of control. Keep passive metadata value-free and never replay uncertain input.
 - Report backend-specific scope and handback: CDP shares one tab with active waits; noVNC shares a whole profile and requires `resumeAllowed=true`. Preserve existing browsers, tabs, profiles and strict desktop ownership across mode changes.
 
