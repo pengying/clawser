@@ -460,3 +460,61 @@ test('CDP server binding callback retires stale invitations before data-plane us
   tick(); assert.equal(cleared, 1);
   await f.services[0].stop(); assert.equal(cleared, 1); assert.equal(callback(), false);
 });
+
+test('data-plane callback permanently retires a superseded publication without unpublishing its replacement', async t => {
+  let oldCurrent, newCurrent;
+  const old = setup({ serverFactory(options) { oldCurrent = options.isBindingCurrent; return new HandoffServer(options); } });
+  await old.services[0].start(); t.after(() => old.services[0].stop());
+  const created = await old.tools[0].create(old.ctx).execute('create', { action: 'create', targetId: 'tab' });
+  const oldGate = old.getServer().store.gate; oldGate.enter('pending-native-call');
+  const replacement = setup({ serverFactory(options) { newCurrent = options.isBindingCurrent; return new HandoffServer(options); } });
+  await replacement.services[0].start(); t.after(() => replacement.services[0].stop());
+  assert.equal(newCurrent(), true);
+  assert.equal(oldCurrent(), false);
+  assert.equal(old.getServer().store.shares.has(created.details.id), false);
+  assert.ok(oldGate.poisonReason); assert.ok(oldGate.active.has('pending-native-call'));
+  assert.equal(oldCurrent(), false);
+  await old.services[0].stop();
+  assert.equal(newCurrent(), true, 'stale unpublish must preserve the replacement registration');
+  assert.equal((await discover(replacement).execute('tabs', { action: 'tabs' })).details.profile, 'demo');
+});
+test('data-plane callback rejects a gate fault and remains retired even if that gate field is cleared', async t => {
+  for (const inspectFirst of [false, true]) {
+    let current;
+    const f = setup({ serverFactory(options) { current = options.isBindingCurrent; return new HandoffServer(options); } });
+    await f.services[0].start(); t.after(() => f.services[0].stop());
+    const tool = f.tools[0].create(f.ctx);
+    await tool.execute('create', { action: 'create', targetId: 'tab' });
+    f.getServer().store.gate.poison();
+    if (inspectFirst) await assert.rejects(tool.execute('tabs', { action: 'tabs' }), /fault|recovery/i);
+    assert.equal(current(), false);
+    assert.equal(f.getServer().store.shares.size, 0);
+    f.getServer().store.gate.poisonReason = null;
+    assert.equal(current(), false, 'the callback cannot revive a retired service generation');
+  }
+});
+test('prepublication asset readiness stays available and Cloudflare warmup remains asynchronous', async t => {
+  let current, ready, startupChecks = 0;
+  const transport = new EventEmitter(); transport.close = async () => {};
+  transport.ensure = () => { assert.equal(current(), true); return new Promise(resolve => { ready = resolve; }); };
+  const f = setup({ cloudflareFactory: () => transport, serverFactory(options) {
+    current = options.isBindingCurrent;
+    assert.equal(current(), true, 'construction has no published invitations yet'); startupChecks++;
+    const server = new HandoffServer(options), start = server.start.bind(server);
+    server.start = async options => {
+      await start(options);
+      assert.equal(current(), true, 'listener assets must be usable before publication'); startupChecks++;
+      const response = await fetch(server.localUrl + '/assets/style.css');
+      assert.equal(response.status, 200); await response.body.cancel();
+      assert.equal(server.store.gate.poisonReason, null);
+      return server.localUrl;
+    };
+    return server;
+  } });
+  f.api.pluginConfig.cloudflare = { enabled: true, binaryPath: '/fixture/cloudflared' };
+  const starting = f.services[0].start({ stateDir: tmpdir() }); t.after(() => f.services[0].stop());
+  assert.equal(await Promise.race([starting.then(() => 'started'), new Promise(resolve => setTimeout(() => resolve('blocked'), 100))]), 'started');
+  assert.equal(startupChecks, 2); assert.equal(typeof ready, 'function'); assert.equal(current(), true);
+  ready('https://warmup.trycloudflare.com'); await new Promise(setImmediate);
+  assert.equal(current(), true);
+});

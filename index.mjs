@@ -110,14 +110,32 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
           unpublish(); stopping = false;
           const started = epoch = Symbol();
           const dynamic = config.funnel?.enabled === true || config.cloudflare?.enabled === true;
-          const isBindingCurrent = () => {
-            if (epoch !== started || stopping) return false;
-            try { binding.current(); return true; } catch { return false; }
+          let ownedService, published = false, retired = false;
+          const retireDataPlane = () => {
+            retired = true;
+            if (epoch === started && service === ownedService && ownedService) {
+              // Retire only this instance: its registry key may already belong
+              // to a healthy replacement, and uncertain work retains its fence.
+              unpublish(); ownedService.setPublicBase(undefined);
+              ownedService.store.gate.poison();
+              for (const share of [...ownedService.store.shares.values()]) ownedService.store.end(share, 'service_unavailable');
+            }
+            return false;
           };
-          const ownedService = service = serverFactory({ isBindingCurrent, backend: backendFactory(resolved.profiles), publicBaseUrl: dynamic ? undefined : config.publicBaseUrl, comparisonProxyUrl: config.comparisonProxyUrl });
+          const isBindingCurrent = () => {
+            if (retired) return false;
+            if (epoch !== started || stopping) return retireDataPlane();
+            try { binding.current(); } catch { return retireDataPlane(); }
+            if (ownedService?.store.gate.poisonReason) return retireDataPlane();
+            // Assets are needed during startup before a service is published.
+            // Once published, losing that exact registration is permanent.
+            if (published && (!publication || liveInstances().get(publication.key) !== publication)) return retireDataPlane();
+            return true;
+          };
+          ownedService = service = serverFactory({ isBindingCurrent, backend: backendFactory(resolved.profiles), publicBaseUrl: dynamic ? undefined : config.publicBaseUrl, comparisonProxyUrl: config.comparisonProxyUrl });
           let ownedTransport;
           const current = () => {
-            if (epoch !== started || service !== ownedService || stopping) throw new Error('Browser Handoff service changed during startup');
+            if (epoch !== started || service !== ownedService || stopping || retired) throw new Error('Browser Handoff service changed during startup');
             binding.current();
           };
           ownedService.store.on('ended', event => {
@@ -157,7 +175,7 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, backe
             }
             current();
             publication = { key: instanceKey(api), factory: toolFactory };
-            liveInstances().set(publication.key, publication);
+            liveInstances().set(publication.key, publication); published = true;
             stopBindingMonitor = monitorBrowserBinding(binding, bindingMonitorScheduler);
           } catch (error) {
             if (epoch === started) { unpublish(); stopping = true; stopBindingMonitor?.(); stopBindingMonitor = undefined; }
