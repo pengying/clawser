@@ -33,10 +33,8 @@ cover 2026.10.4 and 2026.10.7. Other operating systems and ARM hosts are unverif
 Start your OpenClaw Gateway and the configured attach-only browser before setup.
 Default setup needs no Docker, user systemd, `flock`, `tar` or noVNC download.
 
-These instructions describe the planned **v0.5.0** release; its Git install
-command requires the tag to be published. Tagged Git installation is the
-recommended distribution. ClawHub currently serves **v0.3.5**; the hosted v0.4.1
-SkillSpector run failed before a verdict. Do not expect v0.5.0 on ClawHub.
+Install the tagged **v0.5.0** release from GitHub. ClawHub availability may lag
+GitHub; use v0.5.0 or newer for the CDP-default behavior described here.
 
 ```sh
 openclaw plugins install git:github.com/pengying/clawser@v0.5.0 --force --accept-capabilities

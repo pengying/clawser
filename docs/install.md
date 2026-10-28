@@ -15,9 +15,8 @@ not require Docker, systemd, `flock`, `tar` or a noVNC download. The optional
 
 ## Tagged Git installation
 
-This guide describes the planned v0.5.0 release. The commands below require its
-Git tag or archive to be published. Tagged Git installation is the recommended
-path; v0.5.0 is not claimed to be available on ClawHub.
+This guide describes v0.5.0. Tagged Git installation is the recommended
+distribution path.
 
 ```sh
 openclaw plugins install git:github.com/pengying/clawser@v0.5.0 --force --accept-capabilities
@@ -34,11 +33,9 @@ native command with `--accept-capabilities`; never hand-write acknowledgement
 settings to make a contract warning disappear. Review the installation output
 and follow its activation guidance.
 
-ClawHub currently serves **v0.3.5**. The hosted v0.4.1 SkillSpector execution
-failed before a verdict; that failure is not a passing scan or a security verdict.
-The older published package can be selected explicitly with
-`openclaw plugins install clawhub:@pengying/clawser@0.3.5 --accept-capabilities`,
-but it does not provide this guide's v0.5.0 CDP-default behavior.
+Check the [ClawHub package page](https://clawhub.ai/pengying/plugins/clawser)
+for approved registry versions. Older releases use the noVNC default and do not
+provide this guide’s CDP-first setup.
 
 ## Existing browser connection
 
