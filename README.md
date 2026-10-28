@@ -114,7 +114,8 @@ scope, and [runtime documentation](runtime/desktop/README.md) for technical deta
 `browser_handoff` is available to a verified owner in private direct/main sessions.
 Groups are disabled by default. The operator may opt exact group/channel base
 session keys into `ownerGroupSessions`; only native verified owner turns with
-per-sender identity and external-user provenance may invoke it there. Nonowners,
+per-sender and conversation identity may invoke it there. Native user turns may
+omit provenance or explicitly use external-user provenance. Nonowners,
 unidentified callers, sandboxes and automated group turns remain denied. A
 shared-admin HTTP agent proxy cannot establish per-sender owner authority.
 

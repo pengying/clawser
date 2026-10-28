@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { authorizedSession, ownerAuthorized, ownerGuard } from '../src/authorization.mjs';
 const group = 'agent:main:googlechat:group:spaces/demo';
 const config = { ownerGroupSessions: [group] };
-const context = () => ({ senderIsOwner: true, sessionKey: group, sessionId: 'incarnation', requesterSenderId: 'users/owner', inputProvenance: { kind: 'external_user' }, assertInvocationCurrent() {} });
+const context = () => ({ senderIsOwner: true, sessionKey: group, sessionId: 'incarnation', requesterSenderId: 'users/owner', nativeChannelId: 'spaces/demo', assertInvocationCurrent() {} });
 test('group allowlist matches exact base sessions with only valid Google Chat thread suffixes', () => {
   for (const key of [group, group + ':thread:0123456789abcdef01234567']) assert.equal(authorizedSession(key, config.ownerGroupSessions), true, key);
   for (const key of [group + '-other', group + ':thread:', group + ':thread:spaces/other/threads/id', group + ':thread:id:cron:x', group + ':thread:../id', group + ':channel:x']) assert.equal(authorizedSession(key, config.ownerGroupSessions), false, key);
@@ -18,17 +18,31 @@ test('automated origins and malformed identities never gain authority through op
     const key = group + suffix;
     assert.equal(ownerAuthorized({ ...ctx, sessionKey: key }, { ownerGroupSessions: [key] }), false);
   }
-  for (const delta of [{ sessionId: '' }, { sessionId: ' ' }, { sandboxed: true }, { sandbox: {} }, { assertInvocationCurrent: undefined }, { requesterSenderId: '' }, { inputProvenance: { kind: 'external_user', sourceRole: 'subagent' } }, { inputProvenance: { kind: 'external_user', jobId: 'job' } }]) assert.equal(ownerAuthorized({ ...ctx, ...delta }, config), false);
+  for (const delta of [{ sessionId: '' }, { sessionId: ' ' }, { sandboxed: true }, { assertInvocationCurrent: undefined }, { requesterSenderId: '' }, { nativeChannelId: undefined }, { nativeChannelId: '' }, { nativeChannelId: ' ' }, { inputProvenance: { kind: 'external_user', sourceRole: 'subagent' } }, { inputProvenance: { kind: 'external_user', jobId: 'job' } }]) assert.equal(ownerAuthorized({ ...ctx, ...delta }, config), false);
   const direct = { ...ctx, sessionKey: 'agent:main:telegram:direct:1', requesterSenderId: undefined, inputProvenance: undefined };
   assert.equal(ownerAuthorized(direct), true);
   assert.equal(ownerAuthorized({ ...direct, inputProvenance: { kind: 'internal_system', sourceTool: 'exec' } }), true);
   assert.equal(ownerAuthorized({ ...direct, inputProvenance: { kind: 'internal_system', sourceTool: 'heartbeat' } }), true, 'private provenance policy stays backward compatible');
 });
 test('retained guards reject changed sessions, incarnation and native sender identity', () => {
-  for (const delta of [{ sessionId: 'new' }, { sessionKey: group + ':thread:abcdef0123456789abcdef01' }, { requesterSenderId: 'users/other' }]) {
-    const ctx = context(), guard = ownerGuard(ctx, config); guard(); Object.assign(ctx, delta);
+  for (const delta of [{ sessionId: 'new' }, { sessionKey: group + ':thread:abcdef0123456789abcdef01' }, { requesterSenderId: 'users/other' }, { nativeChannelId: 'spaces/other' }]) {
+    const ctx = { ...context(), inputProvenance: { kind: 'external_user' } }, guard = ownerGuard(ctx, config); guard(); Object.assign(ctx, delta);
     assert.throws(guard, /owner|session|identity/i);
   }
   const ctx = context(), guard = ownerGuard(ctx, config); config.ownerGroupSessions = []; assert.throws(guard, /owner/i); config.ownerGroupSessions = [group];
   ctx.assertInvocationCurrent = () => { throw new Error('stale invocation'); }; assert.throws(guard, /stale/);
+});
+
+test('native external owner turns accept SDK default provenance and require native conversation identity', () => {
+  const ctx = context();
+  assert.equal(ownerAuthorized(ctx, config), true, 'native SDK leaves provenance undefined for normal user input');
+  assert.equal(ownerAuthorized({ ...ctx, inputProvenance: { kind: 'external_user' } }, config), true);
+  assert.equal(ownerAuthorized({ ...ctx, inputProvenance: { kind: 'external_user', sourceRole: 'user' } }, config), true);
+  for (const inputProvenance of [{ kind: 'inter_session' }, { kind: 'internal_system' }, { kind: 'external_user', sourceRole: 'subagent' }, { kind: 'external_user', sourceRole: 'system' }, { kind: 'external_user', sourceRole: 'assistant' }, { kind: 'external_user', sourceTool: 'heartbeat' }, { kind: 'external_user', jobId: 'cron' }]) assert.equal(ownerAuthorized({ ...ctx, inputProvenance }, config), false);
+  assert.equal(ownerAuthorized({ ...ctx, requesterSenderId: undefined }, config), false, 'shared admin HTTP has no trusted native sender');
+});
+
+test('native conversation identity is required even with explicit external provenance', () => {
+  const ctx = { ...context(), inputProvenance: { kind: 'external_user' } };
+  assert.equal(ownerAuthorized({ ...ctx, nativeChannelId: undefined }, config), false);
 });

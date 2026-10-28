@@ -279,10 +279,13 @@ parameters.
 
 Enable this only after the channel ingress passes authenticated per-message
 sender identity through the native OpenClaw SDK. The host must supply
-`senderIsOwner=true`, a nonempty trusted `requesterSenderId`, and
-`inputProvenance.kind=external_user` on a current nonsandboxed V2 invocation with
-valid `sessionKey` and `sessionId`. A shared-admin HTTP `/v1/chat/completions`
-agent proxy assigns the proxy's authority, so it is unsuitable for this opt-in.
+`senderIsOwner=true`, nonempty trusted `requesterSenderId` and `nativeChannelId`,
+and a current nonsandboxed V2 invocation with valid `sessionKey` and `sessionId`.
+Native user turns may omit `inputProvenance` (the SDK's external-input default)
+or explicitly use `kind=external_user`. Explicit `inter_session` or
+`internal_system` provenance and automation markers are denied. A shared-admin
+HTTP `/v1/chat/completions` agent proxy assigns the proxy's authority, so it is
+unsuitable for this opt-in.
 Subagents, cron, hooks, heartbeat and other automated group turns remain denied.
 Private owner sessions retain their existing V2 continuation behavior.
 

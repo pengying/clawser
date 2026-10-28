@@ -84,7 +84,7 @@
           "type": "string",
           "pattern": "^agent:[^:]+:[a-z0-9_-]+:(?:group|channel):[^:*\\s]+$"
         },
-        "description": "Operator opt-in: exact group/channel base session keys, no wildcards or thread entries. A verified native owner turn may deliver its one-use bearer link to the same requesting group/thread; any group member can claim it. Google Chat permits only a :thread:<24 lowercase hex> suffix. Native per-sender identity and external_user input provenance are required; never use a shared-admin HTTP agent proxy."
+        "description": "Operator opt-in: exact group/channel base session keys, no wildcards or thread entries. A verified native owner turn may deliver its one-use bearer link to the same requesting group/thread; any group member can claim it. Google Chat permits only a :thread:<24 lowercase hex> suffix. Native per-sender and conversation identity are required; absent provenance uses the SDK external-user default, and explicit automated provenance is denied; never use a shared-admin HTTP agent proxy."
       },
       "cloudflare": {
         "type": "object",

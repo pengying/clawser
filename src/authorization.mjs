@@ -17,15 +17,18 @@ export function ownerAuthorized(ctx, config = {}) {
       typeof ctx.assertInvocationCurrent !== 'function' || !authorizedSession(ctx.sessionKey, config.ownerGroupSessions)) return false;
   if (/:group:|:channel:/i.test(ctx.sessionKey)) {
     const provenance = ctx.inputProvenance;
-    return !ctx.sandbox && nonempty(ctx.requesterSenderId) && provenance?.kind === 'external_user' &&
-      !provenance.sourceRole && !provenance.jobId && !provenance.sourceTool;
+    // Native external user turns may omit provenance in the host SDK.
+    return nonempty(ctx.requesterSenderId) && nonempty(ctx.nativeChannelId) &&
+      (provenance === undefined || provenance?.kind === 'external_user' &&
+        (!provenance.sourceRole || provenance.sourceRole === 'user') && !provenance.jobId && !provenance.sourceTool);
   }
   return true;
 }
 export function ownerGuard(ctx, config = {}) {
   const sessionKey = ctx.sessionKey, sessionId = ctx.sessionId, senderId = ctx.requesterSenderId;
+  const group = /:group:|:channel:/i.test(sessionKey), nativeChannelId = ctx.nativeChannelId;
   return () => {
     ctx.assertInvocationCurrent();
-    if (ctx.sessionKey !== sessionKey || ctx.sessionId !== sessionId || ctx.requesterSenderId !== senderId || !ownerAuthorized(ctx, config)) throw new Error('Owner-authorized access required');
+    if (ctx.sessionKey !== sessionKey || ctx.sessionId !== sessionId || ctx.requesterSenderId !== senderId || (group && ctx.nativeChannelId !== nativeChannelId) || !ownerAuthorized(ctx, config)) throw new Error('Owner-authorized access required');
   };
 }

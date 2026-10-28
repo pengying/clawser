@@ -614,12 +614,13 @@ test('production group opt-in uses native per-sender authority in discovery and 
   const key = 'agent:main:googlechat:group:spaces/demo';
   const configure = api => { api.pluginConfig.ownerGroupSessions = [key]; };
   const f = setup({ configure }); await f.services[0].start(); t.after(() => f.services[0].stop());
-  const ctx = { ...ownerContext(), sessionKey: key, requesterSenderId: 'users/owner', inputProvenance: { kind: 'external_user' } };
+  const ctx = { ...ownerContext(), sessionKey: key, requesterSenderId: 'users/owner', nativeChannelId: 'spaces/demo' };
   const discovery = setup({ configure, registrationMode: 'tool-discovery' });
   for (const factory of [f.tools[0], discovery.tools[0]]) {
     const tool = factory.create(ctx); assert.ok(tool);
     assert.equal(factory.create({ ...ctx, senderIsOwner: false }), null);
     assert.equal(factory.create({ ...ctx, requesterSenderId: undefined }), null);
+    assert.equal(factory.create({ ...ctx, nativeChannelId: undefined }), null);
     assert.equal(factory.create({ ...ctx, inputProvenance: { kind: 'internal_system' } }), null);
     await tool.execute('status', { action: 'status', id: 'lease', senderIsOwner: false });
   }

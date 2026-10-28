@@ -171,14 +171,14 @@ test('blocked calls with colliding IDs in another run cannot release an admitted
   assert.equal(share.mode, 'control');
 });
 
-const groupContext = (ctx, suffix = '') => ({ ...ctx, sessionKey: 'agent:main:googlechat:group:spaces/demo' + suffix, requesterSenderId: 'users/owner', inputProvenance: { kind: 'external_user' } });
+const groupContext = (ctx, suffix = '') => ({ ...ctx, sessionKey: 'agent:main:googlechat:group:spaces/demo' + suffix, requesterSenderId: 'users/owner', nativeChannelId: 'spaces/demo' });
 test('explicit groups admit only native owner turns and retain session-incarnation ownership', async t => {
   const f = setup();
   f.api.pluginConfig.ownerGroupSessions = ['agent:main:googlechat:group:spaces/demo'];
   await f.services[0].start(); t.after(() => f.services[0].stop());
   const ctx = groupContext(f.ctx), factory = f.tools[0], tool = factory.create(ctx);
   assert.ok(tool);
-  for (const change of [ { senderIsOwner: false }, { requesterSenderId: undefined }, { inputProvenance: undefined }, { inputProvenance: { kind: 'internal_system' } }, { inputProvenance: { kind: 'inter_session' } }, { sessionKey: ctx.sessionKey + '-other' }, { sessionKey: ctx.sessionKey + ':cron:job' }, { sandboxed: true } ]) assert.equal(factory.create({ ...ctx, ...change }), null);
+  for (const change of [ { senderIsOwner: false }, { requesterSenderId: undefined }, { nativeChannelId: undefined }, { inputProvenance: { kind: 'internal_system' } }, { inputProvenance: { kind: 'inter_session' } }, { sessionKey: ctx.sessionKey + '-other' }, { sessionKey: ctx.sessionKey + ':cron:job' }, { sandboxed: true } ]) assert.equal(factory.create({ ...ctx, ...change }), null);
   const created = await tool.execute('create', { action: 'create', profile: 'demo', targetId: 'tab', senderIsOwner: false });
   assert.match(created.details.url, /\/s\//);
   const other = factory.create({ ...ctx, sessionId: 'other-incarnation' });
