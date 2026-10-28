@@ -10,7 +10,7 @@ const receiptFlags=['vncProcessesExited','xClientsAbsent','heldInputCleared','xS
 const recoveryMessage='Browser input outcome uncertain; operator recovery is required';
 const validateActor=(actor,id,role)=>{if(actor?.leaseId!==id||actor.role!==role||!Number.isSafeInteger(actor.epoch)||actor.epoch<1||typeof actor.displayGeneration!=='string'||!actor.displayGeneration||typeof actor.browserGeneration!=='string'||!actor.browserGeneration)throw new Error('Viewer authority identity is invalid');};
 const inputFenced=receipt=>receipt?.vncProcessesExited===true&&receipt?.xClientsAbsent===true&&((receipt.readOnly===true&&receipt.inputResetRequired===false)||receiptFlags.every(key=>receipt[key]===true));
-const safeCompletion=row=>inputFenced(row.receipt)&&((row.mayBeWritable===false&&row.receipt.readOnly===true)||row.receipt.snapshotObserved===true);
+export const safeCompletion=row=>inputFenced(row.receipt)&&((row.mayBeWritable===false&&row.receipt.readOnly===true)||row.receipt.snapshotObserved===true);
 const terminal=row=>row.state==='ended'||row.state==='recovery_required';
 const ownerParts=value=>{let parts;try{parts=JSON.parse(value);}catch{}if(!Array.isArray(parts)||parts.length!==2||parts.some(x=>typeof x!=='string'||!x||x.length>1000))throw new Error('Invalid owner session');return parts;};
 const checkedKey=value=>{if(typeof value!=='string'||!value||value.length>4096)throw new Error('Invalid browser call key');return value;};

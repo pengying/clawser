@@ -310,3 +310,33 @@ expiry, Done, session cleanup and input-gate rules remain unchanged. Do not post
 links in other groups, logs or durable memory. Remove an allowlist entry to deny
 further tool calls there; already issued bearer links keep their normal lifetime
 until revoked, Done, disconnection, session end or plugin shutdown.
+
+## Operator reconciliation after a failed control handback
+
+If a control handoff reports `recovery_required`, keep browser automation paused.
+An operator can reconcile one failed lease when the supervisor has already
+retired its viewer and retained a valid input-fence receipt. This preserves the
+browser container, tabs and profile; it does not restart the browser or recreate
+an invitation.
+
+1. Stop the exact controller service reported for that installation. Keep its
+   private configuration and journal intact.
+2. Run the helper from the reviewed plugin source, using that installation's
+   private controller configuration and the exact failed lease ID:
+
+   ```sh
+   node /absolute/path/to/installed-plugin/bin/reconcile-desktop.mjs /absolute/private/controller.json FAILED_LEASE_ID
+   ```
+
+3. Proceed only if it reports `ok: true`, `inputFenced: true`, and
+   `snapshotObserved: true`. Restart the same controller service, reload the
+   plugin with `openclaw plugins reload browser-handoff --wait`, then run doctor
+   and the owner-session `tabs` check described above. Take a fresh browser
+   observation before continuing the task.
+
+The helper requires exclusive controller ownership, no outstanding browser calls,
+no active viewer, unchanged browser/display generations, and a complete same-lease
+retirement receipt newer than the failed actor. It keeps the original failed
+journal until fresh observation and the final runtime checks pass. Any refusal
+requires further operator investigation; do not delete the journal, force the
+gate open, or treat an ordinary service restart as recovery.
