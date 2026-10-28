@@ -37,11 +37,16 @@ CDP, ws, Cloudflare Quick Tunnel, disposable browser fixtures.
 3. Write failing native policy tests for owner/nonowner/missing requester,
    spoofed parameters, a subsequent nonowner in the same group session, aliases,
    stale/unavailable service, unconfigured profile and default/endpoint drift.
+   Require current-config API failure/incompleteness to deny execution. Verify
+   the native executor's effective profile agrees, including host/sandbox/node
+   and alternate-endpoint routing arguments.
 4. Register `clawser-browser-access` through `registerTrustedToolPolicy`, declare
    its manifest contract, and use host `ctx.requester` facts. Fail closed if the
    required SDK API is unavailable. Keep discovery/CLI metadata inert.
 5. Make omitted handoff profile use the resolved default and return its name in
    `tabs` results. Pin each live service generation and invalidate stale shares.
+   A configuration change during human control or a pending browser call must
+   retain uncertain input/automation fences instead of discarding the gate.
 6. Run `node --test test/browser-config.test.mjs test/browser-policy.test.mjs
    test/plugin.test.mjs`, then the real native policy fixture on 10.4 and 10.7.
    Verify nonowner browser I/O count stays zero. Commit this task separately.
@@ -66,7 +71,9 @@ add `test/cdp-setup.test.mjs`; extend `test/cli.test.mjs`, `test/setup.test.mjs`
 6. Make doctor inspect only the selected backend and remain read-only. Report the
    exact existing browser/profile, readiness and actionable missing prerequisites.
 7. Test dry-run, repeat setup, bad ownership, absent default, unavailable CDP,
-   Docker absent, desktop opt-in and mode-switch rollback. Commit separately.
+   Docker absent, desktop opt-in and a complete desktop-to-CDP-to-noVNC round
+   trip with the original desktop receipt/socket/profile identity. Commit
+   separately.
 
 ## Task 3: CDP input regressions and measured latency
 

@@ -35,16 +35,19 @@ Require a Chromium-compatible attach-only connection with an explicit loopback
 CDP origin. Missing, closed or incompatible connections produce an actionable
 error. Never guess a port or silently select another browser.
 
-Pin the resolved profile/origin for a service generation. Check current default
-selection through a supported current-config API, or fail closed if effective
-selection cannot be established. A profile or endpoint change must invalidate
+Pin the resolved profile/origin for a service generation. Require the supported
+`api.runtime.config.current()` API for execution-time selection; missing, throwing
+or incomplete current configuration must deny execution without falling back to
+registration-time config. A profile or endpoint change must invalidate
 old shares and require service reconciliation; it must not retarget an invite.
 
 Declare and register a trusted native tool policy. For ordinary browser tools,
 require host-derived requester owner status, sender/channel identity, complete
 tool lifecycle identifiers, an authorized session, and a permitted existing
 browser profile. Reject absent identity, spoofed owner parameters, unconfigured
-profiles and unavailable coordination before browser I/O. Keep the existing
+profiles and unavailable coordination before browser I/O. Audit host, sandbox,
+node and alternate endpoint routing inputs so they cannot escape that selection.
+Keep the existing
 `browser_handoff` owner/session/incarnation checks. Native fixtures established
 that the policy API and per-turn requester authority work on both OpenClaw
 2026.10.4 and the running 2026.10.7 builds. New policy capability acceptance must
