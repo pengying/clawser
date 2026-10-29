@@ -97,14 +97,20 @@ function syncViewport() {
 window.visualViewport?.addEventListener('resize', syncViewport);
 window.visualViewport?.addEventListener('scroll', syncViewport);
 window.addEventListener('resize', syncViewport); syncViewport();
+// The on-screen keyboard must not shrink the fitted view.
+function fitWidth() {
+  const room = Math.max(1, innerHeight - document.querySelector('.toolbar').offsetHeight - 24);
+  return Math.min(viewport.clientWidth, room * canvas.width / canvas.height);
+}
 function zoomTo(value, anchor = { x: viewport.clientWidth / 2, y: viewport.clientHeight / 2 }) {
   const previous = zoom;
   zoom = Math.max(1, Math.min(4, value));
   const x = (viewport.scrollLeft + anchor.x) / previous, y = (viewport.scrollTop + anchor.y) / previous;
-  canvas.style.width = (zoom * 100) + '%';
+  canvas.style.width = (fitWidth() * zoom) + 'px';
   viewport.scrollLeft = x * zoom - anchor.x; viewport.scrollTop = y * zoom - anchor.y;
-  $('zoomReset').textContent = zoom === 1 ? 'Fit width' : Math.round(zoom * 100) + '% · reset';
+  $('zoomReset').textContent = zoom === 1 ? 'Fit' : Math.round(zoom * 100) + '% · reset';
 }
+window.addEventListener('resize', () => zoomTo(zoom));
 $('zoomIn').onclick = () => zoomTo(zoom * 1.25);
 $('zoomOut').onclick = () => zoomTo(zoom / 1.25);
 $('zoomReset').onclick = () => { zoomTo(1, { x: 0, y: 0 }); viewport.scrollTo(0, 0); };
@@ -312,7 +318,7 @@ function connect() {
       image.onload = () => {
         if (!current() || closing) return;
         rendering = false;
-        if (canvas.width !== image.naturalWidth || canvas.height !== image.naturalHeight) { canvas.width = image.naturalWidth; canvas.height = image.naturalHeight; }
+        if (canvas.width !== image.naturalWidth || canvas.height !== image.naturalHeight) { canvas.width = image.naturalWidth; canvas.height = image.naturalHeight; zoomTo(zoom); }
         ctx.drawImage(image, 0, 0); $('loading').hidden = true; frameSeen = true; if (readySeen) clearTimeout(connectionTimer); update();
         acknowledgeDisplay(ws, msg, performance.now() - decodeStarted);
       };
