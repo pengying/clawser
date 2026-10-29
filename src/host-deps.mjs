@@ -161,7 +161,8 @@ export async function verifyHostDeps(recorded, d, h) {
 }
 
 function launch(children, entry, args, env, extraFd = false) {
-  const child = spawn(entry.path, args, { stdio: ['ignore', 'pipe', 'pipe', ...(extraFd ? ['pipe'] : [])], env });
+  const child = spawn(entry.path, args, { stdio: ['pipe', 'pipe', 'pipe', ...(extraFd ? ['pipe'] : [])], env });
+  child.stdin.end();
   let output = '';
   const collect = bytes => { output = (output + bytes).slice(-4000); };
   child.stdout.on('data', collect); child.stderr.on('data', collect);
