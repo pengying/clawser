@@ -86,7 +86,7 @@ export class CdpConnection {
         const entry = this.requests.get(msg.id);
         if (!entry || (msg.sessionId || undefined) !== entry.sessionId) return;
         clearTimeout(entry.timer); this.requests.delete(msg.id);
-        if (msg.error) entry.reject(Object.assign(new Error('Browser command failed'), { definitive: true, method: entry.method }));
+        if (msg.error) entry.reject(Object.assign(new Error('Browser command failed'), { definitive: true, method: entry.method, protocolMessage: String(msg.error.message ?? '').slice(0, 200) }));
         else entry.resolve(msg.result);
       } else {
         for (const listener of this.listeners.get(msg.method + ':' + (msg.sessionId || '')) || []) listener(msg.params);
@@ -163,6 +163,7 @@ export class CdpBrowser {
     let contextId, documentId = randomBytes(16).toString('hex'), activeFocus, activePicker, latestMap, gesture, dragData, dragEntered = false;
     let metadataQueue = Promise.resolve(), polling = false, keyboard, paints, topFrameId;
     const failure = (message) => Object.assign(new Error(message), { definitive: true });
+    const pageChanged = () => Object.assign(failure('Page changed; tap the field again'), { pageChanged: true });
     const finish = (error) => { if (!closed) {
       closed = true;
       paints?.stop(error instanceof Error ? error : Object.assign(new Error('Browser disconnected'), {
@@ -176,11 +177,16 @@ export class CdpBrowser {
         if (!contextId) {
           const tree = await cdp.send('Page.getFrameTree');
           const world = await cdp.send('Page.createIsolatedWorld', { frameId: tree.frameTree.frame.id, worldName: 'openclaw-browser-handoff' });
-          if (generation !== documentId) throw failure('Page changed; tap the field again');
+          if (generation !== documentId) throw pageChanged();
           contextId = world.executionContextId;
         }
-        const result = await cdp.send('Runtime.evaluate', { expression: interactionCollector(documentId), contextId, returnByValue: true });
-        if (result.exceptionDetails || generation !== documentId) { contextId = undefined; activeFocus = null; activePicker = null; throw failure('Page changed; tap the field again'); }
+        // A cross-site navigation destroys the isolated world before
+        // Page.frameNavigated arrives.
+        const result = await cdp.send('Runtime.evaluate', { expression: interactionCollector(documentId), contextId, returnByValue: true }).catch((error) => {
+          if (!/Cannot find context/.test(error.protocolMessage ?? '')) throw error;
+          contextId = undefined; throw pageChanged();
+        });
+        if (result.exceptionDetails || generation !== documentId) { contextId = undefined; activeFocus = null; activePicker = null; throw pageChanged(); }
         const map = result.result.value;
         latestMap = map;
         const focused = map.regions.find((region) => region.kind === 'editable' && region.id === map.focus);
@@ -195,6 +201,9 @@ export class CdpBrowser {
       metadataQueue = work;
       return work;
     };
+    // Input that already reached the page succeeded even if it navigated away.
+    // The new page has no focused field yet; the next poll reads its metadata.
+    const collectAfterInput = () => collect().catch((error) => { if (error.pageChanged) return null; throw error; });
     const pickerAction = async (expression) => {
       if (!contextId) throw failure('Picker document changed');
       const result = await cdp.send('Runtime.evaluate', { expression, contextId, returnByValue: true });
@@ -390,7 +399,7 @@ export class CdpBrowser {
           if (!focus || focus.token !== event.focusToken) throw failure('Focused field changed; tap the field again');
           if (event.operation === 'insert') await cdp.send('Input.insertText', { text: event.text });
           else await key(event.operation === 'key' ? event.key : { backspace: 'Backspace', delete: 'Delete', enter: 'Enter' }[event.operation]);
-          return { focus: await collect() };
+          return { focus: await collectAfterInput() };
         }
         if (event.kind === 'pointer') {
           const point = pointOf(event);
@@ -400,7 +409,7 @@ export class CdpBrowser {
             gesture = { id: event.gesture, pointerType: event.pointerType, point };
           } else if (!gesture || gesture.id !== event.gesture || gesture.pointerType !== event.pointerType) throw failure('Gesture is no longer active');
           gesture.point = point;
-          if (event.phase === 'cancel') { await cancelGesture(); return { focus: await collect() }; }
+          if (event.phase === 'cancel') { await cancelGesture(); return { focus: await collectAfterInput() }; }
           try {
             if (event.pointerType === 'touch') {
               await cdp.send('Input.dispatchTouchEvent', { type: { down: 'touchStart', move: 'touchMove', up: 'touchEnd' }[event.phase], touchPoints: event.phase === 'up' ? [] : [{ ...point, id: 1 }] });
@@ -421,12 +430,12 @@ export class CdpBrowser {
             if (event.phase === 'down' && error.definitive) { gesture = null; if (event.pointerType === 'mouse') await disableDrag(); }
             throw error;
           }
-          if (event.phase === 'up') { gesture = null; return { focus: await collect() }; }
+          if (event.phase === 'up') { gesture = null; return { focus: await collectAfterInput() }; }
           return {};
         }
         if (event.kind === 'text') { await cdp.send('Input.insertText', { text: event.text }); return; }
         if (event.kind === 'key') {
-          await key(event.key); return { focus: await collect() };
+          await key(event.key); return { focus: await collectAfterInput() };
         }
         const point = pointOf(event);
         if (event.kind === 'scroll') {
@@ -435,7 +444,7 @@ export class CdpBrowser {
           await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 });
           try { await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 }); }
           catch { cdp.close(); throw new Error('Browser input sequence incomplete'); }
-          return { focus: await collect() };
+          return { focus: await collectAfterInput() };
         }
       };
     return {

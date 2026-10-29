@@ -5,10 +5,10 @@ import { createServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { validateInput, validateCdpUrl, CdpConnection, CdpBrowser } from '../src/cdp.mjs';
 
-async function browserFixture(t, { rejectCancel = false, disconnectRecoveryPaint = false, frameMetadata = {}, windowState = 'normal' } = {}) {
+async function browserFixture(t, { rejectCancel = false, disconnectRecoveryPaint = false, frameMetadata = {}, windowState = 'normal', navigateOnClick = false } = {}) {
   const methods = [], commands = [];
   let bounds = { left: 10, top: 20, width: 800, height: 600, windowState };
-  let screenshots = 0;
+  let screenshots = 0, contextGone = false, navigated = false, nextContext = 1;
   let peer;
   const server = createServer((_req, res) => {
     res.setHeader('content-type', 'application/json');
@@ -23,13 +23,23 @@ async function browserFixture(t, { rejectCancel = false, disconnectRecoveryPaint
     if (command.method === 'Page.captureScreenshot' && ++screenshots > 1 && disconnectRecoveryPaint) {
       socket.terminate(); return;
     }
+    // A cross-site navigation swaps the renderer: the click lands, the old
+    // isolated world is gone, and Page.frameNavigated arrives mid-read.
+    if (navigateOnClick && command.method === 'Input.dispatchMouseEvent' && command.params.type === 'mouseReleased') contextGone = true;
+    if (contextGone && command.method === 'Runtime.evaluate' && command.params.contextId === 1) {
+      peer.send(JSON.stringify({ id: command.id, error: { code: -32000, message: 'Cannot find context with specified id' } })); return;
+    }
     const result = command.method === 'Page.getFrameTree' ? { frameTree: { frame: { id: 'frame', url: 'https://example.com/' } } }
       : command.method === 'Page.getLayoutMetrics' ? { cssVisualViewport: { pageX: 0, pageY: 0, clientWidth: 800, clientHeight: 600 } }
-      : command.method === 'Page.createIsolatedWorld' ? { executionContextId: 1 }
+      : command.method === 'Page.createIsolatedWorld' ? { executionContextId: nextContext++ }
       : command.method === 'Runtime.evaluate' ? { result: { value: command.params.expression === 'globalThis.devicePixelRatio' ? 1 : { document: 'fixture', regions: [], focus: null } } }
       : command.method === 'Browser.getWindowForTarget' ? { windowId: 7, bounds }
       : command.method === 'Browser.setWindowBounds' ? (bounds = { ...bounds, ...command.params.bounds }, {})
       : command.method === 'Page.captureScreenshot' ? { data: 'static-frame' } : {};
+    if (contextGone && !navigated && command.method === 'Page.createIsolatedWorld') {
+      navigated = true;
+      peer.send(JSON.stringify({ method: 'Page.frameNavigated', params: { frame: { id: 'frame', url: 'https://other.example/' } } }));
+    }
     peer.send(JSON.stringify({ id: command.id, result }));
     if (command.method === 'Page.captureScreenshot') peer.send(JSON.stringify({ method: 'Page.screencastFrame', params: { sessionId: 1, data: 'static-frame', metadata: { deviceWidth: 800, deviceHeight: 600, ...frameMetadata } } }));
   }); });
@@ -51,6 +61,16 @@ test('screenshot-normalized mouse, touch and wheel coordinates account for remot
   const wheel = commands.find((c) => c.method === 'Input.dispatchMouseEvent' && c.params.type === 'mouseWheel').params;
   const touch = commands.find((c) => c.method === 'Input.dispatchTouchEvent' && c.params.type === 'touchStart').params.touchPoints[0];
   assert.deepEqual([click.x, click.y, wheel.x, wheel.y, touch.x, touch.y], [200, 150, 100, 75, 100, 75], 'CDP inputs are CSS coordinates relative to the visual viewport; frame scroll offsets must not be added');
+});
+
+test('a click that navigates to another site keeps control when the old page context is gone', async (t) => {
+  const { backend, commands } = await browserFixture(t, { navigateOnClick: true });
+  const connection = await backend.open({ profile: 'fixture', targetId: 'tab' }, { onFrame() {}, onClose() {} });
+  t.after(() => connection.close());
+  const result = await connection.input({ kind: 'click', x: .5, y: .5 });
+  assert.equal(result.focus, null, 'the new page has no focused field yet');
+  assert.ok(commands.some((c) => c.method === 'Input.dispatchMouseEvent' && c.params.type === 'mouseReleased'), 'the click itself was delivered');
+  await connection.input({ kind: 'scroll', x: .5, y: .5, deltaX: 0, deltaY: 20 });
 });
 
 test('a static background tab produces its initial frame without taking focus', async (t) => {
