@@ -27,7 +27,9 @@ cannot establish it. Do not disclose unrelated tabs.
    dialogs and clipboard in that profile. For a cross-origin field, the owner
    can tap the field and explicitly choose **Keyboard**. That is manual keyboard
    control of the focused frame, not verified field-level autofill.
-3. Deliver the returned URL unchanged to the owner's private conversation. Only
+3. Deliver the returned `url` unchanged to the owner's private conversation. In
+   code mode the result is a JSON string: `JSON.parse` it before reading `url`,
+   and never send a message whose link is missing or `undefined`. Only
    a verified owner's explicit request in an operator-allowed group permits
    delivery to that same requesting group/thread; explain that any member can
    claim its one-use bearer link. Other members cannot request, inspect or revoke
