@@ -1,5 +1,12 @@
 # Changes
 
+## 0.6.1
+
+- Keep control in the CDP viewer when a tap, key or typed text takes the tab to another site. The input had already landed; only the follow-up read of the old page failed, and that dropped the phone back to watch mode on every cross-site link.
+- Fit the whole shared page on screen in the CDP viewer by default. Wide screens, such as a phone held sideways or a desktop browser window, no longer cut off the bottom of the page. Zoom still enlarges from there.
+- Tell agents that tool results are JSON text to parse before reading `url`. In Codex code mode an agent read `url` from the unparsed string and sent the owner a link that said "undefined".
+- Close the stdin of host display smoke-test processes with a pipe instead of ignoring it. This keeps the release clear of a ClawHub static-analysis false positive.
+
 ## 0.6.0
 
 - Support real press-and-hold from a phone in the noVNC viewer. A finger held still for 250 ms presses the remote button, later movement is sent while it is held, and lifting releases it. A quick tap is still one click, and a swipe still scrolls. Pinch, a hidden page, loss of control, Done and disconnect release the button.

@@ -1,6 +1,6 @@
 {
   "name": "@pengying/clawser",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Clawser: secure human takeover links for an existing OpenClaw browser tab, with optional noVNC desktop",
   "type": "module",
   "main": "./index.mjs",
