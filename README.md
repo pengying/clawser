@@ -33,11 +33,11 @@ cover 2026.10.4 and 2026.10.7. Other operating systems and ARM hosts are unverif
 Start your OpenClaw Gateway and the configured attach-only browser before setup.
 Default setup needs no Docker, user systemd, `flock`, `tar` or noVNC download.
 
-Install the tagged **v0.6.1** release from GitHub. ClawHub availability may lag
+Install the tagged **v0.6.2** release from GitHub. ClawHub availability may lag
 GitHub; use v0.5.0 or newer for the CDP-default behavior described here.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.6.1 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.6.2 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup
 openclaw clawser doctor
@@ -57,6 +57,18 @@ with guidance, without starting or substituting a browser.
 Follow setup’s printed activation instructions, then run `doctor` and ask the
 owner session to list tabs. See [installation and maintenance](docs/install.md)
 for connection requirements, the optional noVNC desktop, upgrades and recovery.
+
+### Upgrade
+
+Finish any open handoffs, then install the new tag over the old one and check it:
+
+```sh
+openclaw plugins install git:github.com/pengying/clawser@v0.6.2 --force --accept-capabilities
+openclaw clawser doctor
+```
+
+Each tag installs into its own directory, and setup and doctor accept the move.
+The optional noVNC desktop has [its own upgrade steps](docs/install.md#upgrade).
 The package is **`@pengying/clawser`**, the plugin ID is `browser-handoff` and the
 agent tool is `browser_handoff`.
 
