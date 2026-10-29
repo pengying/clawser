@@ -297,6 +297,23 @@ test('CDP repeated setup accepts its healthy configured viewer and refuses a dif
   assert.deepEqual(h.config, original);
 });
 
+test('CDP setup and doctor accept an upgrade installed into a different plugin directory', async t => {
+  const h = await harness(t);
+  await runClawser(['setup'], h.deps);
+  // Earlier releases recorded the package directory. Each Git upgrade moves,
+  // because the install directory is a hash of the tagged spec.
+  const legacy = JSON.parse(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8'));
+  await fs.writeFile(join(h.stateDir, 'setup.json'), JSON.stringify({ ...legacy, packageDir: h.root }) + '\n', { mode: 0o600 });
+  h.deps.packageDir = join(h.root, 'git-upgraded/repo');
+  h.deps.isPortFree = async () => false;
+  assert.equal((await runClawser(['setup', '--dry-run'], h.deps)).ok, true);
+  assert.equal((await runClawser(['setup'], h.deps)).ok, true);
+  const doctor = await runClawser(['doctor'], h.deps);
+  assert.equal(doctor.checks.find(row => row.name === 'ownership')?.ok, true);
+  const receipt = JSON.parse(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8'));
+  assert.equal(receipt.stateDir, h.stateDir, 'the receipt still binds its own state directory');
+});
+
 test('CDP repeat setup can repair public transport failure through its healthy owned local viewer', async t => {
   const h = await harness(t);
   await runClawser(['setup'], h.deps);

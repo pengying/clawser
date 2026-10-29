@@ -56,7 +56,8 @@ async function receipt(o, p, d, h) {
   if (!await h.stat(p.marker, d)) throw new Error('State path exists without CDP setup ownership');
   await h.privatePath(p.marker, 'file', d);
   const saved = await h.readJson(p.marker, d);
-  if (saved.identity !== identity || saved.uid !== d.uid || !/^[a-f0-9-]{36}$/.test(saved.ownerId || '') || saved.stateDir !== o.stateDir || saved.packageDir !== d.packageDir) throw new Error('Refusing unowned or incompatible CDP setup receipt');
+  // No CDP state runs from the package, and Git upgrades move it to a new directory.
+  if (saved.identity !== identity || saved.uid !== d.uid || !/^[a-f0-9-]{36}$/.test(saved.ownerId || '') || saved.stateDir !== o.stateDir) throw new Error('Refusing unowned or incompatible CDP setup receipt');
   return saved;
 }
 
@@ -192,7 +193,7 @@ export async function runCdpSetup(o, d, h) {
     await h.noSymlinks(o.stateDir, d);
     await d.fs.mkdir(o.stateDir, { mode: 0o700 });
     await h.privatePath(o.stateDir, 'directory', d);
-    saved = { identity, uid: d.uid, ownerId: randomUUID(), stateDir: o.stateDir, packageDir: d.packageDir, pendingBinaryDigest: d.artifacts.cloudflared.sha256 };
+    saved = { identity, uid: d.uid, ownerId: randomUUID(), stateDir: o.stateDir, pendingBinaryDigest: d.artifacts.cloudflared.sha256 };
     const file = await d.fs.open(p.marker, 'wx', 0o600);
     try { await file.writeFile(JSON.stringify(saved) + '\n'); await file.sync(); }
     finally { await file.close(); }
