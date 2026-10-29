@@ -1,5 +1,11 @@
 # Changes
 
+## 0.6.2
+
+- Accept a CDP installation that moved to a new directory. OpenClaw installs each Git tag into its own directory, so every Git upgrade failed setup and doctor with "Refusing unowned or incompatible CDP setup receipt". The receipt no longer records the package directory. noVNC still requires its original directory; install it from the release archive.
+- Add a short upgrade section to the README and update the installation guide to match.
+- Includes the 0.6.1 changes. ClawHub never published 0.6.1 because its hosted scanner failed before returning a verdict.
+
 ## 0.6.1
 
 - Keep control in the CDP viewer when a tap, key or typed text takes the tab to another site. The input had already landed; only the follow-up read of the old page failed, and that dropped the phone back to watch mode on every cross-site link.
