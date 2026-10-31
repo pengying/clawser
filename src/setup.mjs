@@ -5,6 +5,7 @@ import net from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { systemdArgument } from './host-units.mjs';
 import { DesktopRpcClient } from './desktop-rpc.mjs';
 import { DesktopRuntime } from '../runtime/desktop/index.mjs';
 import { activationSummary, captureSetupActivation, inspectSetupActivation, logSetupActivation, requireActiveActivation, waitForSetupActivation } from './setup-activation.mjs';
@@ -380,12 +381,6 @@ async function assets(p, saved, d) {
       await d.fs.rm(staging, { force: true, recursive: true });
     }
   }
-}
-
-function systemdArgument(value) {
-  if (!isAbsolute(value) || /[\x00-\x1f\x7f]/.test(value)) throw new Error('Service command paths must be absolute and contain no control characters');
-  const escaped = value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\$/g, () => '$$');
-  return '"' + escaped + '"';
 }
 
 function unit(p, d) {
