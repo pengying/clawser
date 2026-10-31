@@ -22,7 +22,7 @@
 - Never copy, move or recreate an existing profile directory. Never touch a profile other than `<stateDir>/browser/profile` (option A) or the named one (option B).
 - Setup never stops a Chrome, takes over a unit it did not write, or migrates cookies without `--yes`. Without it, setup prints the plan and returns `ok: false`.
 - Cookie values are never logged and live only in a 0600 temp file inside a 0700 temp directory that is removed in a `finally`.
-- Option A's OpenClaw profile name is `clawser`. Option A's default CDP port is `18812`. The host controller's default port is `19420`, so it never collides with a running CDP viewer on `19410` during an upgrade.
+- Option A's OpenClaw profile name is `clawser`. Option A's CDP port is the first free port in `18820`–`18829` on first setup, recorded in the receipt and reused on reruns. The range is clear of the 18810–18814 ports Docker-era desktops published. There is no `--cdp-port` flag: the design removes it. Before writing anything, setup refuses when the CDP port or the controller port is held by anything other than Clawser's own units, and names the holder. The host controller's default port is `19420`, so it never collides with a running CDP viewer on `19410` during an upgrade.
 - Setup refuses Snap Chromium: "Snap Chromium can't use the hidden folder where Clawser keeps its files. Install Google Chrome, or a Chromium that isn't a snap, then rerun setup."
 - Unix socket paths must fit in 107 bytes. Setup refuses longer state directories before writing anything.
 - The public repo and package carry no personal identifiers, account names or host paths.
@@ -45,7 +45,7 @@
 | --- | --- |
 | `runtime/desktop/xproof.py` (new) | ctypes X identity proof, settlement, held-input query and clipboard owner. Importable and a CLI with the same ops and JSON as the old `x11-proof`. |
 | `runtime/desktop/openbox_config.py` (new) | Generates Clawser's `rc.xml` from the system one with `xml.etree`. |
-| `runtime/desktop/input_fixture.py` (renamed from `test/input-fixture.py`) | Trusted test fixture that holds and releases a key and button outside any actor. The display comes from `DISPLAY`. |
+| `runtime/desktop/test/input_fixture.py` (renamed from `input-fixture.py`) | Trusted test fixture that holds and releases a key and button outside any actor. The display comes from `DISPLAY`. |
 | `runtime/desktop/supervisor.py` (rewritten) | Host supervisor. It watches the display and browser, runs per-session x11vnc actors on Unix sockets and serves the control socket. |
 | `runtime/desktop/index.mjs` (rewritten) | `HostDesktopRuntime`: a Node client for the supervisor socket, with the existing lock and status semantics. |
 | `src/host-display.mjs` (new) | X cookie file bytes and free display number search. |
@@ -64,7 +64,7 @@
 
 **Files:**
 - Create: `runtime/desktop/xproof.py`, `runtime/desktop/openbox_config.py`, `src/host-display.mjs`
-- Move: `runtime/desktop/test/input-fixture.py` → `runtime/desktop/input_fixture.py`
+- Move: `runtime/desktop/test/input-fixture.py` → `runtime/desktop/test/input_fixture.py`
 - Test: `runtime/desktop/test/xproof.test.mjs`, `runtime/desktop/test/openbox-config.test.mjs`, `test/host-display.test.mjs`
 
 **Interfaces:**
@@ -102,7 +102,7 @@
   - `application[@class="Google-chrome"][@role="browser"]/maximized` and `application[@class="Chromium"][@role="browser"]/maximized` are both `yes`.
   - The dest mode is `0o600`.
 
-`runtime/desktop/test/xproof.test.mjs`: skip unless `Xvfb` and `python3` are on PATH. A helper starts `Xvfb -displayfd 3 -auth <tmp>/xauth -nolisten tcp -screen 0 640x480x24 +extension XTEST +extension X-Resource` after writing `xauthorityEntry(0, cookie)` to the file. The display number in the file doesn't matter for FamilyWild.
+`runtime/desktop/test/xproof.test.mjs`: skip unless `Xvfb` and `python3` are on PATH. A helper writes `xauthorityEntry(0, cookie)` to `<tmp>/server-auth` and starts `Xvfb -displayfd 3 -auth <tmp>/server-auth -nolisten tcp -screen 0 640x480x24 +extension XTEST +extension X-Resource`. The server loads every cookie in its `-auth` file whatever the display number, but clients match the number, so once `-displayfd` reports N the helper writes `xauthorityEntry(N, cookie)` to `<tmp>/xauth` and points `XAUTHORITY` there.
 - `an authorized client sees X clients with PIDs`: `clients` returns an array, and every entry has an integer `pid > 0`.
 - `a client without the cookie is refused`: with `XAUTHORITY` pointing at an empty file, `clients` exits non-zero and stderr matches `/display unavailable/`.
 - `settle releases a key and button held outside any actor`:
@@ -137,7 +137,7 @@ Expected: PASS. On macOS, the Xvfb tests skip.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add runtime/desktop/xproof.py runtime/desktop/openbox_config.py runtime/desktop/input_fixture.py src/host-display.mjs test/host-display.test.mjs runtime/desktop/test/xproof.test.mjs runtime/desktop/test/openbox-config.test.mjs
+git add runtime/desktop/xproof.py runtime/desktop/openbox_config.py runtime/desktop/test/input_fixture.py src/host-display.mjs test/host-display.test.mjs runtime/desktop/test/xproof.test.mjs runtime/desktop/test/openbox-config.test.mjs
 git rm runtime/desktop/test/input-fixture.py
 LS_COMMENT_AUDIT=1 git commit -m "feat(desktop): X proof and openbox config helpers without a compiler"
 ```
@@ -165,7 +165,6 @@ LS_COMMENT_AUDIT=1 git commit -m "feat(desktop): X proof and openbox config help
   - Add `a missing required binary fails with the distro command and runs no installer`: with no brew calls at all, expect `/sudo apt install .*python3.*xclip/`.
   - Change `the real smoke test …` to assert x11vnc served RFB over the Unix socket. Assert `/proc/net/tcp` and `/proc/net/tcp6` held no listener owned by the x11vnc PID during the smoke run, using a `d.onSmokeVnc(pid)` hook that only tests pass.
   - Add `the smoke test reports python3 when the X proof helper fails`, using a fake `python3` that exits 1.
-  - Replace the three tests that gate host deps off with one: `host noVNC setup always resolves host dependencies`. Its details belong to Task 7, so keep only the resolver-level assertions here.
 
 - [ ] **Step 2: Run and confirm failure**
 
@@ -175,7 +174,7 @@ Run: `node --test test/host-deps.test.mjs`. Expected: the new tests FAIL.
 
 - Remove `brewPath`, `brewBinary`, `upgradedBrew` and the `plan.brew` branches.
 - Keep finding binaries already under Homebrew prefixes, since `searchPaths` already includes them.
-- Write the smoke test's temp cookie with `xauthorityEntry` from Task 1.
+- Write the smoke test's temp cookie with `xauthorityEntry` from Task 1. The server loads every cookie in its `-auth` file, but clients match the display number, so write the server file before Xvfb starts and the clients' `XAUTHORITY` file after `-displayfd` reports the number.
 
 - [ ] **Step 4: Run and confirm pass**
 
@@ -194,6 +193,7 @@ LS_COMMENT_AUDIT=1 git commit -m "feat(setup): require python3 and xclip, never 
 
 **Files:**
 - Create: `src/host-units.mjs`
+- Modify: `src/setup.mjs` (import `systemdArgument` from `host-units.mjs` instead of defining it)
 - Test: `test/host-units.test.mjs`
 
 **Interfaces:**
@@ -231,7 +231,7 @@ LS_COMMENT_AUDIT=1 git commit -m "feat(setup): require python3 and xclip, never 
   - `the display unit has a cookie, no TCP and never -ac`: the text contains `-nolisten tcp`, `-auth "<xauth>"`, `1920x1080x24` and `Restart=always`, and does not match `/\s-ac(\s|$)/`.
   - `the browser unit waits for the display and restarts always`:
     - It has `Requires=` and `After=` the display, and `After=` the wm when openbox is given.
-    - It sets `Environment="DISPLAY=:<n>"` and `Environment="XAUTHORITY=<path>"`, and has `UnsetEnvironment=WAYLAND_DISPLAY`.
+    - It sets `Environment="DISPLAY=:<n>"` and `Environment="XAUTHORITY=<path>"`, and has `UnsetEnvironment=WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS`. Without the session bus, file choosers can't open through the desktop portal on the person's real screen, where the phone can't see them.
     - Its `ExecStartPre=` waits for `/tmp/.X11-unix/X<n>`, with every `$` doubled for systemd.
     - It has `Restart=always`, `TimeoutStopSec=15`, and each Chrome arg quoted.
   - `the supervisor unit kills its x11vnc children with it`:
@@ -247,7 +247,7 @@ LS_COMMENT_AUDIT=1 git commit -m "feat(setup): require python3 and xclip, never 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/host-units.mjs test/host-units.test.mjs
+git add src/host-units.mjs src/setup.mjs test/host-units.test.mjs
 LS_COMMENT_AUDIT=1 git commit -m "feat(setup): render Clawser's display, window manager, browser and supervisor units"
 ```
 
@@ -259,6 +259,7 @@ LS_COMMENT_AUDIT=1 git commit -m "feat(setup): render Clawser's display, window 
 - Rewrite: `runtime/desktop/supervisor.py`, `runtime/desktop/index.mjs`
 - Delete: `runtime/desktop/{Dockerfile,entrypoint.sh,chromium-seccomp.json,MOBY-LICENSE,x11-proof.cpp}`, `runtime/desktop/test/{adapter.test.mjs,fixtures.mjs,health.mjs,heartbeat.mjs,inspect.mjs,integration.mjs}`
 - Port: `runtime/desktop/test/status.test.mjs`, `runtime/desktop/test/readiness.test.mjs`
+- Modify, to keep every importer loading: `bin/desktop-controller.mjs` and `bin/reconcile-desktop.mjs` construct `new HostDesktopRuntime(runtimeOptions)` from the controller config's `runtime: { stateDir, controlSocket, cdpUrl }`. `src/setup.mjs` drops its `DesktopRuntime` import and the `runtime.owned()` call in `resources()`, since Task 7 deletes that Docker path. `scripts/check-package.mjs` swaps the deleted runtime files for `runtime/desktop/xproof.py` and `runtime/desktop/openbox_config.py` in its required list.
 - Test: `runtime/desktop/test/supervisor.test.mjs`
 
 **Interfaces:**
@@ -280,6 +281,7 @@ LS_COMMENT_AUDIT=1 git commit -m "feat(setup): render Clawser's display, window 
   - `startViewer` result: today's fields plus `socketPath`, which is `<vncDir>/vnc-<16 hex>.sock`. x11vnc args are `-display unix/:<n> -unixsock <socketPath> -rfbport 0 -no6 -rfbportv6 -1 -passwdfile <file in vncDir> -forever -shared -noxdamage -noxrecord -nosel -noprimary -noclipboard -nosetclipboard -nosetprimary -noremote -nocmds -o /dev/null`, plus `-viewonly` for watch. Readiness is a socket at `socketPath` plus the XRes proof of x11vnc's PID, replacing `listening(5900)`.
   - Retirement unlinks the socket and the password file.
   - The control socket is created under `umask 077`, and its directory must be 0700 and owned by the supervisor's user.
+  - On start, before serving, the supervisor calls `xproof.settle([])` to release any key or button a previous supervisor's x11vnc left held. If held input remains, it starts tainted. A container restart cleared held input by restarting X; the host display outlives the supervisor, so this replaces that.
 - Produces, `runtime/desktop/index.mjs`:
   - `supervisorRequest(socketPath, payload, { timeoutMs = 20_000, connect }) -> Promise<object>`. A missing or refused socket with `op === 'status'` returns `{ ready:false, phase:'starting' }`. Any other op rejects. A response with `error` rejects with `desktop <op>: <error>`.
   - `class HostDesktopRuntime`:
@@ -311,7 +313,7 @@ Tests:
   - `input_fixture.py query` gives all false.
 - `a browser restart while idle changes browserGeneration and leaves the desktop usable`: change the guid and wait 1 s. The new generation is different, `tainted` is false, and a new watch viewer starts.
 - `a browser restart during a control session retires it and taints the desktop`: start a control viewer and change the guid. Within 2 s `viewer` is null and `tainted` is true. `stopViewerAndSettle` for that lease returns `retirementReason:'critical_child_exit'`, and `startViewer` rejects `/quarantined/`.
-- `a supervisor restart changes both generations`: restart the process and compare `status` before and after.
+- `a supervisor restart changes both generations and releases input its x11vnc left held`: hold a key with `input_fixture.py`, restart the process, and compare `status` before and after. `held` is false once the new supervisor serves.
 - `clipboard round-trips for the control lease only`: skip without xclip. Port the clipboard assertions from the deleted `integration.mjs`.
 
 - [ ] **Step 2: Run and confirm failure**: `node --test runtime/desktop/test/*.test.mjs`
@@ -332,7 +334,7 @@ Run: `node --test runtime/desktop/test/*.test.mjs` on Linux. Expected: PASS. Rep
 - [ ] **Step 5: Commit**
 
 ```bash
-git add runtime/desktop/supervisor.py runtime/desktop/index.mjs runtime/desktop/test/status.test.mjs runtime/desktop/test/readiness.test.mjs runtime/desktop/test/supervisor.test.mjs
+git add runtime/desktop/supervisor.py runtime/desktop/index.mjs runtime/desktop/test/status.test.mjs runtime/desktop/test/readiness.test.mjs runtime/desktop/test/supervisor.test.mjs bin/desktop-controller.mjs bin/reconcile-desktop.mjs src/setup.mjs scripts/check-package.mjs
 git rm runtime/desktop/Dockerfile runtime/desktop/entrypoint.sh runtime/desktop/chromium-seccomp.json runtime/desktop/MOBY-LICENSE runtime/desktop/x11-proof.cpp runtime/desktop/test/adapter.test.mjs runtime/desktop/test/fixtures.mjs runtime/desktop/test/health.mjs runtime/desktop/test/heartbeat.mjs runtime/desktop/test/inspect.mjs runtime/desktop/test/integration.mjs
 LS_COMMENT_AUDIT=1 git commit -m "feat(desktop): host supervisor on private sockets; remove the Docker runtime"
 ```
@@ -427,8 +429,9 @@ LS_COMMENT_AUDIT=1 git commit -m "feat(setup): read-only discovery of the browse
 **Interfaces:**
 - Consumes: Tasks 1, 2, 3, 4 and 6.
 - Produces, `src/setup.mjs` `options(argv, d)`:
-  - Flags: `--state-dir`, `--browser-profile <name>`, `--port <n>` (default `19420`), `--cdp-port <n>` (option A only, default `18812`), `--dry-run`, `--yes`, `--cdp`, `--novnc` (an accepted no-op, and an error together with `--cdp`) and `--no-migrate-cookies`.
-  - `--vnc-port`, `--container-name` and `--no-default-profile` throw `<flag> was removed in 0.7.0 along with the Docker desktop`.
+  - Flags: `--state-dir`, `--browser-profile <name>`, `--port <n>` (default `19420`), `--dry-run`, `--yes`, `--cdp`, `--novnc` (an accepted no-op, and an error together with `--cdp`) and `--no-migrate-cookies`.
+  - `--port` defaults to `19410` with `--cdp`, so existing CDP installs keep their viewer port.
+- `--cdp-port`, `--vnc-port`, `--container-name` and `--no-default-profile` throw `<flag> was removed in 0.7.0 along with the Docker desktop`.
 - Produces, mode selection in `runClawser`, in order:
   1. `--cdp` runs `runCdpSetup` with `o.explicitCdp = true`.
   2. `--browser-profile` runs option B.
@@ -496,7 +499,7 @@ New tests:
 - `--novnc is accepted and --novnc with --cdp is refused`.
 
 `test/cli.test.mjs`:
-- The forwarded flags are now `--state-dir`, `--browser-profile`, `--port`, `--cdp-port`, `--dry-run`, `--yes`, `--cdp`, `--novnc` and `--no-migrate-cookies`.
+- The forwarded flags are now `--state-dir`, `--browser-profile`, `--port`, `--dry-run`, `--yes`, `--cdp`, `--novnc` and `--no-migrate-cookies`.
 - The help text says noVNC is the default and `--cdp` keeps the one-tab viewer.
 
 - [ ] **Step 2: Run and confirm failure**: `node --test test/setup.test.mjs test/cli.test.mjs`
@@ -539,7 +542,7 @@ LS_COMMENT_AUDIT=1 git commit -m "feat(setup): host noVNC option A as the defaul
      - A `user-unit` whose `unitMainPid` equals the Chrome PID is a takeover. Add it to `takeover` with `{ unit, fragmentPath, wasEnabled }`. Do the same for its display's Xvfb unit and its window manager unit from `displayServices(env DISPLAY)` when those are user units. Keep that display number. An Xvfb outside a unit is a refusal: `Display :<n> is not run by a user service; stop it or move Chrome off it, then rerun setup.`.
      - A `session` owner means `stop: [{ kind: 'close-browser', pid }]` and a free display.
      - `unknown`, or a user unit whose main PID isn't Chrome, is a refusal: `<detail> would restart Chrome, so setup won't stop it. Stop it yourself, then rerun setup.`.
-  5. `chromeArgs({ existing: argv.slice(1), userDataDir, profileDirectory, cdpPort: port })`, and keep the unit's or process's env except `DISPLAY`, `WAYLAND_DISPLAY` and `XAUTHORITY`.
+  5. `chromeArgs({ existing: argv.slice(1), userDataDir, profileDirectory, cdpPort: port })`. Environment: for a taken-over unit, keep its `Environment=` assignments from `systemctl --user show -p Environment` except `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY` and `DBUS_SESSION_BUS_ADDRESS`. For a session Chrome, keep only `LANG`, `LANGUAGE`, `LC_*` and `TZ` from its process environment. Never copy a whole session environment into a unit.
   6. `cookieEncryption(<userDataDir>/<profileDirectory || 'Default'>/Cookies)`. When `v11 > 0` and `--no-migrate-cookies` isn't set, `cookies = { migrate: true, count: v11 }`. With the flag, the plan carries the warning `<v11> keyring-encrypted cookies will be unreadable; you'll need to sign in to those sites again.`.
   7. The config patch sets `browser.defaultProfile` and `desktop.profile` to the named profile, so the agent and the phone share one browser. The receipt records `previousDefaultProfile`.
   8. Taking over the display unit restarts Xvfb, so the screen starts fresh with one desktop. No EWMH message is needed.
