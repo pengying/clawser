@@ -78,7 +78,7 @@ assert.equal(promoted.role,'control');
 assert.equal(promoted.previousSettlement.readOnly,true);assert.equal(promoted.previousSettlement.inputResetRequired,false);
 assert.notEqual(promoted.pid,watch.pid);
 await runtime.stopViewerAndSettle({leaseId:'integration-2'});
-const fixture=await readFile(new URL('./input-fixture.py',import.meta.url),'utf8');
+const fixture=await readFile(new URL('./input_fixture.py',import.meta.url),'utf8');
 const fixtureInput=async action=>JSON.parse(await runtime.run(['exec','--interactive','--user','1000:1000',owned.Id,'python3','-',action],fixture));
 await runtime.startViewer({leaseId:'readonly-preserve',role:'watch'});
 try {

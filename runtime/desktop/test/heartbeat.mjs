@@ -10,7 +10,7 @@ let initial;
 for(let n=0;n<100;n++){try{initial=await runtime.status();if(initial.ready)break;}catch{}await new Promise(r=>setTimeout(r,100));}
 assert.equal(initial?.ready,true);assert.equal(initial.heartbeatTimeoutMs,1000);
 const owned=await runtime.owned();
-const fixture=await readFile(new URL('./input-fixture.py',import.meta.url),'utf8');
+const fixture=await readFile(new URL('./input_fixture.py',import.meta.url),'utf8');
 const input=async action=>JSON.parse(await runtime.run(['exec','--interactive','--user','1000:1000',owned.Id,'python3','-',action],fixture));
 const pageIds=async()=>(await runtime.tabs()).filter(t=>t.type==='page').map(t=>t.id).sort();
 const before=await pageIds();
