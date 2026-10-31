@@ -15,11 +15,11 @@ not require Docker, systemd, `flock`, `tar` or a noVNC download. The optional
 
 ## Tagged Git installation
 
-This guide describes v0.6.2. Tagged Git installation is the recommended
+This guide describes v0.6.3. Tagged Git installation is the recommended
 distribution path.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.6.2 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.6.3 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup
 openclaw clawser doctor
@@ -114,7 +114,8 @@ browser alone does not prove the current plugin generation has reconnected.
 Before browser work, ask the verified owner session to call `browser_handoff`
 with `action=tabs`; confirm the returned profile and expected task tab.
 
-Every ordinary browser call must use `target: "host"` and the returned profile.
+Every ordinary browser call runs on the host with the returned profile. A call
+that omits `target` is routed to the host; any other target is refused.
 Use the raw target ID from the tab list, never an OpenClaw display label like
 `t1`. Startup/profile-management actions and sandbox, node, user-profile,
 endpoint or MCP routing escapes are unavailable. Missing native APIs or current
@@ -135,13 +136,13 @@ replace the native capability-acceptance step. Developer installation is in
 
 ## Release archive alternative
 
-Once published, download `pengying-clawser-0.6.2.tgz` and `SHA256SUMS` from the
-[v0.6.2 release](https://github.com/pengying/clawser/releases/tag/v0.6.2) into the
+Once published, download `pengying-clawser-0.6.3.tgz` and `SHA256SUMS` from the
+[v0.6.3 release](https://github.com/pengying/clawser/releases/tag/v0.6.3) into the
 same directory:
 
 ```sh
 sha256sum --check SHA256SUMS
-openclaw plugins install ./pengying-clawser-0.6.2.tgz --force --accept-capabilities
+openclaw plugins install ./pengying-clawser-0.6.3.tgz --force --accept-capabilities
 openclaw clawser setup
 openclaw clawser doctor
 ```
@@ -282,7 +283,7 @@ run the applicable diagnostics and check the owner-session tabs before resuming.
 
    The systemd command is only for noVNC; substitute the reported unit.
 3. Install the new release from the same kind of source. A Git upgrade can use
-   `openclaw plugins install git:github.com/pengying/clawser@v0.6.2 --force
+   `openclaw plugins install git:github.com/pengying/clawser@v0.6.3 --force
    --accept-capabilities --no-enable`. OpenClaw places each Git tag in its own
    directory, and CDP setup and doctor accept the move. noVNC's controller
    service runs from the installed directory, so install and upgrade noVNC from

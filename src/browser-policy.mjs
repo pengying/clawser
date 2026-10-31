@@ -96,8 +96,8 @@ export function assertBrowserRoute(event, state) {
   const params = event.params || {};
   if (params.target !== 'host') throw new Error('Browser access requires target="host" and the configured browser profile');
   if (routeOverrides.some(key => params[key] !== undefined)) throw new Error('Browser routing overrides are unavailable; use the configured host browser profile');
-  if (!actions.has(params.action)) throw new Error('Browser profile management and browser startup are unavailable');
   const profile = params.profile === undefined ? state.config.browser.defaultProfile : params.profile;
+  if (!actions.has(params.action)) throw new Error(`Browser profile management and browser startup are unavailable; use action="tabs" with target="host" and profile="${state.config.browser.defaultProfile}"`);
   if (!nonempty(profile) || profile.trim() !== profile || !Object.hasOwn(state.binding.profiles, profile))
     throw new Error('Only the configured host browser profile is permitted');
   return profile;
@@ -120,10 +120,14 @@ export function createBrowserAccessPolicy({ api, binding, assertAvailable }) {
           (!nonempty(requester.senderId) && !administrativeMain) ||
           !authorizedSession(ctx.sessionKey, api.pluginConfig?.ownerGroupSessions))
         return { allow: false, reason: 'Verified owner browser access requires a complete current native invocation in an authorized conversation' };
+      // OpenClaw's browser tool defaults an omitted target to the host, and
+      // agents follow that guidance. Pin the omission instead of refusing it.
+      const params = event.params?.target === undefined ? { ...event.params, target: 'host' } : event.params;
       try {
         assertAvailable();
-        assertBrowserRoute(event, binding.current());
+        assertBrowserRoute({ ...event, params }, binding.current());
       } catch (error) { return { allow: false, reason: error.message }; }
+      if (params !== event.params) return { params };
     },
   };
 }

@@ -1,5 +1,10 @@
 # Changes
 
+## 0.6.3
+
+- Route an ordinary browser call that omits `target` to the host browser instead of refusing it. OpenClaw's browser tool tells agents that `target` defaults to the host, so agents left it out and every first call failed with "Browser access requires target=\"host\"". Explicit sandbox or node targets, other profiles and endpoint overrides are still refused, and non-owners are still blocked.
+- When an agent asks to list or manage browser profiles, the refusal now names the call to make instead: `action="tabs"` with `target="host"` and the configured profile.
+
 ## 0.6.2
 
 - Accept a CDP installation that moved to a new directory. OpenClaw installs each Git tag into its own directory, so every Git upgrade failed setup and doctor with "Refusing unowned or incompatible CDP setup receipt". The receipt no longer records the package directory. noVNC still requires its original directory; install it from the release archive.

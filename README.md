@@ -33,11 +33,11 @@ cover 2026.10.4 and 2026.10.7. Other operating systems and ARM hosts are unverif
 Start your OpenClaw Gateway and the configured attach-only browser before setup.
 Default setup needs no Docker, user systemd, `flock`, `tar` or noVNC download.
 
-Install the tagged **v0.6.2** release from GitHub. ClawHub availability may lag
+Install the tagged **v0.6.3** release from GitHub. ClawHub availability may lag
 GitHub; use v0.5.0 or newer for the CDP-default behavior described here.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.6.2 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.6.3 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup
 openclaw clawser doctor
@@ -63,7 +63,7 @@ for connection requirements, the optional noVNC desktop, upgrades and recovery.
 Finish any open handoffs, then install the new tag over the old one and check it:
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.6.2 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.6.3 --force --accept-capabilities
 openclaw clawser doctor
 ```
 
@@ -137,9 +137,10 @@ proxy cannot establish native per-sender owner authority.
 | `revoke` | `id` | End this owner session’s invitation |
 
 Use the returned profile and raw target ID, not a display label such as `t1`.
-Every ordinary browser call, including the handback snapshot, must use
-`target: "host"` and that profile. Implicit user-profile, sandbox, node, MCP or
-endpoint overrides cannot bypass this route. Missing current APIs or changed
+Every ordinary browser call, including the handback snapshot, runs on the host
+browser and that profile. A call that omits `target` is routed to the host; an
+explicit sandbox or node target, another profile, MCP or endpoint overrides are
+refused. Missing current APIs or changed
 configuration fail closed.
 
 The bundled skill explains delivery and handback. CDP returns `backend: "cdp"`,
