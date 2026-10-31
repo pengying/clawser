@@ -23,7 +23,7 @@ const callKey = (event, ctx) => {
 
 const toolDescriptor = {
   name: 'browser_handoff', label: 'Browser Handoff',
-  description: 'Owner-authorized temporary browser viewing/takeover links. List configured profile tabs, create one-tab invitations, wait/status, or revoke. Recipients start in watch mode. Browser-tool actions are gated while a human controls the browser. On completion take a fresh browser snapshot. Results are JSON text; parse before reading fields such as url. Deliver privately by default. An explicitly allowed group owner request permits delivery only in that same requesting group/thread. Any member can claim the one-use bearer invitation. Keep links out of logs.',
+  description: 'Owner-authorized temporary browser viewing/takeover links, only for the step the owner must do in person. First fill what you know and trigger codes yourself; ask for a texted code in chat instead of a link. List configured profile tabs, create one-tab invitations, wait/status, or revoke. Recipients start in watch mode. Browser-tool actions are gated while a human controls the browser. On completion take a fresh browser snapshot. Results are JSON text; parse before reading fields such as url. Deliver privately by default. An explicitly allowed group owner request permits delivery only in that same requesting group/thread. Any member can claim the one-use bearer invitation. Keep links out of logs.',
   parameters: { type: 'object', additionalProperties: false, required: ['action'], properties: {
     action: { type: 'string', enum: ['tabs', 'create', 'status', 'wait', 'revoke'] },
     profile: { type: 'string' }, targetId: { type: 'string' }, id: { type: 'string' },
