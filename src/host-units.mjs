@@ -2,12 +2,14 @@ import { createHash } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 
 export const CLAWSER_CHROME_FLAGS = Object.freeze(['--ozone-platform', '--password-store', '--ignore-gpu-blocklist', '--window-size', '--window-position', '--start-maximized', '--remote-debugging-address', '--remote-debugging-port', '--no-first-run', '--no-default-browser-check']);
+// systemd expands $ in Exec words but not in Environment= values.
+const env = { dollar: false };
 const OWNED_ENV = new Set(['DISPLAY', 'XAUTHORITY', 'WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS']);
 
-export function systemdValue(value) {
+export function systemdValue(value, { dollar = true } = {}) {
   value = String(value);
   if (/[\x00-\x1f\x7f]/.test(value)) throw new Error('Service values must contain no control characters');
-  return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\$/g, () => '$$') + '"';
+  return '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\$/g, () => dollar ? '$$' : '$') + '"';
 }
 
 export function systemdArgument(value) {
@@ -45,10 +47,10 @@ export function renderUnits(i) {
   const { names: n, browser } = i;
   const header = `# Managed by Clawser; ownership is recorded in ${i.marker.replace(/%/g, '%%')}\n`;
   const install = '\n[Install]\nWantedBy=default.target\n';
-  const x = `Environment=${systemdValue('DISPLAY=:' + i.display)}\nEnvironment=${systemdValue('XAUTHORITY=' + i.xauthority)}\n`;
+  const x = `Environment=${systemdValue('DISPLAY=:' + i.display, env)}\nEnvironment=${systemdValue('XAUTHORITY=' + i.xauthority, env)}\n`;
   const extra = (browser.env ?? []).map(([name, value]) => {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || OWNED_ENV.has(name)) throw new Error(`Refusing browser environment variable ${name}; the unit owns its display and session environment`);
-    return `Environment=${systemdValue(name + '=' + value)}\n`;
+    return `Environment=${systemdValue(name + '=' + value, env)}\n`;
   }).join('');
   const wm = i.openbox ? n.windowManager : undefined;
   const units = {};

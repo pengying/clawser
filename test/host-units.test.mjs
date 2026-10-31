@@ -97,3 +97,11 @@ test('quoting helpers escape and the path helper stays strict', () => {
   assert.throws(() => systemdArgument('rel'), /absolute/);
   assert.throws(() => systemdValue('a\nb'), /control/);
 });
+
+test('dollar signs are doubled in Exec words but literal in Environment= values', () => {
+  const n = unitNames('/state');
+  const u = render({ xauthority: '/state/X$a', browser: { path: '/usr/bin/chrome', args: ['--x=$HOME'], env: [['PS1', 'a$b']] } })[n.browser];
+  assert.ok(u.includes('Environment="PS1=a$b"'));
+  assert.ok(u.includes('Environment="XAUTHORITY=/state/X$a"'));
+  assert.ok(u.includes('"--x=$$HOME"'));
+});
