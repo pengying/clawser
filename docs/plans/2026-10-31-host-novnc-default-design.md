@@ -161,6 +161,9 @@ operator's box; the earlier notes are on the `novnc-host-chrome` branch at
   `[::]:5900` on every interface.
 - The phone gateway (`src/novnc-probe.mjs`) connects to that socket instead of
   a loopback TCP port. Today it insists on `127.0.0.1` and a port.
+- The clipboard uses a small Python helper over `libX11` instead of `xclip`,
+  so it needs no extra package. *(Operator's call: no out-of-band install for
+  the clipboard.)*
 - The XRes identity proof and XTEST settlement move from the compiled
   `x11-proof.cpp` to Python `ctypes` calls into `libX11`, `libXtst`, `libXi` and
   `libXRes`, so hosts need no compiler. These libraries are on any desktop
@@ -248,9 +251,9 @@ next `setup` run. The README's upgrade steps say to run `setup --dry-run`, then
 `src/host-deps.mjs` already resolves Xvfb and x11vnc, which are required, and
 openbox, which is optional. It records each path and SHA-256 and smoke-tests
 the set for real. It is switched off today. This release switches it on and
-adds checks for `python3` and `xclip`, which the clipboard needs. When
+adds a check for `python3`. When
 something is missing, setup fails with the exact distro command, for example
-`sudo apt install xvfb x11vnc openbox xclip`. Doctor re-checks the recorded
+`sudo apt install xvfb x11vnc openbox`. Doctor re-checks the recorded
 hashes. A changed system or Homebrew binary tells the operator to rerun setup.
 Setup no longer runs `brew install`. It still finds and records Homebrew
 binaries, but it only prints the install command for anything missing, like
@@ -297,7 +300,7 @@ Rewrite "How it works" for the new default, in plain words:
   Native dropdowns, date pickers, file choosers, dialogs and popups all work.
 - Watch-only links show what the agent is doing.
 - No Docker. Needs Linux x86_64, systemd user services, Xvfb, x11vnc, openbox
-  (recommended), python3, xclip, and Google Chrome or Chromium. Setup installs
+  (recommended), python3, and Google Chrome or Chromium. Setup installs
   none of them and prints the command for whatever is missing.
 - Option A and option B, and what each means for logins.
 - The CDP viewer as the opt-in, with its one-tab scope and limits.

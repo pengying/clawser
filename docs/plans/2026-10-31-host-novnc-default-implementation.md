@@ -6,7 +6,7 @@
 
 **Architecture:** Five systemd user services, all written and owned by setup: Xvfb with an X cookie, openbox, Chrome, the Python supervisor, and the existing Node controller. The supervisor starts one x11vnc per viewer session on a private Unix socket and proves identity and settlement through `ctypes` calls into libX11, libXRes, libXtst and libXi. The controller talks to the supervisor over its Unix socket, and the phone gateway connects to x11vnc's socket instead of loopback TCP.
 
-**Tech Stack:** Node.js 24.16+ (ESM, `node:test`, `node:sqlite`), Python 3 (stdlib only: `ctypes`, `xml.etree`, `socket`), systemd user units, Xvfb, x11vnc, openbox, xclip, Google Chrome or Chromium.
+**Tech Stack:** Node.js 24.16+ (ESM, `node:test`, `node:sqlite`), Python 3 (stdlib only: `ctypes`, `xml.etree`, `socket`), systemd user units, Xvfb, x11vnc, openbox, Google Chrome or Chromium.
 
 **Spec:** `docs/plans/2026-10-31-host-novnc-default-design.md`. Read it before any task. This plan argues from it.
 
@@ -27,6 +27,7 @@
 - Unix socket paths must fit in 107 bytes. Setup refuses longer state directories before writing anything.
 - The public repo and package carry no personal identifiers, account names or host paths.
 - Commit as `Peng Ying <495700+pengying@users.noreply.github.com>`. Prefix commits with `LS_COMMENT_AUDIT=1`. Add files by name.
+- No `xclip`. The clipboard uses `runtime/desktop/clipboard.py` over libX11, so it needs no package beyond Xvfb, x11vnc, openbox and python3.
 - Tests that start Xvfb, x11vnc or Chrome skip when the binary is missing, and never use display `:20`, port `9222`, or any existing profile or user unit. The end-to-end test runs only when `CLAWSER_HOST_E2E=1`.
 
 ## Review Focus
@@ -54,7 +55,8 @@
 | `src/cookie-migration.mjs` (new) | Export, import and flush cookies over CDP. |
 | `src/host-setup.mjs` (new) | Plan, describe and apply option A and option B, plus host doctor checks. |
 | `src/setup.mjs` (shrunk) | Options, mode selection, receipts, config patch and reload. All Docker code goes. |
-| `src/host-deps.mjs` | Enabled. Adds `python3` and `xclip`, removes `brew install`, and smoke-tests over a Unix socket. |
+| `runtime/desktop/clipboard.py` (new) | Owns or reads the X clipboard through libX11, replacing xclip. |
+| `src/host-deps.mjs` | Enabled. Adds `python3`, removes `brew install`, and smoke-tests over a Unix socket. |
 | `src/novnc-probe.mjs`, `src/desktop-controller.mjs`, `src/desktop-recovery.mjs`, `bin/*.mjs` | Socket endpoints and truthful readiness fields. |
 | Deleted | `runtime/desktop/{Dockerfile,entrypoint.sh,chromium-seccomp.json,MOBY-LICENSE,x11-proof.cpp}`, `runtime/desktop/test/{adapter.test.mjs,fixtures.mjs,health.mjs,heartbeat.mjs,inspect.mjs,integration.mjs}` |
 
@@ -110,7 +112,7 @@
   - `settle 999999` returns `heldInputCleared: true`.
   - Then `held` returns false, and `input_fixture.py query` returns `{shift:false, button1:false}`.
 - `absent waits for the listed client to disconnect`: start a Python X client that holds the display for 300 ms, then run `absent <its pid>`. It returns `xClientsAbsent: true` after the client exits.
-- `selection-owner names the clipboard owner's PID`: skip without `xclip`. With `xclip -quiet -selection clipboard -in` running, `pid` equals xclip's PID.
+- `selection-owner names the clipboard owner's PID`: skip without `xclip`. With `xclip -quiet -selection clipboard -in` running, `pid` equals xclip's PID. (Task 1b replaces xclip here with Clawser's own helper.)
 
 - [ ] **Step 2: Run the tests and confirm they fail**
 
@@ -131,7 +133,7 @@ Expected: FAIL on missing modules or files. The Xvfb tests run only on Linux.
 
 - [ ] **Step 4: Run the tests and confirm they pass**
 
-Run the same command on Linux with Xvfb, x11vnc and xclip on PATH.
+Run the same command on Linux with Xvfb and x11vnc on PATH.
 Expected: PASS. On macOS, the Xvfb tests skip.
 
 - [ ] **Step 5: Commit**
@@ -140,6 +142,46 @@ Expected: PASS. On macOS, the Xvfb tests skip.
 git add runtime/desktop/xproof.py runtime/desktop/openbox_config.py runtime/desktop/test/input_fixture.py src/host-display.mjs test/host-display.test.mjs runtime/desktop/test/xproof.test.mjs runtime/desktop/test/openbox-config.test.mjs
 git rm runtime/desktop/test/input-fixture.py
 LS_COMMENT_AUDIT=1 git commit -m "feat(desktop): X proof and openbox config helpers without a compiler"
+```
+
+---
+
+### Task 1b: Built-in clipboard helper
+
+**Files:**
+- Create: `runtime/desktop/clipboard.py`
+- Modify: `runtime/desktop/test/xproof.test.mjs` (the selection-owner test uses the new helper instead of xclip)
+- Test: `runtime/desktop/test/clipboard.test.mjs`
+
+**Interfaces:**
+- Consumes: the Xvfb test helper from Task 1's `xproof.test.mjs`. Move it to `runtime/desktop/test/xvfb.mjs` and import it from both test files.
+- Produces, the `clipboard.py` CLI. Both ops open `'unix/' + os.environ['DISPLAY']` with `XAUTHORITY` through `ctypes` on `libX11.so.6`. `argtypes` and `restype` are declared for every call.
+  - `python3 clipboard.py own`:
+    - Reads all of stdin as UTF-8 text, then creates an unmapped 1x1 window and calls `XSetSelectionOwner(CLIPBOARD)`.
+    - If `XGetSelectionOwner` doesn't return that window, it exits 1 with `clipboard ownership refused`.
+    - It answers `SelectionRequest` events for the targets `TARGETS`, `UTF8_STRING`, `STRING`, `TEXT` and `text/plain;charset=utf-8`. It writes the property on the requestor and sends a `SelectionNotify`. Any other target gets a `SelectionNotify` with property `None`.
+    - It exits 0 on `SelectionClear`, SIGTERM or SIGINT.
+    - Text longer than the display's maximum request size (`XExtendedMaxRequestSize`, or `XMaxRequestSize` when that is 0, times 4, minus 1024) exits 1 with `clipboard text too large`. INCR is not supported.
+  - `python3 clipboard.py read`:
+    - Converts `CLIPBOARD` to `UTF8_STRING` into a property on its own window, waits up to 1 s for `SelectionNotify`, then prints the bytes to stdout.
+    - With no owner, a refused conversion or a timeout, it exits 1 with `clipboard unavailable`. An `INCR` reply exits 1 with `clipboard text too large`.
+    - It deletes the property after reading.
+
+- [ ] **Step 1: Write the failing tests** in `runtime/desktop/test/clipboard.test.mjs`. Skip unless `Xvfb` and `python3` are on PATH.
+  - `text owned by the helper reads back exactly`: own `'Clipboard proof — 中文 🙂\nsecond line'`. `read` returns the same bytes.
+  - `the helper is the provable selection owner`: while `own` runs, `xproof.py selection-owner` returns its PID.
+  - `a newer owner replaces the old one and the old helper exits`: start two `own` processes one after the other. The first exits 0 within 1 s, and `read` returns the second text.
+  - `read fails cleanly with no owner`: exit 1, stderr `clipboard unavailable`, and empty stdout.
+  - `oversized text is refused`: 20 MiB of text on stdin exits 1 with `clipboard text too large`.
+  - In `xproof.test.mjs`, `selection-owner names the clipboard owner's PID` no longer skips without xclip. It uses `clipboard.py own`.
+- [ ] **Step 2: Run and confirm failure**: `node --test runtime/desktop/test/clipboard.test.mjs runtime/desktop/test/xproof.test.mjs` on Linux.
+- [ ] **Step 3: Implement `runtime/desktop/clipboard.py`** to the interface above. Use `select` on `XConnectionNumber` with `XPending`, so signals are handled while waiting. Use `XEvent` as a ctypes union big enough for the largest event (192 bytes), with field structs for `XSelectionRequestEvent`, `XSelectionEvent` and `XSelectionClearEvent`.
+- [ ] **Step 4: Run and confirm pass** on Linux, three times in a row.
+- [ ] **Step 5: Commit**
+
+```bash
+git add runtime/desktop/clipboard.py runtime/desktop/test/clipboard.test.mjs runtime/desktop/test/xproof.test.mjs runtime/desktop/test/xvfb.mjs
+LS_COMMENT_AUDIT=1 git commit -m "feat(desktop): own and read the X clipboard without xclip"
 ```
 
 ---
@@ -153,7 +195,7 @@ LS_COMMENT_AUDIT=1 git commit -m "feat(desktop): X proof and openbox config help
 **Interfaces:**
 - Consumes: `runtime/desktop/xproof.py` CLI (Task 1).
 - Produces:
-  - `HOST_DEPS` gains `python3` (probe `--version`, required, packages apt/dnf/pacman/zypper/apk `python3`; pacman `python`) and `xclip` (probe `-version`, required, package `xclip` everywhere).
+  - `HOST_DEPS` gains `python3` (probe `--version`, required, packages apt/dnf/pacman/zypper/apk `python3`; pacman `python`). There is no `xclip` entry: the clipboard uses `runtime/desktop/clipboard.py`.
   - `planHostDeps(recorded, d, h)` never returns `plan.brew`. A missing required binary throws `'Missing <names>.' + hint`. A missing openbox warns.
   - `installHostDeps(plan, d, { previous })` runs no install command. It only smoke-tests and records.
   - `smokeHostDeps(binaries, d, opts)` starts Xvfb with `-displayfd 3 -nolisten tcp -auth <tmp cookie>`, then openbox, then x11vnc with `-unixsock <tmp 0700 dir>/vnc.sock -rfbport 0 -no6 -rfbportv6 -1`. It checks the RFB banner over that socket, then runs `python3 <packageDir>/runtime/desktop/xproof.py clients` against the display. It reports failures by name: `Xvfb`, `openbox`, `x11vnc`, `python3`.
@@ -162,7 +204,7 @@ LS_COMMENT_AUDIT=1 git commit -m "feat(desktop): X proof and openbox config help
 - [ ] **Step 1: Update the tests first**
   - Drop the Homebrew-install tests.
   - Keep: a Homebrew binary that is already installed is found and recorded with its Cellar version.
-  - Add `a missing required binary fails with the distro command and runs no installer`: with no brew calls at all, expect `/sudo apt install .*python3.*xclip/`.
+  - Add `a missing required binary fails with the distro command and runs no installer`: with no brew calls at all, expect `/sudo apt install .*python3/`, and the hint never names `xclip`.
   - Change `the real smoke test …` to assert x11vnc served RFB over the Unix socket. Assert `/proc/net/tcp` and `/proc/net/tcp6` held no listener owned by the x11vnc PID during the smoke run, using a `d.onSmokeVnc(pid)` hook that only tests pass.
   - Add `the smoke test reports python3 when the X proof helper fails`, using a fake `python3` that exits 1.
 
@@ -184,7 +226,7 @@ Run: `node --test test/host-deps.test.mjs` on Linux. Expected: PASS.
 
 ```bash
 git add src/host-deps.mjs test/host-deps.test.mjs
-LS_COMMENT_AUDIT=1 git commit -m "feat(setup): require python3 and xclip, never run brew install, smoke-test over a private socket"
+LS_COMMENT_AUDIT=1 git commit -m "feat(setup): require python3, never run brew install, smoke-test over a private socket"
 ```
 
 ---
@@ -314,13 +356,14 @@ Tests:
 - `a browser restart while idle changes browserGeneration and leaves the desktop usable`: change the guid and wait 1 s. The new generation is different, `tainted` is false, and a new watch viewer starts.
 - `a browser restart during a control session retires it and taints the desktop`: start a control viewer and change the guid. Within 2 s `viewer` is null and `tainted` is true. `stopViewerAndSettle` for that lease returns `retirementReason:'critical_child_exit'`, and `startViewer` rejects `/quarantined/`.
 - `a supervisor restart changes both generations and releases input its x11vnc left held`: hold a key with `input_fixture.py`, restart the process, and compare `status` before and after. `held` is false once the new supervisor serves.
-- `clipboard round-trips for the control lease only`: skip without xclip. Port the clipboard assertions from the deleted `integration.mjs`.
+- `clipboard round-trips for the control lease only`: port the clipboard assertions from the deleted `integration.mjs`. They run without xclip, through `clipboard.py`.
 
 - [ ] **Step 2: Run and confirm failure**: `node --test runtime/desktop/test/*.test.mjs`
 - [ ] **Step 3: Implement**
 
 - **Supervisor:**
   - Keep the actor, heartbeat, retirement, clipboard and settlement-cache code paths of today's `supervisor.py`.
+  - Replace each `xclip` call with Clawser's helper: `['xclip','-quiet','-selection','clipboard','-in','-target','UTF8_STRING']` becomes `[sys.executable, <dir>/clipboard.py, 'own']`, and `xclip … -out` becomes `[sys.executable, <dir>/clipboard.py, 'read']`. The owner process, PID proof and read-back checks stay the same.
   - Remove `InheritedProxy`, `listening`, the Xvfb, openbox and Chromium launches, the singleton cleanup, the `/proc/net/tcp` checks and `critical`.
   - Replace `proof(...)` subprocess calls with direct `xproof` function calls.
   - On SIGTERM, kill only actor and clipboard process groups. The display and browser aren't the supervisor's.
@@ -658,7 +701,7 @@ LS_COMMENT_AUDIT=1 git commit -m "feat(doctor): check the host services, display
 
   If `systemctl --user` is unavailable after enabling linger, run the rendered `ExecStart` argv arrays directly as children instead, and say so in the PR body.
 - [ ] **Step 2: Add a CI job `host-desktop`** on `ubuntu-latest`:
-  - Run `sudo apt-get update && sudo apt-get install -y xvfb x11vnc openbox xclip`, then `sudo loginctl enable-linger "$USER"`.
+  - Run `sudo apt-get update && sudo apt-get install -y xvfb x11vnc openbox`, then `sudo loginctl enable-linger "$USER"`.
   - Export `XDG_RUNTIME_DIR=/run/user/$(id -u)` and wait for `systemctl --user is-system-running --wait || true`.
   - Run `npm ci --ignore-scripts`, `npm run test:desktop`, then `CLAWSER_HOST_E2E=1 npm run test:e2e`.
   - In the existing `test` job, rename `Runtime adapter and readiness tests` to run `npm run test:desktop`.
