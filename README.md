@@ -2,28 +2,58 @@
 
 **Let a human take over the agent’s existing browser tab from a phone, then hand it back.**
 
-Clawser gives OpenClaw a temporary HTTPS link to a selected tab in its already
-configured default Chromium browser. Open the link in a regular mobile browser,
-take control for a CAPTCHA, login or sensitive form step, then press **Done**.
-The agent checks the page again and continues the pending task in that same tab.
+Clawser gives OpenClaw a temporary HTTPS link to one tab in the browser the
+agent already uses. Open the link in a regular mobile browser, take control for
+a CAPTCHA, login or sensitive form step, then press **Done**. The agent checks
+the page again and continues the task in that same tab.
 
-Default setup uses the existing **OpenClaw browser connection**, which is not
-automatically your everyday OS Chrome profile. It never launches another browser,
-creates a Chrome user-data directory, copies cookies, guesses a CDP port or falls
-back to a different browser. Keep the configured browser running.
+## How it works
 
-- Selected-tab viewing through CDP screencast images, with touch scrolling,
-  pinch/pan, zoom, a mobile keyboard and device paste.
-- Phone controls for supported native HTML selects and classic RGB color fields.
-- Explicit **Keyboard** control after tapping a cross-origin frame field; this
-  grants manual keyboard input to the focused frame, not verified field autofill.
-- Browser-tool coordination that keeps automation paused when human input or
-  handback is uncertain. Done preserves the browser, tabs, cookies and profile.
-- Optional `--novnc` setup for a dedicated Docker desktop when you need browser
-  chrome, all tabs, popup switching, native OS dialogs or system clipboard access.
+Clawser is an OpenClaw plugin. It adds no browser of its own and needs no
+Docker. The default setup has four parts:
 
-The recipient needs no VPN or app installation. A Cloudflare HTTPS tunnel exposes
-only the authenticated viewer, never the Gateway or browser debugging endpoint.
+1. **Your existing browser.** A Chromium the agent already drives, running on
+   the Gateway host with a loopback debugging port. Clawser attaches to it and
+   never launches, copies or replaces a browser, so keep it running. This is
+   OpenClaw's configured connection, not necessarily your everyday Chrome.
+2. **A viewer inside the plugin.** A small web server bound to `127.0.0.1`. It
+   streams the shared tab as screencast images and sends your taps and typing
+   back through the same debugging connection.
+3. **A Cloudflare quick tunnel.** Setup downloads a checksum-pinned
+   `cloudflared` binary. It gives the viewer a temporary `trycloudflare.com`
+   HTTPS address. Only the authenticated viewer is exposed, never the Gateway
+   or the browser's debugging port. A manual configuration can use Tailscale
+   Funnel or your own HTTPS reverse proxy instead.
+4. **A browser-tool gate.** A trusted OpenClaw policy checks every ordinary
+   browser call. Only the verified owner can drive the browser, only the
+   configured profile is reachable, and automation pauses while a human has
+   control.
+
+```text
+phone ──HTTPS──> Cloudflare tunnel ──> viewer (127.0.0.1, in the plugin)
+                                             │ CDP
+agent ──browser tool──> Clawser gate ──> existing Chromium (127.0.0.1)
+```
+
+A link shares **one selected tab**. Ending the handoff leaves the browser, tabs,
+cookies and profile as they were.
+
+| Needed | Default (CDP) | Optional noVNC desktop |
+| --- | --- | --- |
+| Existing Chromium with loopback CDP | Yes | No, it runs its own |
+| Docker | **No** | Yes |
+| User systemd service | No | Yes |
+| What the phone sees | One tab | Whole browser window |
+
+The optional `--novnc` setup runs a dedicated Chromium desktop in Docker. Use it
+only when you need browser chrome, all tabs, popup switching, native OS dialogs
+or the system clipboard. Most setups do not need it.
+
+The viewer supports touch scrolling, pinch and pan, zoom, a mobile keyboard and
+device paste. It has phone controls for native HTML selects and classic RGB
+color fields. After you tap a field inside a cross-origin frame, an explicit
+**Keyboard** control sends typing to that frame. The recipient needs no VPN or
+app installation.
 
 ## Install
 
@@ -32,6 +62,7 @@ The validated host is **Linux x86_64**, **Node.js >=24.16 <25 or >=26.1**, and
 cover 2026.10.4 and 2026.10.7. Other operating systems and ARM hosts are unverified.
 Start your OpenClaw Gateway and the configured attach-only browser before setup.
 Default setup needs no Docker, user systemd, `flock`, `tar` or noVNC download.
+Its only download is the pinned `cloudflared` binary.
 
 Install the tagged **v0.6.3** release from GitHub. ClawHub availability may lag
 GitHub; use v0.5.0 or newer for the CDP-default behavior described here.
@@ -168,7 +199,7 @@ for native-ingress requirements and exact matching rules.
 
 ## Safety and limits
 
-Default CDP runs in the host browser’s normal OS sandbox; it adds no Docker
+Default CDP runs in the host browser’s normal OS sandbox; it adds no container
 isolation. The optional desktop keeps Chromium’s sandbox enabled and restricts
 ordinary browser egress. Neither mode guarantees containment of a compromised
 browser or safety of every website.
