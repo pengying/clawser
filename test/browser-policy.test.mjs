@@ -61,7 +61,7 @@ test('administrative main exception rejects malformed sender identity, channel a
 
 test('administrative main authority preserves profile, routing, availability and retired binding checks', () => {
   const f = fixture();
-  for (const params of [{ target: undefined }, { target: 'node' }, { target: 'sandbox' }, { profile: 'other' }, { cdpUrl: 'http://localhost:9999' }, { executablePath: '/untrusted/chrome' }, { action: 'start' }]) assert.equal(f.policy.evaluate(event(params), administrativeIdentity())?.allow, false);
+  for (const params of [{ target: 'node' }, { target: 'sandbox' }, { profile: 'other' }, { cdpUrl: 'http://localhost:9999' }, { executablePath: '/untrusted/chrome' }, { action: 'start' }]) assert.equal(f.policy.evaluate(event(params), administrativeIdentity())?.allow, false);
   f.available = false;
   assert.equal(f.policy.evaluate(event(), administrativeIdentity()).allow, false);
   f.available = true;
@@ -81,10 +81,27 @@ test('native policy rejects incomplete host identity and disallowed sessions', (
 });
 test('routing is confined to the pinned host profiles and cannot select alternative browser state', () => {
   const f = fixture();
-  for (const params of [{ target: undefined }, { target: 'node' }, { target: 'sandbox' }, { profile: 'other' }, { profile: 'user' }, { profile: '' }, { profile: ' daily ' }, { node: 'remote' }, { baseUrl: 'http://localhost:9999' }, { cdpUrl: 'http://localhost:9999' }, { endpoint: 'http://localhost:9999' }, { browser: 'chrome' }, { systemProfile: 'Default' }, { into: 'other' }, { dashboard: 'other' }, { action: 'start' }, { action: 'create-profile' }, { action: 'importprofile' }, { action: 'profiles' }]) {
+  for (const params of [{ target: 'node' }, { target: 'sandbox' }, { target: '' }, { target: 'HOST' }, { target: null }, { profile: 'other' }, { profile: 'user' }, { profile: '' }, { profile: ' daily ' }, { node: 'remote' }, { baseUrl: 'http://localhost:9999' }, { cdpUrl: 'http://localhost:9999' }, { endpoint: 'http://localhost:9999' }, { browser: 'chrome' }, { systemProfile: 'Default' }, { into: 'other' }, { dashboard: 'other' }, { action: 'start' }, { action: 'create-profile' }, { action: 'importprofile' }, { action: 'profiles' }]) {
     assert.equal(f.policy.evaluate(event(params), identity())?.allow, false, JSON.stringify(params));
   }
   for (const action of ['tabs', 'open', 'snapshot', 'act', 'navigate', 'close']) assert.equal(f.policy.evaluate(event({ action }), identity()), undefined);
+});
+test('a call without a target is routed to the pinned host browser instead of refused', () => {
+  const f = fixture();
+  for (const ctx of [identity(), administrativeIdentity()]) {
+    const params = { action: 'tabs', profile: 'daily' };
+    const decision = f.policy.evaluate({ toolName: 'browser', params }, ctx);
+    assert.deepEqual(decision, { params: { action: 'tabs', profile: 'daily', target: 'host' } });
+    assert.equal(params.target, undefined, 'the original call is not mutated');
+  }
+  const member = identity(); member.requester.senderIsOwner = false;
+  assert.equal(f.policy.evaluate({ toolName: 'browser', params: { action: 'tabs' } }, member).allow, false);
+  for (const params of [{ action: 'tabs', profile: 'other' }, { action: 'tabs', cdpUrl: 'http://localhost:9999' }, { action: 'start' }])
+    assert.equal(f.policy.evaluate({ toolName: 'browser', params }, identity()).allow, false, JSON.stringify(params));
+});
+test('a refused profile listing tells the agent which call to make instead', () => {
+  const reason = fixture().policy.evaluate(event({ action: 'profiles' }), identity()).reason;
+  assert.match(reason, /action="tabs"/); assert.match(reason, /target="host"/); assert.match(reason, /profile="daily"/);
 });
 test('current configuration API and service faults deny before native I/O without snapshot fallback', () => {
   const f = fixture(); f.available = false;
