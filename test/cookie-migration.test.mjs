@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocketServer } from 'ws';
+import * as migration from '../src/cookie-migration.mjs';
 import { closeBrowser, countCookies, exportCookies, flushCookies, importCookies } from '../src/cookie-migration.mjs';
 
 const COOKIES = [
@@ -27,6 +28,7 @@ async function browser(t, { reply = () => ({}), version } = {}) {
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await once(server, 'listening');
   const port = server.address().port, cdpUrl = `http://127.0.0.1:${port}`, commands = [], connections = [], logs = [];
+  let clock = 0;
   server.on('connection', (socket, request) => {
     connections.push(request.url);
     socket.on('message', raw => {
@@ -38,7 +40,7 @@ async function browser(t, { reply = () => ({}), version } = {}) {
   });
   t.after(() => { for (const client of server.clients) client.terminate(); server.close(); });
   const d = {
-    fs, sleep: async () => {}, log: message => logs.push(message),
+    fs, now: () => clock, sleep: async ms => { clock += ms; }, log: message => logs.push(message),
     fetch: async (url, options) => {
       assert.equal(url, cdpUrl + '/json/version');
       assert.equal(options.redirect, 'error');
@@ -46,7 +48,7 @@ async function browser(t, { reply = () => ({}), version } = {}) {
       return Response.json(version ? version(port) : { Browser: 'Chrome/149', webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/browser/abc` });
     },
   };
-  return { cdpUrl, port, commands, connections, logs, d };
+  return { cdpUrl, port, commands, connections, logs, d, now: () => clock, advance: ms => { clock += ms; } };
 }
 
 test("exportCookies writes the browser's cookies to a 0600 file and never logs them", async t => {
@@ -88,6 +90,18 @@ test('importCookies sends CookieParams in batches of 500 and keeps expires only 
   assert.ok(params.filter((_, i) => i % 3 === 1).every(param => !Object.hasOwn(param, 'expires')), 'session cookies carry no expires');
 });
 
+test('importCookies sets the rest of a batch when one cookie is rejected', async t => {
+  const b = await browser(t, { reply: command => command.params.cookies.some(cookie => cookie.name === 'bad') ? { error: { message: 'Invalid cookie fields' } } : {} });
+  const path = join(await folder(t), 'cookies.json');
+  await fs.writeFile(path, JSON.stringify([{ ...COOKIES[0], name: 'good1' }, { ...COOKIES[0], name: 'bad' }, { ...COOKIES[1], name: 'good2' }]), { mode: 0o600 });
+  assert.deepEqual(await importCookies(b.cdpUrl, path, b.d), { count: 2 });
+  assert.deepEqual(b.commands.map(command => command.params.cookies.map(cookie => cookie.name)), [['good1', 'bad', 'good2'], ['good1'], ['bad'], ['good2']]);
+  // A dropped connection is not a rejected cookie. It fails the import, and its message names no cookie.
+  const dropped = await browser(t, { reply: (command, socket) => socket.terminate() });
+  await assert.rejects(importCookies(dropped.cdpUrl, path, dropped.d), { message: 'Browser disconnected' });
+  assert.equal(dropped.commands.length, 1);
+});
+
 test('closeBrowser treats a disconnect before the reply as success', async t => {
   const b = await browser(t, { reply: (command, socket) => { if (command.method === 'Browser.close') socket.terminate(); } });
   await closeBrowser(b.cdpUrl, b.d);
@@ -117,10 +131,43 @@ test('flushCookies waits for the browser to go away and come back, or gives up a
   let fetches = 0, sleeps = 0;
   const up = never.d.fetch;
   never.d.fetch = async (url, options) => { fetches++; return up(url, options); };
-  never.d.sleep = async ms => { assert.equal(ms, 250); sleeps++; };
+  never.d.sleep = async ms => { assert.equal(ms, 250); sleeps++; never.advance(ms); };
   await assert.rejects(flushCookies(never.cdpUrl, never.d), { message: 'The browser did not come back within 60 seconds after saving cookies.' });
   assert.equal(fetches, 1 + 240, 'one endpoint check, then ceil(60000 / 250) polls');
-  assert.ok(sleeps >= 239 && sleeps <= 240, String(sleeps));
+  assert.equal(sleeps, 239);
+
+  // Each answer takes 5 s, so the 60 s deadline ends the wait long before 240 polls.
+  const slow = await browser(t, { reply: (command, socket) => socket.terminate() });
+  let slowFetches = 0;
+  const slowUp = slow.d.fetch;
+  slow.d.fetch = async (url, options) => { slowFetches++; slow.advance(5000); return slowUp(url, options); };
+  await assert.rejects(flushCookies(slow.cdpUrl, slow.d), { message: 'The browser did not come back within 60 seconds after saving cookies.' });
+  assert.ok(slowFetches < 20, String(slowFetches));
+});
+
+test('waitForBrowser retries until the browser answers, and gives up after 60 seconds', async t => {
+  const b = await browser(t);
+  const answer = b.d.fetch;
+  let fetches = 0;
+  b.d.fetch = async (url, options) => { if (++fetches <= 3) throw new TypeError('fetch failed'); return answer(url, options); };
+  await migration.waitForBrowser(b.cdpUrl, b.d);
+  assert.equal(fetches, 4);
+  assert.equal(b.now(), 750);
+  assert.deepEqual(b.connections, [], 'waiting opens no DevTools connection');
+
+  const message = "Clawser's browser did not answer within 60 seconds.";
+  const never = await browser(t);
+  let tries = 0;
+  never.d.fetch = async () => { tries++; throw new TypeError('fetch failed'); };
+  await assert.rejects(migration.waitForBrowser(never.cdpUrl, never.d), { message });
+  assert.equal(tries, 240);
+  assert.equal(never.now(), 239 * 250);
+
+  const slow = await browser(t);
+  let slowTries = 0;
+  slow.d.fetch = async () => { slowTries++; slow.advance(5000); throw new TypeError('fetch failed'); };
+  await assert.rejects(migration.waitForBrowser(slow.cdpUrl, slow.d), { message });
+  assert.ok(slowTries < 20, String(slowTries));
 });
 
 test('cookie calls refuse a browser endpoint that is not this loopback browser', async t => {

@@ -180,13 +180,16 @@ test('a CDP install without the explicit mark upgrades through option B with its
 });
 
 const MY_UNITS = ['my-chrome.service', 'my-openbox.service', 'my-xvfb.service'];
-const COOKIE_METHODS = ['exportCookies', 'importCookies', 'closeBrowser', 'flushCookies', 'countCookies'];
+const COOKIE_METHODS = ['exportCookies', 'waitForBrowser', 'importCookies', 'closeBrowser', 'flushCookies', 'countCookies'];
+const SAVED = ' Its cookies are saved and move over when you rerun setup.';
+const DROP_INS = unit => `Could not read the drop-in paths of ${unit}; rerun setup after removing quotes or backslashes from their names.`;
 const KEEPS = "The agent's browser keeps the logins from user.";
 const GOOGLE = 'Sign in to Google once in a handoff link, and re-save any saved site passwords.';
 const DROP_IN = '[Service]\nTimeoutStopSec=5\n';
 const healthyUser = async () => ({ ready: true, profile: 'user', cdpUrl: 'http://127.0.0.1:9222', recoveryRequired: false });
 const verb = name => call => call.command === 'systemctl' && call.args[1] === name;
 const cookieCall = method => call => call.command === 'cookies' && call.args[0] === method;
+const cookieDirs = async w => (await fs.readdir(w.stateDir)).filter(name => name.startsWith('cookies-'));
 const exportsThree = async (url, dir) => {
   assert.equal((await fs.stat(dir)).mode & 0o777, 0o700, 'the cookie temp folder is private');
   const path = join(dir, 'cookies.json');
@@ -205,7 +208,7 @@ async function applyWorld(t, options = {}) {
   w.foreign['my-chrome.service'].DropInPaths = w.dropIn;
   w.cookies = {
     exportCookies: async (url, dir) => { const path = join(dir, 'cookies.json'); await fs.writeFile(path, '[]', { mode: 0o600 }); return { path, count: 0 }; },
-    importCookies: async () => ({ count: 0 }), flushCookies: async () => {}, countCookies: async () => 0, closeBrowser: async () => {},
+    waitForBrowser: async () => {}, importCookies: async () => ({ count: 0 }), flushCookies: async () => {}, countCookies: async () => 0, closeBrowser: async () => {},
   };
   w.cookieArgs = {};
   w.deps.cookieMigration = Object.fromEntries(COOKIE_METHODS.map(method => [method, async (...args) => {
@@ -284,10 +287,10 @@ test("keyring cookies are exported before the first stop and imported after Claw
   assert.equal(result.ok, true);
   const calls = w.calls;
   const order = [calls.findIndex(cookieCall('exportCookies')), calls.findIndex(verb('stop')), calls.findLastIndex(verb('enable')),
-    calls.findIndex(cookieCall('importCookies')), calls.findIndex(cookieCall('flushCookies')), calls.findIndex(cookieCall('countCookies')), calls.findIndex(isPatch)];
+    calls.findIndex(cookieCall('waitForBrowser')), calls.findIndex(cookieCall('importCookies')), calls.findIndex(cookieCall('flushCookies')), calls.findIndex(cookieCall('countCookies')), calls.findIndex(isPatch)];
   assert.ok(order.every((at, i) => at >= 0 && (i === 0 || at > order[i - 1])), JSON.stringify(order));
   const url = 'http://127.0.0.1:9222';
-  assert.deepEqual(calls.filter(call => call.command === 'cookies').map(call => call.args), [['exportCookies', url], ['importCookies', url], ['flushCookies', url], ['countCookies', url]]);
+  assert.deepEqual(calls.filter(call => call.command === 'cookies').map(call => call.args), [['exportCookies', url], ['waitForBrowser', url], ['importCookies', url], ['flushCookies', url], ['countCookies', url]]);
   const dir = w.cookieArgs.exportCookies[1];
   assert.equal(dirname(dir), w.stateDir);
   assert.match(basename(dir), /^cookies-/);
@@ -298,6 +301,17 @@ test("keyring cookies are exported before the first stop and imported after Claw
   assert.match(saved.cookieMigration.at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
   assert.ok(w.logs.includes(GOOGLE), w.logs.join('\n'));
   assert.ok(w.logs.includes(KEEPS), w.logs.join('\n'));
+  // A re-count that fails after the import and flush keeps the import's own count.
+  const recount = await applyWorld(t);
+  await cookieStore(recount.udd, ['v11a', 'v11b', 'v11c']);
+  Object.assign(recount.cookies, { exportCookies: exportsThree, importCookies: async () => ({ count: 2 }), countCookies: async () => { throw new Error('gone'); } });
+  const again = await runClawser(recount.yes, recount.deps);
+  assert.equal(again.ok, true);
+  const { cookieMigration } = await recount.receipt();
+  assert.deepEqual(cookieMigration, { exported: 3, imported: 2, at: cookieMigration.at });
+  assert.equal(again.warnings.some(text => text.startsWith('Moving cookies')), false);
+  assert.ok(recount.logs.includes(GOOGLE), recount.logs.join('\n'));
+  assert.deepEqual(await cookieDirs(recount), []);
 });
 
 test('a failed cookie export stops and closes nothing', async t => {
@@ -309,7 +323,7 @@ test('a failed cookie export stops and closes nothing', async t => {
   for (const name of ['stop', 'disable', 'enable']) assert.deepEqual(systemctl(w.calls, name), [], name);
   assert.equal(w.calls.some(cookieCall('closeBrowser')), false);
   assert.equal(w.calls.some(isPatch), false);
-  assert.deepEqual((await fs.readdir(w.stateDir)).filter(name => name.startsWith('cookies-')), []);
+  assert.deepEqual(await cookieDirs(w), []);
   assert.equal(await exists(join(w.stateDir, 'backups')), false, 'nothing is backed up before the export');
   assert.equal(await exists(join(w.stateDir, 'setup.lock')), false);
 });
@@ -328,6 +342,7 @@ test('a failed cookie import warns and still finishes setup', async t => {
   assert.equal(w.logs.includes(GOOGLE), false);
   assert.ok(w.logs.includes(KEEPS), w.logs.join('\n'));
   assert.equal(await exists(w.cookieArgs.exportCookies[1]), false, 'the temp folder is removed');
+  assert.deepEqual(await cookieDirs(w), []);
 });
 
 test('option B closes a desktop-session Chrome and waits for it to exit', async t => {
@@ -344,19 +359,31 @@ test('option B closes a desktop-session Chrome and waits for it to exit', async 
 
 test('a desktop-session Chrome that does not close within 30 seconds stops setup before anything starts', async t => {
   const w = await sessionWorld(t);
+  await cookieStore(w.udd, ['v11a', 'v11b', 'v11c']);
+  w.cookies.exportCookies = exportsThree;
   await assert.rejects(runClawser(w.yes, w.deps), error => error.message.startsWith('The browser did not close within 30 seconds; close it yourself, then rerun setup.'));
   assert.equal(w.calls.filter(cookieCall('closeBrowser')).length, 1);
   for (const name of ['enable', 'restart']) assert.deepEqual(systemctl(w.calls, name), [], name);
   assert.equal(w.calls.some(isPatch), false);
+  assert.equal(w.calls.some(cookieCall('importCookies')), false);
+  const kept = await cookieDirs(w);
+  assert.equal(kept.length, 1, 'the export stays for the rerun');
+  assert.ok(await exists(join(w.stateDir, kept[0], 'cookies.json')));
 });
 
 test('a failure after the takeover names the stopped units and their backups', async t => {
   const w = await applyWorld(t, { deps: { controllerHealth: async () => ({ ready: false }) } });
+  await cookieStore(w.udd, ['v11a', 'v11b', 'v11c']);
+  w.cookies.exportCookies = exportsThree;
   const error = await runClawser(w.yes, w.deps).then(() => assert.fail('setup should fail'), failure => failure);
   const { replaced } = await w.receipt();
   assert.ok(replaced[0]?.backup, 'the receipt records the backup');
-  assert.ok(error.message.endsWith(` Setup already stopped my-chrome.service, my-openbox.service, my-xvfb.service; rerun setup to finish. Their unit files are unchanged, with copies in ${replaced[0].backup}.`), error.message);
+  assert.ok(error.message.endsWith(` Setup already stopped my-chrome.service, my-openbox.service, my-xvfb.service; rerun setup to finish. Their unit files are unchanged, with copies in ${replaced[0].backup}.${SAVED}`), error.message);
   assert.match(error.message, /^Controller health or profile identity is not ready/);
+  const kept = await cookieDirs(w);
+  assert.equal(kept.length, 1, 'the export stays for the rerun');
+  assert.ok(await exists(join(w.stateDir, kept[0], 'cookies.json')));
+  assert.equal(w.calls.some(cookieCall('importCookies')), false);
   const session = await sessionWorld(t);
   session.deps.controllerHealth = async () => ({ ready: false });
   session.cookies.closeBrowser = async () => { await fs.rm(join(session.root, 'proc/400'), { recursive: true }); };
@@ -393,7 +420,9 @@ test('option B refuses a profile or Chrome it cannot read cleanly', async t => {
     [w => { w.foreign['my-chrome.service'].Environment = 'LANG=fr_FR.UTF-8 NOVALUE'; }, /^Could not read the Environment= settings of my-chrome\.service/],
     [w => { w.foreign['my-chrome.service'].Environment = '"GREETING=a\tb"'; }, /^Could not read the Environment= settings of my-chrome\.service/],
     [w => { w.foreign['my-chrome.service'].Environment = '"GREETING=a\\qb"'; }, /^Could not read the Environment= settings of my-chrome\.service/],
-    [w => { w.foreign['my-chrome.service'].DropInPaths = '"/home/me/a\\qb.conf"'; }, RESTARTS],
+    [w => { w.foreign['my-chrome.service'].DropInPaths = '"/home/me/a\\qb.conf"'; }, DROP_INS('my-chrome.service')],
+    [w => { w.foreign['my-chrome.service'].DropInPaths = '"/home/me/a.conf'; }, DROP_INS('my-chrome.service')],
+    [w => { w.foreign['my-xvfb.service'].DropInPaths = '/home/me/a\\ b.conf'; }, DROP_INS('my-xvfb.service')],
     [async w => { await fs.rm(join(w.root, 'proc/400/exe')); await fs.symlink('/snap/chromium/123/usr/lib/chromium-browser/chrome', join(w.root, 'proc/400/exe')); }, /^Snap Chromium can't use the hidden folder/],
     [async w => { await fs.writeFile(join(w.root, 'proc/400/cgroup'), `0::/user.slice/user-${w.deps.uid}.slice/user@${w.deps.uid}.service/app.slice/${w.names.browser}\n`); }, /^Setup arguments conflict/],
     [async w => { await net(w.root, ''); w.busy([9222]); }, 'port 9222 is in use'],
