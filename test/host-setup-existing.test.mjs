@@ -6,7 +6,7 @@ import { basename, dirname, join } from 'node:path';
 import { runClawser, setupHelpers } from '../src/setup.mjs';
 import { describeHost, planHost } from '../src/host-setup.mjs';
 import { portHolder } from '../src/host-browser.mjs';
-import { hostWorld, isPatch, systemctl } from './host-fixture.mjs';
+import { PACKAGE_FILES, hostWorld, isPatch, systemctl } from './host-fixture.mjs';
 import { NUL, net, proc, row } from './proc-fixture.mjs';
 
 const RESTARTS = /would restart Chrome, so setup won't stop it/;
@@ -504,6 +504,18 @@ const leftover = async (w, name, cookies = SAVED_COOKIES) => {
   return dir;
 };
 const RESUME = 'Move the cookies an earlier setup run saved into the new browser';
+const CLOSES = "This closes the agent's browser. Rerun with --yes to go ahead.";
+// A plain rerun prints the plan and stops: no import, nothing written, stopped or started.
+async function needsYes(w) {
+  w.calls.length = 0;
+  w.logs.length = 0;
+  const result = await runClawser(w.args, w.deps);
+  assert.equal(result.ok, false);
+  assert.ok(result.plan.includes(RESUME), result.plan.join('\n'));
+  assert.ok(w.logs.includes(CLOSES), w.logs.join('\n'));
+  assert.equal(w.calls.some(call => call.command === 'cookies'), false);
+  assert.deepEqual(w.mutations(), []);
+}
 const stopAgain = unit => `Stop ${unit} again (Clawser replaced it)`;
 const fsCall = (name, path) => call => call.command === 'fs' && call.args[0] === name && call.args[1] === path;
 
@@ -570,11 +582,27 @@ test('a crash before the takeover stop resumes the takeover without a second bac
   assert.equal(await exists(stale), false);
 });
 
-test('a crash between stops stops the replaced units again without --yes', async t => {
-  const w = await applyWorld(t);
+// Clawser's units move to another package folder, so the rerun rewrites them and runs daemon-reload.
+async function movePackage(w) {
+  const packageDir = join(w.root, 'package-moved');
+  for (const file of PACKAGE_FILES) {
+    await fs.mkdir(dirname(join(packageDir, file)), { recursive: true });
+    await fs.writeFile(join(packageDir, file), 'fixture');
+  }
+  w.deps.packageDir = packageDir;
+}
+
+// A takeover killed after stopping Chrome and openbox, before disabling openbox. Nothing listens on the profile port afterwards.
+async function crashedBetweenStops(t, options) {
+  const w = await applyWorld(t, options);
   crashAt(w, 'disable', 'my-openbox.service');
   await assert.rejects(runClawser(w.yes, w.deps), /^Error: setup was killed Setup already stopped my-chrome\.service, my-openbox\.service;/);
   await nobodyListens(w);
+  return w;
+}
+
+test('a crash between stops stops the replaced units again without --yes', async t => {
+  const w = await crashedBetweenStops(t);
   assert.equal(w.foreign['my-xvfb.service'].ActiveState, 'active');
   assert.deepEqual([w.foreign['my-openbox.service'].ActiveState, w.foreign['my-openbox.service'].UnitFileState], ['inactive', 'enabled']);
   assert.equal((await w.receipt()).replaced.length, 3);
@@ -586,14 +614,24 @@ test('a crash between stops stops the replaced units again without --yes', async
   const plan = await w.plan();
   assert.deepEqual(plan.stop, [{ kind: 'unit', unit: 'my-openbox.service', replaced: true }, { kind: 'unit', unit: 'my-xvfb.service', replaced: true }]);
   assert.equal(plan.disruptive, false);
+  await movePackage(w);
   w.calls.length = 0;
   const result = await runClawser(w.args, w.deps);
   assert.equal(result.ok, true, JSON.stringify(result.plan));
   assert.deepEqual(systemctl(w.calls, 'stop'), ['my-openbox.service', 'my-xvfb.service']);
   assert.deepEqual(systemctl(w.calls, 'disable'), ['my-openbox.service', 'my-xvfb.service']);
   assert.ok(w.calls.findLastIndex(verb('disable')) < w.calls.findIndex(verb('enable')), 'the old units stop before Clawser starts its own');
-  assert.ok(w.calls.findLastIndex(verb('disable')) > w.calls.findIndex(verb('daemon-reload')) || !w.calls.some(verb('daemon-reload')));
+  // Every write lands before anything stops, so a write failure never leaves the person without their display.
+  const reload = w.calls.findIndex(verb('daemon-reload')), firstStop = w.calls.findIndex(verb('stop'));
+  assert.ok(reload >= 0 && firstStop > reload, JSON.stringify({ reload, firstStop }));
   assert.deepEqual(systemctl(w.calls, 'enable'), result.units);
+  // A later failure names the units the rerun stopped and where their unit files were copied.
+  const failing = await crashedBetweenStops(t);
+  failing.deps.controllerHealth = async () => ({ ready: false });
+  const { replaced } = await failing.receipt();
+  await assert.rejects(runClawser(failing.args, failing.deps), error => error.message.startsWith('Controller health or profile identity is not ready')
+    && error.message.endsWith(` Setup already stopped my-openbox.service, my-xvfb.service; rerun setup to finish. Their unit files are unchanged, with copies in ${replaced[0].backup}.`)
+    || assert.fail(error.message));
 });
 
 test('a resumed takeover on a different display is refused', async t => {
@@ -619,6 +657,20 @@ test('a resumed takeover on a different display is refused', async t => {
   moved.calls.length = 0;
   await assert.rejects(runClawser(moved.yes, moved.deps), /Setup arguments conflict/);
   assert.deepEqual(moved.mutations(), []);
+  // The receipt is bound to the first profile folder, in both directions: a folder dropped, and a folder added.
+  const argv = folder => NUL('/opt/google/chrome/chrome', `--user-data-dir=${w.udd}`, ...folder ? [`--profile-directory=${folder}`] : [], '--remote-debugging-port=9222');
+  for (const [before, after] of [['Profile 1', undefined], [undefined, 'Profile 1']]) {
+    const folder = await applyWorld(t);
+    const cmdline = join(folder.root, 'proc/400/cmdline');
+    await fs.writeFile(cmdline, argv(before).replaceAll(w.udd, folder.udd));
+    crashAt(folder, 'stop');
+    await assert.rejects(runClawser(folder.yes, folder.deps), /setup was killed/);
+    assert.equal((await folder.receipt()).profileDirectory, before);
+    await fs.writeFile(cmdline, argv(after).replaceAll(w.udd, folder.udd));
+    folder.calls.length = 0;
+    await assert.rejects(runClawser(folder.yes, folder.deps), /Setup arguments conflict/, `${before} → ${after}`);
+    assert.deepEqual(folder.mutations(), [], `${before} → ${after}`);
+  }
 });
 
 test('cookies saved by an interrupted run are imported on the next run and then removed', async t => {
@@ -663,10 +715,12 @@ test('cookies saved by an interrupted run are imported on the next run and then 
   own.deps.controllerHealth = async () => { own.calls.push({ command: 'health' }); return healthyUser(); };
   own.calls.length = 0;
   const ownPlan = await own.plan();
-  assert.deepEqual(ownPlan.cookies, { migrate: true, resumeFrom: join(own.stateDir, kept, 'cookies.json') });
-  assert.deepEqual([ownPlan.takeover, ownPlan.stop, ownPlan.disruptive], [[], [], false]);
+  assert.equal(ownPlan.cookies?.resumeFrom, join(own.stateDir, kept, 'cookies.json'));
+  // Saving the imported cookies closes the agent's running browser, so the resume needs --yes.
+  assert.deepEqual([ownPlan.takeover, ownPlan.stop, ownPlan.disruptive], [[], [], true]);
+  await needsYes(own);
   own.calls.length = 0;
-  assert.equal((await runClawser(own.args, own.deps)).ok, true);
+  assert.equal((await runClawser([...own.args, '--yes'], own.deps)).ok, true);
   assert.equal(own.calls.some(cookieCall('exportCookies')), false);
   assert.equal(own.cookieArgs.importCookies?.[1], join(own.stateDir, kept, 'cookies.json'));
   assert.ok(own.calls.findIndex(cookieCall('importCookies')) > own.calls.findIndex(call => call.command === 'health'), 'the import waits for health');
@@ -683,8 +737,12 @@ test('cookies saved by an interrupted run are imported on the next run and then 
   await clawserListens(failed);
   Object.assign(failed.cookies, { importCookies: async () => ({ count: 3 }), countCookies: async () => 3 });
   failed.calls.length = 0;
-  assert.deepEqual((await failed.plan()).cookies, { migrate: true, resumeFrom: join(failed.stateDir, retry, 'cookies.json') });
-  const retried = await runClawser(failed.args, failed.deps);
+  const failedPlan = await failed.plan();
+  assert.equal(failedPlan.cookies?.resumeFrom, join(failed.stateDir, retry, 'cookies.json'));
+  assert.equal(failedPlan.disruptive, true);
+  await needsYes(failed);
+  failed.calls.length = 0;
+  const retried = await runClawser([...failed.args, '--yes'], failed.deps);
   assert.equal(retried.ok, true);
   assert.equal(failed.calls.some(cookieCall('exportCookies')), false);
   assert.equal(failed.cookieArgs.importCookies?.[1], join(failed.stateDir, retry, 'cookies.json'));
@@ -837,4 +895,27 @@ test('a program other than Chrome on the profile port is named', async t => {
   w.busy([9222]);
   await assert.rejects(runClawser(w.takeover, w.deps), { message: 'port 9222 is in use by /usr/bin/nc (pid 77)' });
   await w.unchanged();
+});
+
+test('a leftover cookie export that cannot be read is removed, not resumed', async t => {
+  const w = await applyWorld(t);
+  crashAt(w, 'disable', 'my-chrome.service');
+  await assert.rejects(runClawser(w.yes, w.deps), /setup was killed/);
+  await nobodyListens(w);
+  assert.equal(Object.hasOwn(await w.receipt(), 'cookieMigration'), false);
+  const truncated = await leftover(w, 'cookies-cut', null), empty = await leftover(w, 'cookies-empty', null);
+  await fs.writeFile(join(truncated, 'cookies.json'), '[{"name":', { mode: 0o600 });
+  await fs.writeFile(join(empty, 'cookies.json'), '[]', { mode: 0o600 });
+  w.calls.length = 0;
+  const plan = await w.plan();
+  assert.equal(plan.cookies, undefined);
+  assert.deepEqual(plan.staleCookies, [truncated, empty]);
+  const dry = await runClawser([...w.args, '--dry-run'], w.deps);
+  assert.equal(dry.plan.includes(RESUME), false, dry.plan.join('\n'));
+  const result = await runClawser(w.args, w.deps);
+  assert.equal(result.ok, true, JSON.stringify(result.plan));
+  for (const dir of [truncated, empty]) assert.equal(await exists(dir), false, dir);
+  assert.equal(w.calls.some(cookieCall('importCookies')), false);
+  assert.equal(w.logs.includes(RESUME), false);
+  assert.doesNotMatch(w.logs.join('\n') + JSON.stringify(result), /"name":/);
 });
