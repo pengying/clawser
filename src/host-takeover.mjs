@@ -221,27 +221,26 @@ export async function takeOver({ plan, saved, stateDir, save, after }, d, h) {
 
 const removeExport = (dir, d) => d.fs.rm(dir, { recursive: true, force: true });
 
-/** Imports an export into Clawser's browser and returns the `cookieMigration` record. A failure is a warning, not an error. Removes the export once the attempt ends. */
+/** Imports an export into Clawser's browser and returns the `cookieMigration` record. A failure is a warning, not an error. Removes the export once an import has run. */
 export async function moveCookies(plan, exported, after, d) {
   const cookies = await cookieModule(d), cdpUrl = cdpUrlFor(plan.cdpPort), at = () => new Date(d.now()).toISOString();
+  const failed = (error, kept) => {
+    plan.warnings.push(`Moving cookies failed (${error.message}); ${kept ? 'rerun setup to try again, or ' : ''}sign in again to sites that ask.`);
+    return { exported: exported.count, imported: 0, failed: true, at: at() };
+  };
+  let imported;
   try {
-    let imported;
-    try {
-      // Controller health never checks the browser, and its unit starts before Chrome answers.
-      await cookies.waitForBrowser(cdpUrl, d);
-      ({ count: imported } = await cookies.importCookies(cdpUrl, exported.path, d));
-      await cookies.flushCookies(cdpUrl, d);
-    } catch (error) {
-      plan.warnings.push(`Moving cookies failed (${error.message}); sign in again to sites that ask.`);
-      return { exported: exported.count, imported: 0, failed: true, at: at() };
-    }
-    // The cookies are in. Only the re-count failed.
-    imported = await cookies.countCookies(cdpUrl, d).catch(() => imported);
-    return { exported: exported.count, imported, at: at() };
-  } finally {
-    delete after.export;
-    await removeExport(exported.dir, d);
-  }
+    // Controller health never checks the browser, and its unit starts before Chrome answers.
+    await cookies.waitForBrowser(cdpUrl, d);
+    ({ count: imported } = await cookies.importCookies(cdpUrl, exported.path, d));
+  } catch (error) { return failed(error, true); }
+  // Clawser's browser now holds the cookies, so the plaintext export goes.
+  delete after.export;
+  await removeExport(exported.dir, d);
+  try { await cookies.flushCookies(cdpUrl, d); } catch (error) { return failed(error, false); }
+  // Only the re-count failed. The import's own count stands.
+  imported = await cookies.countCookies(cdpUrl, d).catch(() => imported);
+  return { exported: exported.count, imported, at: at() };
 }
 
 /** Tells the person what setup already stopped or closed when a later step fails. */
