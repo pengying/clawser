@@ -197,6 +197,7 @@ test('a Docker-era install converts through runClawser and prints its leftovers'
   const { v1, servicePath } = await seedDockerEra(h);
   const dry = await runClawser([...h.args, '--dry-run'], h.deps);
   for (const command of leftovers) assert.ok(dry.plan.includes('Run yourself afterwards: ' + command), command);
+  assert.deepEqual(h.mutations(), []);
   h.logs.length = 0;
   const result = await runClawser(h.args, h.deps);
   assert.equal(result.ok, true);
@@ -210,6 +211,21 @@ test('a Docker-era install converts through runClawser and prints its leftovers'
   assert.equal(saved.ownerId, v1.ownerId);
   assert.equal(h.config.plugins.entries['browser-handoff'].config.desktop.profile, 'clawser');
   assert.doesNotMatch(await fs.readFile(servicePath, 'utf8'), /docker/);
+});
+
+test('a Docker-era install that followed a CDP install converts instead of taking over', async t => {
+  const h = await harness(t);
+  await seedDockerEra(h);
+  const cdpDir = join(h.root, 'openclaw-state/clawser-cdp');
+  h.deps.env.OPENCLAW_STATE_DIR = join(h.root, 'openclaw-state');
+  await fs.mkdir(cdpDir, { recursive: true, mode: 0o700 });
+  await fs.writeFile(join(cdpDir, 'setup.json'), JSON.stringify({ identity: 'clawser-cdp-setup-v1', uid: h.deps.uid, ownerId: randomUUID(), stateDir: cdpDir, binaryDigest: h.artifacts.cloudflared.sha256 }) + '\n', { mode: 0o600 });
+  const result = await runClawser([...h.args, '--dry-run'], h.deps);
+  assert.equal(result.ok, true);
+  assert.ok(result.plan.includes('Stop the Docker-era controller ' + h.names.controller), result.plan.join('\n'));
+  for (const command of leftovers) assert.ok(result.plan.includes('Run yourself afterwards: ' + command), command);
+  assert.equal(result.patch.plugins.entries['browser-handoff'].config.desktop.profile, 'clawser');
+  assert.deepEqual(h.mutations(), []);
 });
 
 test('doctor on a Docker-era receipt says to rerun setup', async t => {
@@ -460,9 +476,11 @@ test('doctor validates an owned installation without downloads or mutations', as
   assert.equal(h.calls.some(call => call.command === 'fetch'), false);
 });
 
-test('doctor uses saved custom setup options when only a state directory is supplied', async t => {
+test('doctor checks a custom-port install from its state directory alone', async t => {
   const h = await harness(t);
   await runClawser([...h.args, '--port', '29410'], h.deps);
+  assert.equal((await h.receipt()).port, 29410);
+  assert.equal(JSON.parse(await fs.readFile(join(h.stateDir, 'controller.json'), 'utf8')).port, 29410);
   h.logs.length = 0;
   const result = await runClawser(['doctor', '--state-dir', h.stateDir], h.deps);
   assert.equal(result.ok, true, JSON.stringify(result.checks));

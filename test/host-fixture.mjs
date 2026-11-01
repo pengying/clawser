@@ -12,7 +12,7 @@ export const execute = promisify(execFile);
 export const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 export const PACKAGE_FILES = ['index.mjs', 'bin/desktop-controller.mjs', 'runtime/desktop/supervisor.py', 'runtime/desktop/openbox_config.py', 'runtime/desktop/xproof.py', 'runtime/desktop/clipboard.py'];
 const entry = path => ({ path, source: 'system', version: '1', sha256: 'b'.repeat(64) });
-const MUTATING = ['enable', 'restart', 'stop', 'disable', 'daemon-reload'];
+const READ_ONLY_SYSTEMCTL = ['show', 'show-environment'];
 
 export function merge(base, patch) {
   for (const [key, value] of Object.entries(patch)) {
@@ -28,7 +28,8 @@ export const isPatch = call => call.command === 'openclaw' && call.args[0] === '
 /** Downloads, file writes, service changes, config patches and plugin reloads: anything setup must not do before it commits. */
 export const mutations = (calls, artifacts) => calls.filter(call =>
   (call.command === 'fetch' && [artifacts.cloudflared.url, artifacts.noVnc.url].includes(call.args[0])) || call.command === 'fs' ||
-  (call.command === 'systemctl' && MUTATING.includes(call.args[1])) || isPatch(call) || (call.command === 'openclaw' && call.args[1] === 'reload'));
+  (call.command === 'systemctl' && !READ_ONLY_SYSTEMCTL.includes(call.args[1])) || String(call.args?.[0]).endsWith('/openbox_config.py') ||
+  isPatch(call) || (call.command === 'openclaw' && call.args[1] === 'reload'));
 
 /** A Linux host that runClawser can set up in host mode: real tar, fake systemd, loginctl and OpenClaw, and docker is a failure. */
 export async function hostWorld(t, { root, config = {}, stateName = 'state', packageName = 'package', deps = {}, run: fallback, calls = [] } = {}) {
@@ -52,6 +53,8 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
   await fs.writeFile(rc, '<openbox_config/>\n');
   const binaries = { Xvfb: entry('/usr/bin/Xvfb'), x11vnc: entry('/home/linuxbrew/.linuxbrew/bin/x11vnc'), python3: entry('/usr/bin/python3'), openbox: entry('/usr/bin/openbox') };
   const logs = [], units = new Map();
+  // A docker call inside a doctor check or a caught probe would otherwise vanish.
+  t.after(() => assert.deepEqual(calls.filter(call => call.command === 'docker'), [], 'setup must never run docker'));
   let busy = [];
   const track = (name, real, writes = () => true) => async (...args) => { if (writes(...args)) calls.push({ command: 'fs', args: [name, args.at(name === 'rename' ? 1 : 0)] }); return real(...args); };
   const trackedFs = { ...fs, writeFile: track('writeFile', fs.writeFile), open: track('open', fs.open, (path, flags = 'r') => /[wa]/.test(flags)),
