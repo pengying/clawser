@@ -63,10 +63,10 @@ test('a Docker-era runtime config fails closed', () => {
   assert.throws(() => new HostDesktopRuntime({ stateDir: '/tmp/state', cdpPort: 18810, vncPort: 59090 }), { message: 'Desktop runtime config is from an older Clawser; rerun openclaw clawser setup' });
 });
 
-test('the runtime only accepts a loopback HTTP CDP origin and starts nothing', async () => {
+test('the runtime only accepts a 127.0.0.1 HTTP CDP origin and starts nothing', async () => {
   const options = { stateDir: '/tmp/state', controlSocket: '/tmp/control.sock' };
-  for (const cdpUrl of [undefined, 'https://127.0.0.1:18820', 'http://10.0.0.5:18820', 'http://user:pw@127.0.0.1:18820', 'http://127.0.0.1:18820/json', 'ws://127.0.0.1:18820'])
-    assert.throws(() => new HostDesktopRuntime({ ...options, cdpUrl }), /loopback HTTP/, String(cdpUrl));
+  for (const cdpUrl of [undefined, 'https://127.0.0.1:18820', 'http://10.0.0.5:18820', 'http://user:pw@127.0.0.1:18820', 'http://127.0.0.1:18820/json', 'ws://127.0.0.1:18820', 'http://localhost:18820', 'http://[::1]:18820'])
+    assert.throws(() => new HostDesktopRuntime({ ...options, cdpUrl }), /must be http:\/\/127\.0\.0\.1/, String(cdpUrl));
   assert.throws(() => new HostDesktopRuntime({ ...options, controlSocket: 'relative.sock', cdpUrl: 'http://127.0.0.1:18820' }), /absolute/);
   const runtime = new HostDesktopRuntime({ ...options, cdpUrl: 'http://127.0.0.1:18820' });
   assert.equal(runtime.cdpUrl, 'http://127.0.0.1:18820');

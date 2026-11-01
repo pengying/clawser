@@ -39,12 +39,13 @@ export function supervisorRequest(socketPath, payload, { timeoutMs = 20_000, con
   });
 }
 
+// localhost can resolve to ::1 while Chrome listens only on 127.0.0.1.
 function loopbackOrigin(value) {
   let url;
   try { url = new URL(value); } catch { url = undefined; }
-  if (!url || url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) ||
+  if (!url || url.protocol !== 'http:' || url.hostname !== '127.0.0.1' ||
       url.username || url.password || url.search || url.hash || url.pathname !== '/')
-    throw new Error('Desktop CDP must be a loopback HTTP origin without credentials or query');
+    throw new Error('Desktop CDP must be http://127.0.0.1:<port> without credentials or query');
   return url.origin;
 }
 

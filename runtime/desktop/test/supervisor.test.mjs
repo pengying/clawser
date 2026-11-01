@@ -7,21 +7,30 @@ import { spawn, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { skip as noX, startX } from './xvfb.mjs';
+import { skip as noX, startX, serverArgs, dropStaleLock } from './xvfb.mjs';
 import { supervisorRequest } from '../index.mjs';
 
 const has = bin => { try { execFileSync('which', [bin], { stdio: 'ignore' }); return true; } catch { return false; } };
 const skip = noX || (has('x11vnc') ? false : 'needs x11vnc');
+const opts = { skip, timeout: 30_000 };
 const script = new URL('../supervisor.py', import.meta.url).pathname;
 const fixture = new URL('./input_fixture.py', import.meta.url).pathname;
 const text = 'Clipboard proof — 中文 🙂\nsecond line';
 
 async function fakeCdp() {
-  let guid = randomUUID();
+  let guid = randomUUID(), down = false, delay;
+  const timers = new Set();
   const server = http.createServer((request, response) => {
     if (request.url !== '/json/version') return response.writeHead(404).end();
-    response.setHeader('content-type', 'application/json');
-    response.end(JSON.stringify({ Browser: 'Chrome/156.0', webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/${guid}` }));
+    if (down) return response.writeHead(503).end();
+    const body = JSON.stringify({ Browser: 'Chrome/156.0', webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/devtools/browser/${guid}` });
+    const reply = () => { response.setHeader('content-type', 'application/json'); response.end(body); };
+    if (!delay) return reply();
+    const { ms, arrived } = delay;
+    delay = undefined;
+    const timer = setTimeout(() => { timers.delete(timer); reply(); }, ms);
+    timers.add(timer);
+    arrived();
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${server.address().port}`;
@@ -29,9 +38,35 @@ async function fakeCdp() {
     url,
     get guid() { return guid; },
     set guid(value) { guid = value; },
-    close: () => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); },
+    set down(value) { down = value; },
+    delayNext: ms => new Promise(arrived => { delay = { ms, arrived }; }),
+    close: () => { for (const timer of timers) clearTimeout(timer); server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); },
   };
 }
+
+async function rfbSecurityTypes(path) {
+  const socket = net.connect({ path });
+  let buffered = Buffer.alloc(0), wake;
+  socket.on('data', bytes => { buffered = Buffer.concat([buffered, bytes]); wake?.(); });
+  const read = async n => {
+    for (const deadline = Date.now() + 5000; buffered.length < n;) {
+      if (Date.now() > deadline) throw new Error('RFB read timeout');
+      await new Promise(resolve => { wake = resolve; setTimeout(resolve, 25); });
+    }
+    const out = buffered.subarray(0, n);
+    buffered = buffered.subarray(n);
+    return out;
+  };
+  try {
+    await new Promise((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject); });
+    const banner = (await read(12)).toString();
+    socket.write('RFB 003.008\n');
+    const count = (await read(1))[0];
+    return { banner, types: [...await read(count)] };
+  } finally { socket.destroy(); }
+}
+
+const displayPid = async display => Number((await fs.readFile(`/tmp/.X${display}-lock`, 'utf8')).trim());
 
 async function until(check, ms, what) {
   for (const deadline = Date.now() + ms; ;) {
@@ -45,9 +80,10 @@ async function until(check, ms, what) {
 const exists = path => fs.lstat(path).then(() => true, () => false);
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-async function desktop(t) {
-  const x = await startX();
+async function desktop(t, { cdpDown = false } = {}) {
+  const x = await startX({ numbered: true });
   const cdp = await fakeCdp();
+  cdp.down = cdpDown;
   const run = join(x.dir, 'run'), vncDir = join(x.dir, 'vnc');
   await fs.mkdir(run, { mode: 0o700 });
   await fs.mkdir(vncDir, { mode: 0o700 });
@@ -66,6 +102,7 @@ async function desktop(t) {
       child.log = '';
       child.stderr.on('data', bytes => { child.log = (child.log + bytes).slice(-4000); });
       child.exited = new Promise(resolve => child.once('exit', (code, signal) => resolve({ code, signal })));
+      child.refused = () => Promise.race([child.exited, sleep(10_000).then(() => { throw new Error('supervisor kept running'); })]);
       children.push(child);
       return child;
     },
@@ -100,10 +137,11 @@ async function desktop(t) {
     async restartDisplay() {
       process.kill(x.pid, 'SIGTERM');
       await until(async () => !await exists(`/tmp/.X11-unix/X${display}`) && !alive(x.pid), 5000, 'the display to stop');
-      const replacement = spawn('Xvfb', [`:${display}`, '-auth', join(x.dir, 'server-auth'), '-nolisten', 'tcp', '-screen', '0', '640x480x24', '+extension', 'XTEST', '+extension', 'X-Resource'], { stdio: 'ignore' });
+      const replacement = spawn('Xvfb', [`:${display}`, ...serverArgs(join(x.dir, 'server-auth'))], { stdio: 'ignore' });
       replacement.exited = new Promise(resolve => replacement.once('exit', resolve));
       displays.push(replacement);
       await until(() => exists(`/tmp/.X11-unix/X${display}`), 5000, 'the replacement display');
+      return replacement;
     },
     query: async () => JSON.parse((await x.run(fixture, 'query')).stdout),
     held: async () => (await x.json('held')).held,
@@ -120,12 +158,13 @@ async function desktop(t) {
     for (const replacement of displays) { if (replacement.exitCode === null && replacement.signalCode === null) { replacement.kill(); await replacement.exited; } }
     await cdp.close();
     await x.stop();
+    await dropStaleLock(display);
   });
   await h.serve();
   return h;
 }
 
-test('status describes the host truthfully', { skip }, async t => {
+test('status describes the host truthfully', opts, async t => {
   const h = await desktop(t);
   const status = await h.rpc('status');
   assert.equal(status.isolation, 'host-user-services');
@@ -136,13 +175,44 @@ test('status describes the host truthfully', { skip }, async t => {
   assert.equal(status.tainted, false);
   assert.equal(status.viewer, null);
   assert.equal(status.heartbeatTimeoutMs, 2000);
-  const [boot, inode] = status.displayGeneration.split(':');
+  const [boot, inode, pid, ...rest] = status.displayGeneration.split(':');
   assert.match(boot, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   assert.equal(inode, String((await fs.stat(`/tmp/.X11-unix/X${h.display}`)).ino));
+  assert.equal(pid, String(h.x.pid));
+  assert.equal(Number(pid), await displayPid(h.display));
+  assert.deepEqual(rest, []);
   assert.equal(status.browserGeneration, `${boot}:${h.cdp.guid}`);
 });
 
-test('browserReady drops when the browser stops answering, without retiring a session', { skip }, async t => {
+test('the control socket is private to the supervisor user', opts, async t => {
+  const h = await desktop(t);
+  const info = await fs.lstat(h.controlSocket);
+  assert.ok(info.isSocket());
+  assert.equal(info.uid, process.getuid());
+  assert.equal(info.mode & 0o077, 0, 'no group or other access to the control socket');
+  h.supervisor.kill('SIGTERM');
+  await h.supervisor.exited;
+  await fs.chmod(join(h.controlSocket, '..'), 0o750);
+  const child = h.launch();
+  const { code } = await child.refused();
+  assert.notEqual(code, 0);
+  assert.match(child.log, /must be a 0700 directory/);
+  assert.equal(await exists(h.controlSocket), false);
+});
+
+test('a CDP origin other than 127.0.0.1 is refused', opts, async t => {
+  const h = await desktop(t);
+  for (const cdpUrl of ['http://localhost:9', 'http://[::1]:9']) {
+    const config = join(h.x.dir, 'other.json');
+    await fs.writeFile(config, JSON.stringify({ display: h.display, xauthority: h.x.env.XAUTHORITY, controlSocket: join(h.x.dir, 'run', 'other.sock'), vncDir: h.vncDir, cdpUrl }), { mode: 0o600 });
+    const child = h.launch(config);
+    const { code } = await child.refused();
+    assert.notEqual(code, 0, cdpUrl);
+    assert.match(child.log, /cdpUrl must be http:\/\/127\.0\.0\.1/, cdpUrl);
+  }
+});
+
+test('browserReady drops when the browser stops answering, without retiring a session', opts, async t => {
   const h = await desktop(t);
   const viewer = await h.start('watch-cdp-down', 'watch');
   await h.cdp.close();
@@ -154,7 +224,7 @@ test('browserReady drops when the browser stops answering, without retiring a se
   assert.equal(status.ready, true);
 });
 
-test('a watch viewer serves RFB only on its private socket', { skip }, async t => {
+test('a watch viewer serves RFB only on its private socket', opts, async t => {
   const h = await desktop(t);
   const viewer = await h.start('watch-rfb', 'watch');
   assert.equal(viewer.host, undefined);
@@ -164,14 +234,9 @@ test('a watch viewer serves RFB only on its private socket', { skip }, async t =
   assert.ok((await fs.lstat(viewer.socketPath)).isSocket());
   assert.equal((await fs.stat(h.vncDir)).mode & 0o777, 0o700);
   assert.ok(viewer.xClients.some(client => client.pid === viewer.pid));
-  const banner = await new Promise((resolve, reject) => {
-    const socket = net.connect({ path: viewer.socketPath });
-    let received = '';
-    const timer = setTimeout(() => { socket.destroy(); reject(new Error('no RFB banner')); }, 5000);
-    socket.on('data', bytes => { received += bytes; if (received.length >= 12) { clearTimeout(timer); socket.destroy(); resolve(received); } });
-    socket.on('error', error => { clearTimeout(timer); reject(error); });
-  });
+  const { banner, types } = await rfbSecurityTypes(viewer.socketPath);
   assert.match(banner, /^RFB 003\.00[38]\n/);
+  assert.deepEqual(types, [2], 'VNC password authentication is the only security type');
   const inodes = new Set();
   for (const fd of await fs.readdir(`/proc/${viewer.pid}/fd`)) {
     const match = (await fs.readlink(`/proc/${viewer.pid}/fd/${fd}`).catch(() => '')).match(/^socket:\[(\d+)\]$/);
@@ -184,7 +249,7 @@ test('a watch viewer serves RFB only on its private socket', { skip }, async t =
   }
 });
 
-test('settling a control viewer releases a key held outside it', { skip }, async t => {
+test('settling a control viewer releases a key held outside it', opts, async t => {
   const h = await desktop(t);
   const viewer = await h.start('control-settle', 'control');
   await h.hold();
@@ -199,7 +264,7 @@ test('settling a control viewer releases a key held outside it', { skip }, async
   assert.equal(alive(viewer.pid), false);
 });
 
-test('a watch retirement leaves agent input alone until a writable settlement is asked for', { skip }, async t => {
+test('a watch retirement leaves agent input alone until a writable settlement is asked for', opts, async t => {
   const h = await desktop(t);
   const viewer = await h.start('watch-readonly', 'watch');
   await h.hold();
@@ -218,7 +283,7 @@ test('a watch retirement leaves agent input alone until a writable settlement is
   assert.deepEqual(await h.query(), { shift: false, button1: false });
 });
 
-test('promoting a watch viewer replaces its actor and socket', { skip }, async t => {
+test('promoting a watch viewer replaces its actor and socket', opts, async t => {
   const h = await desktop(t);
   const watch = await h.start('promote', 'watch');
   const promoted = await h.rpc('promoteViewer', { leaseId: watch.leaseId });
@@ -235,7 +300,7 @@ test('promoting a watch viewer replaces its actor and socket', { skip }, async t
   await h.rpc('stopViewerAndSettle', { leaseId: watch.leaseId });
 });
 
-test('heartbeats keep a viewer alive and their loss retires it', { skip }, async t => {
+test('heartbeats keep a viewer alive and their loss retires it', opts, async t => {
   const h = await desktop(t);
   const viewer = await h.start('heartbeats', 'control', { keepAlive: false });
   for (let n = 0; n < 6; n++) {
@@ -256,7 +321,7 @@ test('heartbeats keep a viewer alive and their loss retires it', { skip }, async
   assert.equal((await h.rpc('status')).tainted, false);
 });
 
-test('a browser restart while idle changes browserGeneration and leaves the desktop usable', { skip }, async t => {
+test('a browser restart while idle changes browserGeneration and leaves the desktop usable', opts, async t => {
   const h = await desktop(t);
   const before = await h.rpc('status');
   h.cdp.guid = randomUUID();
@@ -271,7 +336,7 @@ test('a browser restart while idle changes browserGeneration and leaves the desk
   assert.equal(viewer.browserGeneration, after.browserGeneration);
 });
 
-test('a browser restart during a control session retires it and taints the desktop', { skip }, async t => {
+test('a browser restart during a control session retires it and taints the desktop', opts, async t => {
   const h = await desktop(t);
   const viewer = await h.start('control-browser-restart', 'control');
   h.cdp.guid = randomUUID();
@@ -284,7 +349,7 @@ test('a browser restart during a control session retires it and taints the deskt
   await assert.rejects(h.rpc('startViewer', { leaseId: 'after-taint', role: 'watch' }), /quarantined/);
 });
 
-test('a display restart while idle changes displayGeneration and leaves the desktop usable', { skip }, async t => {
+test('a display restart while idle changes displayGeneration and leaves the desktop usable', opts, async t => {
   const h = await desktop(t);
   const before = await h.rpc('status');
   await h.restartDisplay();
@@ -296,7 +361,7 @@ test('a display restart while idle changes displayGeneration and leaves the desk
   assert.equal((await h.rpc('stopViewerAndSettle', { leaseId: viewer.leaseId })).heldInputCleared, true);
 });
 
-test('a display restart during a control session retires it and taints the desktop', { skip }, async t => {
+test('a display restart during a control session retires it and taints the desktop', opts, async t => {
   const h = await desktop(t);
   const viewer = await h.start('control-display-restart', 'control');
   await h.restartDisplay();
@@ -310,9 +375,84 @@ test('a display restart during a control session retires it and taints the deskt
   await assert.rejects(h.rpc('startViewer', { leaseId: 'after-display-taint', role: 'watch' }), /quarantined/);
 });
 
-test('a supervisor restart changes both generations and releases input its x11vnc left held', { skip }, async t => {
+test('a display restart changes the Xvfb PID in displayGeneration even if its socket inode were reused', opts, async t => {
+  const h = await desktop(t);
+  const before = await h.rpc('status');
+  const replacement = await h.restartDisplay();
+  const after = await until(async () => { const s = await h.rpc('status'); return s.ready && s.displayGeneration !== before.displayGeneration && s; }, 3000, 'the new display generation');
+  const [beforeBoot, , beforePid] = before.displayGeneration.split(':');
+  const [afterBoot, , afterPid] = after.displayGeneration.split(':');
+  assert.equal(afterBoot, beforeBoot);
+  assert.equal(beforePid, String(h.x.pid));
+  assert.equal(afterPid, String(replacement.pid));
+  assert.notEqual(afterPid, beforePid, 'the PID part alone distinguishes the new server');
+  assert.equal(after.tainted, false);
+});
+
+test('a display whose lock file is missing or unparseable is unavailable', opts, async t => {
+  const h = await desktop(t);
+  const lock = `/tmp/.X${h.display}-lock`;
+  const original = await fs.readFile(lock);
+  const restore = async () => { await fs.rm(lock, { force: true }); await fs.writeFile(lock, original, { mode: 0o444 }); };
+  try {
+    for (const replace of [() => fs.rm(lock), async () => { await fs.rm(lock); await fs.writeFile(lock, 'not a pid\n', { mode: 0o444 }); }]) {
+      await replace();
+      const down = await until(async () => { const s = await h.rpc('status'); return s.ready === false && s; }, 2000, 'the display to read as unavailable');
+      assert.equal(down.tainted, false);
+      await assert.rejects(h.rpc('startViewer', { leaseId: 'no-lock', role: 'watch' }), /unavailable/);
+      await restore();
+      await until(async () => (await h.rpc('status')).ready, 2000, 'the display to come back');
+    }
+  } finally { await restore(); }
+});
+
+test('a slow browser probe from before a display restart does not roll the generation back', opts, async t => {
+  const h = await desktop(t);
+  const arrived = h.cdp.delayNext(1800);
+  await arrived;
+  await h.restartDisplay();
+  const viewer = await h.start('after-slow-probe', 'watch');
+  assert.equal(viewer.displayGeneration.split(':')[2], String((await displayPid(h.display))));
+  await sleep(1000);
+  const status = await h.rpc('status');
+  assert.equal(status.tainted, false);
+  assert.equal(status.viewer?.leaseId, viewer.leaseId);
+  assert.equal(status.displayGeneration, viewer.displayGeneration);
+});
+
+test('learning the browser guid for the first time does not taint an active session', opts, async t => {
+  const h = await desktop(t, { cdpDown: true });
+  const before = await h.rpc('status');
+  assert.equal(before.browserReady, false);
+  assert.match(before.browserGeneration, /:none$/);
+  const viewer = await h.start('first-guid', 'control');
+  h.cdp.down = false;
+  const status = await until(async () => { const s = await h.rpc('status'); return s.browserReady && s; }, 2000, 'the browser to answer');
+  await sleep(200);
+  const after = await h.rpc('status');
+  assert.equal(after.tainted, false);
+  assert.equal(after.viewer?.leaseId, viewer.leaseId);
+  assert.equal(status.browserGeneration.split(':')[1], h.cdp.guid);
+});
+
+test('a retirement that keeps failing backs off and logs once', opts, async t => {
+  const h = await desktop(t);
+  await h.start('backoff', 'control');
+  process.kill(h.x.pid, 'SIGTERM');
+  await until(async () => (await h.rpc('status')).viewer?.retirementAttempts >= 1, 3000, 'the first failed retirement');
+  await sleep(4000);
+  const status = await h.rpc('status');
+  assert.equal(status.tainted, true);
+  // Backoff of 0.5, 1 and 2 s fits in the window. A fixed 0.5 s retry would try about nine times.
+  assert.ok(status.viewer.retirementAttempts >= 2 && status.viewer.retirementAttempts <= 4, `attempts: ${status.viewer.retirementAttempts}`);
+  assert.equal(h.supervisor.log.match(/retirement failed/g)?.length, 1);
+});
+
+test('a supervisor restart changes both generations and releases input its x11vnc left held', opts, async t => {
   const h = await desktop(t);
   const viewer = await h.start('restart', 'control', { keepAlive: false });
+  const owner = await h.rpc('clipboardWrite', { text: 'orphaned', leaseId: viewer.leaseId, epoch: viewer.epoch });
+  h.track(owner.ownerPid);
   const before = await h.rpc('status');
   await h.hold();
   assert.equal(await h.held(), true);
@@ -320,8 +460,11 @@ test('a supervisor restart changes both generations and releases input its x11vn
   await h.supervisor.exited;
   assert.equal(await exists(h.controlSocket), true, 'a killed supervisor leaves its socket behind');
   assert.equal(alive(viewer.pid), true, 'outside systemd its actor outlives it');
+  assert.equal(alive(owner.ownerPid), true, 'and so does its clipboard owner');
   await h.serve();
   assert.equal(alive(viewer.pid), false, 'the new supervisor kills the orphaned actor');
+  assert.equal(alive(owner.ownerPid), false, 'and the orphaned clipboard owner');
+  assert.equal((await h.x.json('selection-owner')).pid, 0);
   assert.equal(await exists(viewer.socketPath), false);
   assert.deepEqual(await fs.readdir(h.vncDir), []);
   const after = await h.rpc('status');
@@ -336,7 +479,7 @@ test('a supervisor restart changes both generations and releases input its x11vn
   assert.deepEqual(await h.query(), { shift: false, button1: false });
 });
 
-test('clipboard round-trips for the control lease only', { skip }, async t => {
+test('clipboard round-trips for the control lease only', opts, async t => {
   const h = await desktop(t);
   await assert.rejects(h.rpc('clipboardRead'), /control lease/);
   const watch = await h.start('clipboard-watch', 'watch');
@@ -363,7 +506,7 @@ test('clipboard round-trips for the control lease only', { skip }, async t => {
   await assert.rejects(h.rpc('clipboardRead'), /control lease/);
 });
 
-test('SIGTERM retires the active viewer and removes the control socket, leaving the display', { skip }, async t => {
+test('SIGTERM retires the active viewer and removes the control socket, leaving the display', opts, async t => {
   const h = await desktop(t);
   const viewer = await h.start('sigterm', 'control');
   const owner = await h.rpc('clipboardWrite', { text: 'kept until exit', leaseId: viewer.leaseId, epoch: viewer.epoch });
@@ -378,22 +521,22 @@ test('SIGTERM retires the active viewer and removes the control socket, leaving 
   assert.ok(Array.isArray(await h.x.json('clients')), 'the display outlives the supervisor');
 });
 
-test('a second supervisor refuses to take over a live control socket', { skip }, async t => {
+test('a second supervisor refuses to take over a live control socket', opts, async t => {
   const h = await desktop(t);
   const second = h.launch();
-  const { code } = await second.exited;
+  const { code } = await second.refused();
   assert.notEqual(code, 0);
   assert.match(second.log, /another supervisor/);
   assert.equal((await h.rpc('status')).ready, true);
 });
 
-test('the supervisor refuses a VNC directory others can read', { skip }, async t => {
+test('the supervisor refuses a VNC directory others can read', opts, async t => {
   const h = await desktop(t);
   h.supervisor.kill('SIGTERM');
   await h.supervisor.exited;
   await fs.chmod(h.vncDir, 0o755);
   const child = h.launch();
-  const { code } = await child.exited;
+  const { code } = await child.refused();
   assert.notEqual(code, 0);
   assert.match(child.log, /0700/);
   assert.equal(await exists(h.controlSocket), false);

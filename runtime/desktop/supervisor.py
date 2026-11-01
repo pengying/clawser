@@ -23,7 +23,8 @@ def load_config(path):
         value=config.get(name)
         if not isinstance(value,str) or not os.path.isabs(value) or re.search(r'[\x00-\x1f\x7f]',value): raise SystemExit('supervisor config '+name+' must be an absolute path')
     url=urllib.parse.urlsplit(str(config.get('cdpUrl','')))
-    if url.scheme!='http' or url.hostname not in ('127.0.0.1','localhost','::1') or url.username or url.password or url.query or url.fragment or url.path not in ('','/'): raise SystemExit('supervisor config cdpUrl must be a loopback HTTP origin')
+    # localhost can resolve to ::1 while Chrome listens only on 127.0.0.1.
+    if url.scheme!='http' or url.hostname!='127.0.0.1' or url.username or url.password or url.query or url.fragment or url.path not in ('','/'): raise SystemExit('supervisor config cdpUrl must be http://127.0.0.1:<port>')
     config['cdpUrl']='http://'+url.netloc
     return config
 
@@ -36,6 +37,7 @@ if len(sys.argv)!=2: raise SystemExit('usage: supervisor.py <config.json>')
 CONFIG=load_config(sys.argv[1])
 DISPLAY=CONFIG['display'];CONTROL=CONFIG['controlSocket'];VNC_DIR=CONFIG['vncDir'];CDP_URL=CONFIG['cdpUrl']
 X_SOCKET='/tmp/.X11-unix/X%d'%DISPLAY
+X_LOCK='/tmp/.X%d-lock'%DISPLAY
 for path in (CONTROL,os.path.join(VNC_DIR,'vnc-'+'0'*16+'.sock')):
     if len(os.fsencode(path))>107: raise SystemExit('socket path exceeds 107 bytes: '+path)
 private_dir(VNC_DIR)
@@ -54,10 +56,13 @@ pending_clipboard={}
 display_known=None
 browser_guid=None
 browser_ready=False
+browser_seq=0
+probe_seq=[0]
+retry_delay=[.5]
 lifecycle_lock=threading.RLock()
 x_lock=threading.Lock()
 stopping=threading.Event()
-x_inode=[None]
+x_identity=[None]
 xproof.x.XConnectionNumber.argtypes=[ctypes.c_void_p];xproof.x.XConnectionNumber.restype=ctypes.c_int
 # A user's http_proxy must never receive loopback CDP requests.
 opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -78,10 +83,11 @@ def x_alive(d):
 def proof(function,*args):
     # xproof shares one Xlib connection, which is not thread-safe. Its error flag never clears itself.
     with x_lock:
-        inode=display_inode()
+        identity=display_identity()
         # Xlib exits the process on I/O to a dead server. A stale connection is dropped, never closed.
-        if xproof._d[0] and (inode!=x_inode[0] or not x_alive(xproof._d[0])): xproof._d[0]=None
-        x_inode[0]=inode
+        replaced=identity is not None and identity!=x_identity[0]
+        if xproof._d[0] and (replaced or not x_alive(xproof._d[0])): xproof._d[0]=None
+        if identity is not None: x_identity[0]=identity
         xproof.xerror[0]=0
         return function(*args)
 
@@ -89,14 +95,21 @@ def display_lost():
     # Xvfb drops its clients before it unlinks its socket. A dead connection is the earlier signal.
     with x_lock:
         d=xproof._d[0]
-        return display_inode()!=display_known or bool(d) and not x_alive(d)
+        return display_identity()!=display_known or bool(d) and not x_alive(d)
 
 def display_generation(): return BOOT+':'+str(display_known)
 def browser_generation(): return BOOT+':'+(browser_guid or 'none')
 
-def display_inode():
-    try: return os.stat(X_SOCKET).st_ino
+def display_identity():
+    # An ext4 /tmp can give a restarted Xvfb the same socket inode. Its PID tells them apart.
+    try:
+        inode=os.stat(X_SOCKET).st_ino
+        with open(X_LOCK,'rb') as file: text=file.read(64)
     except OSError: return None
+    if not re.fullmatch(rb' *[1-9][0-9]{0,9}\n',text): return None
+    return '%d:%d'%(inode,int(text))
+
+def display_up(): return display_identity() is not None and proof(xproof.display_ok)
 
 def probe_browser():
     try:
@@ -198,10 +211,14 @@ def retire(lease_id,may_be_writable=None,reason='controller_request'):
             oldest=next(iter(settlements));del settlements[oldest];settlement_pids.pop(oldest,None)
         actor=None
         if process in children: children.remove(process)
+        retry_delay[0]=.5
         return result
-    except Exception:
+    except Exception as error:
         tainted=True
-        current['retryAt']=time.monotonic()+.5
+        if 'retryAt' not in current: print('supervisor: retirement failed; retrying with backoff: '+str(error),file=sys.stderr,flush=True)
+        current['retryAt']=time.monotonic()+retry_delay[0]
+        current['retries']=current.get('retries',0)+1
+        retry_delay[0]=min(retry_delay[0]*2,30)
         raise
 
 @serialized
@@ -256,15 +273,15 @@ def dispatch(request):
     op=request.get('op')
     if op=='status':
         with lifecycle_lock:
-            displayed=os.path.exists(X_SOCKET) and proof(xproof.display_ok)
-            return {'ready':displayed and not tainted,'browserReady':browser_ready,'displayGeneration':display_generation(),'browserGeneration':browser_generation(),'epoch':epoch,'tainted':tainted,'heartbeatTimeoutMs':HEARTBEAT_TIMEOUT_MS,'viewer':None if not actor else {'leaseId':actor['leaseId'],'role':actor['role'],'pid':actor['process'].pid,'epoch':actor.get('epoch'),'expiresAt':actor['expiresAt'],'heartbeatDeadline':actor.get('heartbeatDeadline')},'isolation':'host-user-services','browserSandbox':'chrome-os-sandbox','egressFirewall':False}
+            displayed=display_up()
+            return {'ready':displayed and not tainted,'browserReady':browser_ready,'displayGeneration':display_generation(),'browserGeneration':browser_generation(),'epoch':epoch,'tainted':tainted,'heartbeatTimeoutMs':HEARTBEAT_TIMEOUT_MS,'viewer':None if not actor else {'leaseId':actor['leaseId'],'role':actor['role'],'pid':actor['process'].pid,'epoch':actor.get('epoch'),'expiresAt':actor['expiresAt'],'heartbeatDeadline':actor.get('heartbeatDeadline'),'retirementAttempts':actor.get('retries',0)},'isolation':'host-user-services','browserSandbox':'chrome-os-sandbox','egressFirewall':False}
     if op=='stopViewerAndSettle': return retire(request.get('leaseId'),request.get('mayBeWritable'))
-    with lifecycle_lock: healthy=os.path.exists(X_SOCKET) and not tainted
+    with lifecycle_lock: healthy=display_identity() is not None and not tainted
     if not healthy: raise RuntimeError('desktop unavailable or quarantined; do not resume browser automation')
     if op=='heartbeatViewer': return heartbeat(request.get('leaseId'),request.get('epoch'))
     if op=='startViewer':
         # An idle restart the monitor hasn't seen yet would otherwise count as a change under this actor.
-        observe(display_inode(),*probe_browser())
+        observe_browser()
         return start(request.get('leaseId'),request.get('role','watch'),request.get('expiresAt'))
     if op=='promoteViewer':
         with lifecycle_lock:
@@ -361,16 +378,31 @@ def watchdog():
                 except Exception: tainted=True
 
 @serialized
-def observe(inode,ready,guid):
-    global tainted,display_known,browser_guid,browser_ready
-    changed=inode!=display_known or (guid is not None and guid!=browser_guid)
-    if changed and actor is not None and not actor.get('fenced'): tainted=True
-    if inode is not None: display_known=inode
-    if guid is not None: browser_guid=guid
+def observe(seq=None,ready=None,guid=None):
+    global tainted,display_known,browser_guid,browser_ready,browser_seq
+    active=actor is not None and not actor.get('fenced')
+    identity=display_identity()
+    if identity is not None and identity!=display_known:
+        if active: tainted=True
+        display_known=identity
+    # A probe can take 2 s. One that started before the newest applied probe is stale.
+    if seq is None or seq<browser_seq: return
+    browser_seq=seq
+    if guid is not None and guid!=browser_guid:
+        if active and browser_guid is not None: tainted=True
+        browser_guid=guid
     browser_ready=ready
 
+def observe_browser():
+    with lifecycle_lock:
+        probe_seq[0]+=1
+        seq=probe_seq[0]
+    observe(seq,*probe_browser())
+
 def monitor():
-    while not stopping.wait(.5): observe(display_inode(),*probe_browser())
+    while not stopping.wait(.5):
+        observe()
+        observe_browser()
 
 def take_control_path():
     try: info=os.lstat(CONTROL)
@@ -400,39 +432,44 @@ def shutdown():
         except FileNotFoundError: pass
     raise SystemExit(0)
 
-def stray_actors():
+def strays():
     found=[]
+    display=b'DISPLAY=:%d'%DISPLAY
     for name in os.listdir('/proc'):
         if not name.isdigit(): continue
         try:
             if os.stat('/proc/'+name).st_uid!=os.getuid(): continue
             with open('/proc/'+name+'/cmdline','rb') as file: argv=file.read().split(b'\0')
-        except OSError: continue
-        if os.path.basename(argv[0])==b'x11vnc' and b'-unixsock' in argv[:-1] and os.path.dirname(argv[argv.index(b'-unixsock')+1])==os.fsencode(VNC_DIR): found.append(int(name))
+            if os.path.basename(argv[0])==b'x11vnc':
+                if b'-unixsock' in argv[:-1] and os.path.dirname(argv[argv.index(b'-unixsock')+1])==os.fsencode(VNC_DIR): found.append(int(name))
+            elif argv[1:3]==[os.fsencode(CLIPBOARD),b'own']:
+                with open('/proc/'+name+'/environ','rb') as file: env=file.read().split(b'\0')
+                if display in env: found.append(int(name))
+        except (OSError,IndexError): continue
     return found
 
 signal.signal(signal.SIGTERM,lambda *unused: stopping.set())
 signal.signal(signal.SIGINT,lambda *unused: stopping.set())
 take_control_path()
 deadline=time.monotonic()+30
-while not (os.path.exists(X_SOCKET) and proof(xproof.display_ok)):
+while not display_up():
     if stopping.is_set(): raise SystemExit(0)
     if time.monotonic()>deadline: raise SystemExit('display :%d is unavailable'%DISPLAY)
     time.sleep(.1)
-display_known=display_inode()
-# Outside systemd's control-group kill, a killed supervisor's actors outlive it.
-strays=stray_actors()
-for pid in strays:
+display_known=display_identity()
+# Outside systemd's control-group kill, a killed supervisor's children outlive it.
+orphans=strays()
+for pid in orphans:
     try: os.kill(pid,signal.SIGKILL)
     except ProcessLookupError: pass
 # The host display outlives this process. Input a previous supervisor's x11vnc held stays held.
-try: proof(xproof.settle,strays)
+try: proof(xproof.settle,orphans)
 except Exception as error:
     tainted=True
     print('supervisor: held input could not be released; quarantined: '+str(error),file=sys.stderr)
 for name in os.listdir(VNC_DIR):
     if re.fullmatch(r'vnc-[0-9a-f]{16}(\.sock)?',name): remove(os.path.join(VNC_DIR,name))
-browser_ready,browser_guid=probe_browser()
+observe_browser()
 server=socket.socket(socket.AF_UNIX)
 server.bind(CONTROL);server.listen(8);server.settimeout(.25)
 control_inode=os.lstat(CONTROL).st_ino
