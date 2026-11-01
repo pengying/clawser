@@ -106,7 +106,7 @@ async function socketInodes(pid, d) {
   return found;
 }
 
-export async function listenerProcess(port, d) {
+async function scanListeners(port, d, accept) {
   const rows = await listenRows(port, d);
   if (!rows.length) return;
   for (const pid of await pids(d)) {
@@ -116,11 +116,15 @@ export async function listenerProcess(port, d) {
     if (!row) continue;
     let info;
     try { info = await processInfo(pid, d); } catch { continue; }
-    if (!/^(chrome|chromium)$/.test(basename(info.exe))) continue;
-    if (info.argv.some(arg => arg.startsWith('--type='))) continue;
-    return { pid, address: row.address };
+    const found = accept(info, row);
+    if (found) return found;
   }
 }
+
+export const listenerProcess = (port, d) => scanListeners(port, d, (info, row) =>
+  /^(chrome|chromium)$/.test(basename(info.exe)) && !info.argv.some(arg => arg.startsWith('--type=')) && { pid: info.pid, address: row.address });
+
+export const portHolder = (port, d) => scanListeners(port, d, info => ({ pid: info.pid, exe: info.exe, cgroup: info.cgroup }));
 
 const split = text => { const parts = text.split('\0'); if (parts.at(-1) === '') parts.pop(); return parts; };
 

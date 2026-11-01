@@ -19,7 +19,7 @@ def load_config(path):
     if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode&0o077: raise SystemExit('supervisor config must be an owner-only regular file')
     with open(path) as file: config=json.load(file)
     if type(config.get('display')) is not int or not 0<=config['display']<=65535: raise SystemExit('supervisor config display must be a display number')
-    for name in ('xauthority','controlSocket','vncDir'):
+    for name in ('xauthority','controlSocket','vncDir')+(('x11vnc',) if 'x11vnc' in config else ()):
         value=config.get(name)
         if not isinstance(value,str) or not os.path.isabs(value) or re.search(r'[\x00-\x1f\x7f]',value): raise SystemExit('supervisor config '+name+' must be an absolute path')
     url=urllib.parse.urlsplit(str(config.get('cdpUrl','')))
@@ -238,7 +238,7 @@ def start(lease_id,role,expires_at=None):
     socket_path=os.path.join(VNC_DIR,'vnc-'+secrets.token_hex(8)+'.sock')
     with open(password_file,'x') as file: file.write(password+'\n')
     # A person's ~/.x11vncrc must not add options to an actor.
-    args=['x11vnc','-display','unix/:%d'%DISPLAY,'-unixsock',socket_path,'-rfbport','0','-no6','-rfbportv6','-1','-passwdfile',password_file,
+    args=[CONFIG.get('x11vnc','x11vnc'),'-display','unix/:%d'%DISPLAY,'-unixsock',socket_path,'-rfbport','0','-no6','-rfbportv6','-1','-passwdfile',password_file,
           '-forever','-shared','-noxdamage','-noxrecord','-nosel','-noprimary','-noclipboard','-nosetclipboard',
           '-nosetprimary','-noremote','-nocmds','-o','/dev/null','-norc']
     if role=='watch': args.append('-viewonly')

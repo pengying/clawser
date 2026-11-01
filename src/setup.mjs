@@ -413,6 +413,7 @@ async function reloadPlugin(d) {
 }
 
 const hostHelpers = { stat, noSymlinks };
+export const setupHelpers = { stat, noSymlinks, privatePath, readJson, atomicPrivate, download, treeDigest, assets, configSection, reloadPlugin };
 
 async function hostPlan(saved, d) {
   try { return await d.hostResolver.plan(saved?.hostDeps, d, hostHelpers); }
