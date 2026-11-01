@@ -212,6 +212,16 @@ test('a CDP origin other than 127.0.0.1 is refused', opts, async t => {
   }
 });
 
+test('a relative x11vnc path is refused at config load', opts, async t => {
+  const h = await desktop(t);
+  const config = join(h.x.dir, 'relative-x11vnc.json');
+  await fs.writeFile(config, JSON.stringify({ display: h.display, xauthority: h.x.env.XAUTHORITY, controlSocket: join(h.x.dir, 'run', 'other.sock'), vncDir: h.vncDir, cdpUrl: h.cdp.url, x11vnc: 'x11vnc' }), { mode: 0o600 });
+  const child = h.launch(config);
+  const { code } = await child.refused();
+  assert.notEqual(code, 0);
+  assert.match(child.log, /x11vnc must be an absolute path/);
+});
+
 test('browserReady drops when the browser stops answering, without retiring a session', opts, async t => {
   const h = await desktop(t);
   const viewer = await h.start('watch-cdp-down', 'watch');

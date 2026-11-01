@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-  classifyOwner, cookieEncryption, displayServices, findBrowserBinary, isSnapBrowser, listenerProcess, processInfo, unitMainPid,
+  classifyOwner, cookieEncryption, displayServices, findBrowserBinary, isSnapBrowser, listenerProcess, portHolder, processInfo, unitMainPid,
 } from '../src/host-browser.mjs';
 
 const UID = 1000;
@@ -52,6 +52,16 @@ test('the Chrome listening on the port is found through its socket inode, not it
   await proc(root, 70, { exe: '/usr/bin/python3', argv: ['python3'], sockets: [456] });
   assert.deepEqual(await listenerProcess(9333, deps(root)), { pid: 60, address: '127.0.0.1' });
   assert.equal(await listenerProcess(9444, deps(root)), undefined);
+});
+
+test('portHolder names any process listening on the port', async t => {
+  const root = await tempRoot(t);
+  await net(root, row('0100007F', 19420, 321));
+  await proc(root, 60, { sockets: [999] });
+  await proc(root, 77, { exe: '/usr/bin/nc', argv: ['nc', '-l', '19420'], cgroup: '0::/user.slice/user-1000.slice/session-2.scope', sockets: [321] });
+  assert.equal(await listenerProcess(19420, deps(root)), undefined);
+  assert.deepEqual(await portHolder(19420, deps(root)), { pid: 77, exe: '/usr/bin/nc', cgroup: '/user.slice/user-1000.slice/session-2.scope' });
+  assert.equal(await portHolder(19421, deps(root)), undefined);
 });
 
 test('tcp6 loopback and IPv4-mapped loopback both report friendly addresses', async t => {
