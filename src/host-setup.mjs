@@ -45,7 +45,7 @@ export async function readHostReceipt(o, p, d, h) {
   return { kind: saved.identity === identity ? 'v2' : 'v1', saved };
 }
 
-/** `cdpPort` defaults to the receipt's; planning a fresh install passes the chosen one. */
+/** `cdpPort` defaults to the receipt's; planning a fresh install passes the chosen one. `convertingFrom` is `{ profile, containerName, imageId? }`. */
 export async function hostConfigPatch(o, p, saved, d, h, { requireConfigured = false, convertingFrom, cdpPort = saved?.cdpPort } = {}) {
   const browser = await h.configSection('browser', d), plugins = await h.configSection('plugins', d), tools = await h.configSection('tools', d);
   const profile = browser.profiles?.clawser, entry = plugins.entries?.['browser-handoff'], desktop = entry?.config?.desktop;
@@ -54,7 +54,7 @@ export async function hostConfigPatch(o, p, saved, d, h, { requireConfigured = f
   const inertDesktop = (!saved || saved.pendingInertDesktop === true) && fieldsMatch(desktop, { enabled: false });
   if (!saved && inertDesktop) o.pendingInertDesktop = true;
   const anyEnabled = wanted => typeof desktop?.enabled === 'boolean' && fieldsMatch({ ...desktop, enabled: true }, wanted);
-  const ownedDesktop = anyEnabled(ours) || (convertingFrom && anyEnabled({ ...ours, profile: convertingFrom.options?.profile }));
+  const ownedDesktop = anyEnabled(ours) || (convertingFrom && anyEnabled({ ...ours, profile: convertingFrom.profile }));
   if (desktop !== undefined && !inertDesktop && !ownedDesktop) throw new Error('Existing browser-handoff desktop config is unowned or conflicts with Clawser');
   for (const [name, value] of [['browser.profiles', browser.profiles], ['plugins.entries', plugins.entries], ['plugin config', entry?.config]]) {
     if (value !== undefined && !object(value)) throw new Error('Conflicting ' + name + ' configuration');
@@ -119,10 +119,9 @@ async function firstFreeCdpPort(d) {
 
 const unitDirMoved = (old, p) => new Error('The systemd user unit folder changed since setup (' + old + ' → ' + p.unitDir + ')');
 
-const dockerLeftovers = saved => {
-  const name = saved.options?.containerName;
-  return [...name ? ['docker rm -f ' + name, 'docker network rm ' + name + '-net', 'docker volume rm ' + name + '-profile'] : [], ...saved.imageId ? ['docker image rm ' + saved.imageId] : []];
-};
+const convertedFrom = v1 => ({ profile: v1.options?.profile, containerName: v1.options?.containerName, ...v1.imageId ? { imageId: v1.imageId } : {} });
+const dockerLeftovers = ({ containerName: name, imageId }) =>
+  [...name ? ['docker rm -f ' + name, 'docker network rm ' + name + '-net', 'docker volume rm ' + name + '-profile'] : [], ...imageId ? ['docker image rm ' + imageId] : []];
 
 async function linger(d, warnings) {
   const on = await d.run('loginctl', ['show-user', String(d.uid), '-p', 'Linger', '--value']).then(out => String(out).trim() === 'yes', () => false);
@@ -141,7 +140,9 @@ export async function planHost(o, d, h) {
   if (v2 && o.specified.includes('--port') && o.port !== v2.port) throw new Error(conflict);
   if (v2 && v2.unitDir !== p.unitDir) throw unitDirMoved(v2.unitDir, p);
   if (v1?.options?.servicePath && v1.options.servicePath !== unitPath(p, p.names.controller)) throw unitDirMoved(dirname(v1.options.servicePath), p);
-  if (v1 && !await h.stat(p.config, d)) throw new Error(changedOutside(p.config));
+  if (v1?.serviceUnit && v1.serviceUnit !== p.names.controller) throw new Error(changedOutside(p.marker));
+  // A v1 install that died during its image build never wrote controller.json, so only a recorded digest makes absence a tamper.
+  if (v1?.configDigest && !await h.stat(p.config, d)) throw new Error(changedOutside(p.config));
   for (const path of [p.socket, p.control, join(p.vncDir, 'vnc-0000000000000000.sock')]) {
     if (Buffer.byteLength(path) > 107) throw new Error('Socket path ' + path + ' is longer than 107 bytes; choose a shorter --state-dir');
   }
@@ -166,32 +167,43 @@ export async function planHost(o, d, h) {
   const controller = { stateDir: p.state, profile: 'clawser', port, socketPath: p.socket, noVncAssetsDir: p.assets,
     runtime: { stateDir: p.runtime, controlSocket: p.control, cdpUrl }, transport: { binaryPath: p.binary, startupTimeoutMs: 90_000 } };
   const supervisor = { display, xauthority: p.xauthority, controlSocket: p.control, vncDir: p.vncDir, cdpUrl, x11vnc: bins.x11vnc.path };
+  const names = ROLES.map(role => p.names[role]).filter(name => units[name]);
   const files = [
-    ...wm ? [{ path: p.openboxConfig, key: 'openboxDigest', recorded: v2?.openboxDigest }] : [],
-    { path: p.supervisorConfig, text: json(supervisor), key: 'supervisorConfigDigest', recorded: v2?.supervisorConfigDigest },
-    { path: p.config, text: json(controller), key: 'configDigest', recorded: (v2 ?? v1)?.configDigest },
-    ...ROLES.map(role => p.names[role]).filter(name => units[name]).map(name => ({ path: unitPath(p, name), text: units[name], unit: name,
+    { path: p.xauthority, kind: 'xauthority', consumer: p.names.display },
+    ...wm ? [{ path: p.openboxConfig, key: 'openboxDigest', recorded: v2?.openboxDigest, consumer: p.names.windowManager }] : [],
+    { path: p.supervisorConfig, text: json(supervisor), key: 'supervisorConfigDigest', recorded: v2?.supervisorConfigDigest, consumer: p.names.supervisor },
+    { path: p.config, text: json(controller), key: 'configDigest', recorded: (v2 ?? v1)?.configDigest, consumer: p.names.controller },
+    ...names.map(name => ({ path: unitPath(p, name), text: units[name], unit: name, consumer: name,
       recorded: v2?.units?.[name] ?? (v1 && name === p.names.controller ? v1.serviceDigest : undefined) })),
   ];
   // The v1 controller config and unit count as owned under their v1 digests, so classify verifies them too.
-  for (const file of files) file.state = await classify(file.path, file.text, file.recorded, d, h);
-  const stop = v1?.serviceUnit ? [{ kind: 'unit', unit: v1.serviceUnit }] : [];
+  for (const file of files) {
+    if (file.kind !== 'xauthority') file.state = await classify(file.path, file.text, file.recorded, d, h);
+    else if (await h.stat(file.path, d)) { await h.privatePath(file.path, 'file', d); file.state = 'current'; }
+    else file.state = 'write';
+  }
+  const status = {};
+  for (const name of names) status[name] = await unitStatus(name, p, d);
+  // A v1 receipt names its unit before the image build, so a failed build leaves a unit that was never installed.
+  const stop = v1 && status[p.names.controller].LoadState !== 'not-found' ? [{ kind: 'unit', unit: p.names.controller }] : [];
   const start = [], restart = [];
-  for (const file of files.filter(file => file.unit)) {
-    const status = await unitStatus(file.unit, p, d);
-    const active = status.ActiveState === 'active' && !stop.some(item => item.unit === file.unit);
-    if (file.state === 'write' || !active) start.push(file.unit);
-    else if (file.state === 'rewrite') restart.push(file.unit);
+  for (const name of names) {
+    const unit = files.find(file => file.unit === name);
+    const touched = files.some(file => file.consumer === name && file.state !== 'current');
+    const active = status[name].ActiveState === 'active' && !(stop.length && name === p.names.controller);
+    if (unit.state === 'write' || !active) start.push(name);
+    else if (touched) restart.push(name);
   }
   await linger(d, warnings);
-  const patch = await hostConfigPatch(o, p, v2, d, h, { convertingFrom: v1, cdpPort });
+  const converted = v1 ? convertedFrom(v1) : v2?.convertedFrom;
+  const patch = await hostConfigPatch(o, p, v2, d, h, { convertingFrom: converted, cdpPort });
   const previousDefaultProfile = v2 ? v2.previousDefaultProfile ?? null : (await h.configSection('browser', d)).defaultProfile ?? null;
   return {
     option: 'new', profile: 'clawser', display, cdpPort, port, userDataDir: p.profileDir, browser, units,
-    writes: files.filter(file => file.state !== 'current').map(file => ({ path: file.path, digest: file.text === undefined ? null : sha256(file.text), ...file.unit ? { unit: file.unit } : {} })),
+    writes: files.filter(file => file.state !== 'current').map(file => ({ path: file.path, digest: file.text === undefined ? null : sha256(file.text), ...file.unit ? { unit: file.unit } : {}, consumer: file.consumer })),
     start, restart, stop, takeover: [], disruptive: restart.some(name => [p.names.display, p.names.windowManager, p.names.browser].includes(name)),
-    warnings, ...v1 ? { dockerLeftovers: dockerLeftovers(v1) } : {},
-    patch, previousDefaultProfile, hostDeps: host, openboxSource: source, files, receipt: receipt.kind, saved: receipt.saved, locations: p,
+    warnings, ...converted ? { dockerLeftovers: dockerLeftovers(converted) } : {},
+    patch, previousDefaultProfile, hostDeps: host, openboxSource: source, files, convertedFrom: converted, receipt: receipt.kind, saved: receipt.saved, locations: p,
   };
 }
 
@@ -212,7 +224,7 @@ function assertHealth(health, cdpPort) {
   if (health?.ready !== true || health.recoveryRequired === true || health.profile !== 'clawser' || health.cdpUrl !== cdpUrlFor(cdpPort)) throw new Error('Controller health or profile identity is not ready; inspect its user-service journal before retrying');
 }
 
-const record = (saved, file, digest) => { if (file.unit) saved.units[file.unit] = digest; else saved[file.key] = digest; };
+const record = (saved, file, digest) => { if (file.unit) saved.units[file.unit] = digest; else if (file.key) saved[file.key] = digest; };
 const save = (saved, p, d, h) => h.atomicPrivate(p.marker, json(saved), d);
 
 function receiptFor(plan, o, d, extra) {
@@ -251,7 +263,7 @@ export async function applyHost(plan, o, d, h) {
     }
     // The v1 digests carry over so a crash before the rewrite still finds these files owned.
     if (v1) {
-      saved = receiptFor(plan, o, d, { ownerId: v1.ownerId, assetsDigest: v1.assetsDigest, configDigest: v1.configDigest, units: v1.serviceDigest ? { [p.names.controller]: v1.serviceDigest } : {} });
+      saved = receiptFor(plan, o, d, { ownerId: v1.ownerId, assetsDigest: v1.assetsDigest, configDigest: v1.configDigest, units: v1.serviceDigest ? { [p.names.controller]: v1.serviceDigest } : {}, convertedFrom: plan.convertedFrom });
       await save(saved, p, d, h);
     } else if (plan.receipt === 'v2') {
       Object.assign(saved, { packageDir: d.packageDir, execPath: d.execPath, browser: { path: plan.browser.path } });
@@ -260,15 +272,19 @@ export async function applyHost(plan, o, d, h) {
     for (const path of [p.state, p.runtime, p.vncDir, dirname(p.binary), dirname(p.assets), dirname(p.openboxConfig), dirname(p.profileDir), p.profileDir]) await privateDir(path, d, h);
     const { record: hostDeps, warnings } = await resolver(d).install(plan.hostDeps, d, { previous: saved.hostDeps });
     plan.warnings.push(...warnings ?? []);
+    // Re-planning without a window manager here would apply a plan nobody was shown.
+    if (plan.units[p.names.windowManager] && !hostDeps.binaries?.openbox) throw new Error('openbox is installed but fails to start; repair or remove it, then rerun setup');
     if (!same(hostDeps, saved.hostDeps)) { saved.hostDeps = hostDeps; await save(saved, p, d, h); }
     await h.assets(p, saved, d);
-    await h.noSymlinks(p.xauthority, d);
-    if (await h.stat(p.xauthority, d)) await h.privatePath(p.xauthority, 'file', d);
-    else await d.fs.writeFile(p.xauthority, xauthorityEntry(plan.display, (d.randomBytes ?? randomBytes)(16)), { flag: 'wx', mode: 0o600 });
     let unitsWritten = false;
     for (const file of plan.files) {
       if (file.state === 'current') {
         if (file.text !== undefined && file.recorded !== sha256(file.text)) { record(saved, file, sha256(file.text)); await save(saved, p, d, h); }
+        continue;
+      }
+      if (file.kind === 'xauthority') {
+        await h.noSymlinks(file.path, d);
+        await d.fs.writeFile(file.path, xauthorityEntry(plan.display, (d.randomBytes ?? randomBytes)(16)), { flag: 'wx', mode: 0o600 });
         continue;
       }
       if (file.text === undefined) await d.run(plan.hostDeps.binaries.python3.path, [p.openboxScript, plan.openboxSource, file.path]);
@@ -292,11 +308,11 @@ export async function applyHost(plan, o, d, h) {
     }
     if (healthError) throw healthError;
     // Re-read immediately before the validated merge so concurrent config edits are preserved.
-    const patch = await hostConfigPatch(o, p, saved, d, h, { convertingFrom: v1, cdpPort: plan.cdpPort });
+    const patch = await hostConfigPatch(o, p, saved, d, h, { convertingFrom: plan.convertedFrom, cdpPort: plan.cdpPort });
     const intended = { browser: await h.configSection('browser', d), plugins: await h.configSection('plugins', d) };
     const expected = await captureSetupActivation(intended, patch, d);
     await d.run('openclaw', ['config', 'patch', '--stdin'], { input: JSON.stringify(patch) + '\n' });
-    if (saved.pendingInertDesktop) { delete saved.pendingInertDesktop; await save(saved, p, d, h); }
+    if (saved.pendingInertDesktop || saved.convertedFrom) { delete saved.pendingInertDesktop; delete saved.convertedFrom; await save(saved, p, d, h); }
     await h.reloadPlugin(d);
     return await waitForSetupActivation(expected, d, async () => assertHealth(await d.controllerHealth(p.socket), plan.cdpPort));
   } finally { await d.fs.rm(lock, { recursive: true }); }
