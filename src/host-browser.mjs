@@ -1,4 +1,5 @@
 import { basename, isAbsolute, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 export const SNAP_MESSAGE = "Snap Chromium can't use the hidden folder where Clawser keeps its files. Install Google Chrome, or a Chromium that isn't a snap, then rerun setup.";
 const NOT_FOUND = 'No Google Chrome or Chromium found. Install Google Chrome, then rerun setup.';
@@ -173,8 +174,11 @@ async function defaultOpen(url, options) {
 export async function cookieEncryption(cookiesPath, d) {
   const result = { total: 0, v10: 0, v11: 0, other: 0 };
   try { await d.fs.stat(cookiesPath); } catch { return result; }
-  const db = await (d.openDatabase ?? defaultOpen)('file:' + cookiesPath + '?immutable=1', { readOnly: true });
+  const url = pathToFileURL(cookiesPath);
+  url.searchParams.set('immutable', '1');
+  let db;
   try {
+    db = await (d.openDatabase ?? defaultOpen)(url.href, { readOnly: true });
     for (const row of db.prepare('SELECT substr(encrypted_value,1,3) AS v, count(*) AS n FROM cookies GROUP BY v').all()) {
       const prefix = row.v == null ? '' : Buffer.from(row.v).toString('latin1');
       const n = Number(row.n);
@@ -183,6 +187,8 @@ export async function cookieEncryption(cookiesPath, d) {
       else if (prefix === 'v11') result.v11 += n;
       else result.other += n;
     }
-  } finally { db.close(); }
+  } catch (error) {
+    throw new Error('Could not read the cookie store at ' + cookiesPath + ': ' + String(error?.message ?? error));
+  } finally { db?.close(); }
   return result;
 }

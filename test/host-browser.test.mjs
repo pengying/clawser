@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import * as realFs from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   classifyOwner, cookieEncryption, displayServices, findBrowserBinary, isSnapBrowser, listenerProcess, processInfo, unitMainPid,
 } from '../src/host-browser.mjs';
@@ -151,7 +152,7 @@ test('cookie encryption counts version prefixes without reading values', async t
   assert.deepEqual(await cookieEncryption(path, deps(root, { openDatabase })), { total: 6, v10: 2, v11: 3, other: 1 });
   assert.match(sql.join('\n'), /substr\(encrypted_value,1,3\)/);
   assert.doesNotMatch(sql.join('\n'), /SELECT\s+(?:\*|encrypted_value\b)/i);
-  assert.deepEqual(urls[0], ['file:' + path + '?immutable=1', { readOnly: true }]);
+  assert.deepEqual(urls[0], [pathToFileURL(path).href + '?immutable=1', { readOnly: true }]);
   assert.deepEqual(await cookieEncryption(join(root, 'missing'), deps(root)), { total: 0, v10: 0, v11: 0, other: 0 });
 });
 
@@ -185,4 +186,34 @@ test('the /opt/google/chrome install is found after PATH misses', async t => {
   await realFs.mkdir(join(root, 'opt'));
   await realFs.writeFile(join(root, 'opt/chrome'), '\x7fELF', { mode: 0o755 });
   assert.deepEqual(await findBrowserBinary(deps(root, { env: { PATH: '' }, optChrome: join(root, 'opt/chrome') })), { path: join(root, 'opt/chrome'), brand: 'chrome' });
+});
+
+async function cookieDb(path, rows) {
+  const { DatabaseSync } = await import('node:sqlite');
+  await realFs.mkdir(join(path, '..'), { recursive: true });
+  const db = new DatabaseSync(path);
+  db.exec('CREATE TABLE cookies (name TEXT, encrypted_value BLOB)');
+  const insert = db.prepare('INSERT INTO cookies VALUES (?, ?)');
+  rows.forEach((value, i) => insert.run('c' + i, Buffer.from(value)));
+  db.close();
+}
+
+test('a cookie path with a space and a hash is counted through a real sqlite open', async t => {
+  const root = await tempRoot(t);
+  const path = join(root, 'pro file#1', 'Cookies');
+  await cookieDb(path, ['v10a', 'v10b', 'v11a', 'v11b', 'v11c']);
+  assert.deepEqual(await cookieEncryption(path, deps(root)), { total: 5, v10: 2, v11: 3, other: 0 });
+});
+
+test('an unreadable cookie store throws instead of looking empty', async t => {
+  const root = await tempRoot(t);
+  const garbage = join(root, 'Garbage');
+  await realFs.writeFile(garbage, Buffer.from('this is not a sqlite database at all, just bytes'.repeat(20)));
+  await assert.rejects(cookieEncryption(garbage, deps(root)), /Could not read the cookie store at .*Garbage: /);
+  const { DatabaseSync } = await import('node:sqlite');
+  const bare = join(root, 'NoTable');
+  const db = new DatabaseSync(bare);
+  db.exec('CREATE TABLE other (a)');
+  db.close();
+  await assert.rejects(cookieEncryption(bare, deps(root)), /Could not read the cookie store/);
 });
