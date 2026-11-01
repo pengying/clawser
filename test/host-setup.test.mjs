@@ -316,7 +316,7 @@ test('a Docker-era install converts to option A and prints its leftovers without
   assert.doesNotMatch(await fs.readFile(servicePath, 'utf8'), /docker/);
 });
 
-test('a v2 option B receipt and option B apply stop at the stub before touching anything', async t => {
+test('a v2 option B receipt stops at the stub before touching anything', async t => {
   const stub = { message: 'Taking over an existing browser is not implemented yet' };
   const x = await harness(t);
   await x.install();
@@ -324,7 +324,6 @@ test('a v2 option B receipt and option B apply stop at the stub before touching 
   Object.assign(x.o, { option: 'existing', profile: 'user' });
   x.calls.length = 0;
   await assert.rejects(x.plan(), stub);
-  await assert.rejects(applyHost({ option: 'existing' }, x.o, x.d, h), stub);
   assert.deepEqual(fsWrites(x.calls), []);
   assert.deepEqual(x.calls.filter(call => call.command === 'systemctl' && call.args[1] !== 'show'), []);
 });

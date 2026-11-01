@@ -58,7 +58,7 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
   let busy = [];
   const track = (name, real, writes = () => true) => async (...args) => { if (writes(...args)) calls.push({ command: 'fs', args: [name, args.at(name === 'rename' ? 1 : 0)] }); return real(...args); };
   const trackedFs = { ...fs, writeFile: track('writeFile', fs.writeFile), open: track('open', fs.open, (path, flags = 'r') => /[wa]/.test(flags)),
-    rename: track('rename', fs.rename), mkdir: track('mkdir', fs.mkdir), rm: track('rm', fs.rm), chmod: track('chmod', fs.chmod) };
+    rename: track('rename', fs.rename), mkdir: track('mkdir', fs.mkdir), mkdtemp: track('mkdtemp', fs.mkdtemp), rm: track('rm', fs.rm), chmod: track('chmod', fs.chmod) };
   const world = {
     root, stateDir, unitDir, packageDir, config, calls, logs, units, binaries, artifacts, rc,
     names: unitNames(stateDir), args: ['setup', '--state-dir', stateDir], linger: 'yes\n', corrupt: false, fragments: {},
