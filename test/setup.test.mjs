@@ -71,13 +71,13 @@ test('host noVNC to CDP and back reuses the original receipt, socket and browser
   assert.equal(h.config.plugins.entries['browser-handoff'].config.desktop.enabled, false);
   assert.equal(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8'), original);
   h.calls.length = 0;
-  // The host receipt outranks the CDP receipt, so this is a rerun rather than a takeover.
+  // The host receipt outranks the CDP receipt. This is a rerun, not a takeover.
   const result = await runClawser(['setup', '--novnc', '--state-dir', h.stateDir], h.deps);
   assert.equal(result.backend, 'novnc');
   assert.deepEqual(h.config.plugins.entries['browser-handoff'].config.desktop, desktop);
   assert.deepEqual(h.config.browser.profiles.clawser, profile);
   assert.equal(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8'), original);
-  assert.deepEqual(h.mutations().filter(call => !isPatch(call) && call.args[1] !== 'reload'), []);
+  assert.deepEqual(h.mutations().filter(call => !isPatch(call) && call.args[1] !== 'reload' && !String(call.args[1]).endsWith('/setup.lock')), []);
   assert.equal((await runClawser(['doctor', '--state-dir', h.stateDir], h.deps)).ok, true);
 });
 
@@ -113,7 +113,7 @@ test('--browser-profile and an unmarked CDP install route to the takeover, which
   assert.deepEqual(h.config, config);
   assert.equal(await fs.readFile(receiptPath, 'utf8'), receipt);
   await assert.rejects(fs.stat(h.stateDir), { code: 'ENOENT' });
-  // Task 8 writes the mark; an explicit CDP install stays out of the takeover path.
+  // An explicit CDP install stays out of the takeover path.
   await fs.writeFile(receiptPath, JSON.stringify({ ...JSON.parse(receipt), explicitCdp: true }) + '\n', { mode: 0o600 });
   assert.equal((await runClawser([...h.args, '--dry-run'], h.deps)).ok, true);
 });
@@ -582,6 +582,18 @@ test('transient final reload failures exhaust a bounded shared deadline', async 
   assert.equal(h.logs.filter(message => message.includes('Waiting for OpenClaw')).length, 1);
   assert.equal(enabled(h.calls).length, 5);
   assert.equal(h.calls.filter(isPatch).length, 1);
+});
+
+test('rereads allowlists after starting services before merging configuration', async t => {
+  const h = await harness(t, { tools: { alsoAllow: ['read'] }, plugins: { allow: ['existing'] } });
+  const run = h.deps.run;
+  h.deps.run = (command, args, options) => {
+    if (command === 'systemctl' && args[1] === 'enable' && args.at(-1) === h.names.controller) { h.config.tools.alsoAllow.push('new-during-start'); h.config.plugins.allow.push('another-plugin'); }
+    return run(command, args, options);
+  };
+  await runClawser(h.args, h.deps);
+  assert.deepEqual(h.config.tools.alsoAllow, ['read', 'new-during-start', 'browser_handoff']);
+  assert.deepEqual(h.config.plugins.allow, ['existing', 'another-plugin', 'browser-handoff']);
 });
 
 test('an old OpenClaw version fails before downloads or setup writes', async t => {
