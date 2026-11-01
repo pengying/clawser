@@ -402,6 +402,9 @@ test('setup --cdp marks the receipt explicit', async t => {
   h.deps.fs = { ...fs, rename: async (source, target) => {
     if (target === marker && JSON.parse(await fs.readFile(source, 'utf8')).explicitCdp === true) h.calls.push({ command: 'mark' });
     return (rename ?? fs.rename)(source, target);
+  }, open: async (path, ...rest) => {
+    if (path === h.stateDir) h.calls.push({ command: 'sync', args: [path] });
+    return fs.open(path, ...rest);
   } };
   assert.equal((await runClawser(['setup', '--cdp'], h.deps)).ok, true);
   const after = JSON.parse(await fs.readFile(marker, 'utf8'));
@@ -410,6 +413,9 @@ test('setup --cdp marks the receipt explicit', async t => {
   const mark = h.calls.findIndex(call => call.command === 'mark');
   const patch = h.calls.findIndex(call => call.command === 'openclaw' && call.args[1] === 'patch' && !call.args.includes('--dry-run'));
   assert.ok(mark >= 0 && mark < patch, JSON.stringify({ mark, patch }));
+  // The renamed receipt is synced through its folder, as the binary block does.
+  const sync = h.calls.findIndex((call, i) => i > mark && call.command === 'sync');
+  assert.ok(sync > mark && sync < patch, JSON.stringify({ mark, sync, patch }));
 });
 
 test('CDP doctor warns to switch when the mark is missing', async t => {

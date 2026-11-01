@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
-  classifyOwner, cookieEncryption, displayServices, findBrowserBinary, isSnapBrowser, listenerProcess, portHolder, processInfo, unitMainPid,
+  classifyOwner, cookieEncryption, displayServices, findBrowserBinary, isSnapBrowser, listenerProcess, portHolder, portInUse, processInfo, showProperties, unitMainPid,
 } from '../src/host-browser.mjs';
 import { net, proc, row } from './proc-fixture.mjs';
 
@@ -43,6 +43,21 @@ test('portHolder names any process listening on the port', async t => {
   assert.equal(await listenerProcess(19420, deps(root)), undefined);
   assert.deepEqual(await portHolder(19420, deps(root)), { pid: 77, exe: '/usr/bin/nc', cgroup: '/user.slice/user-1000.slice/session-2.scope' });
   assert.equal(await portHolder(19421, deps(root)), undefined);
+});
+
+test('a Chrome whose binary was replaced while it runs is still the listener', async t => {
+  const root = await tempRoot(t);
+  await net(root, row('0100007F', 9333, 123) + row('0100007F', 9334, 124));
+  await proc(root, 60, { exe: '/opt/google/chrome/chrome (deleted)', argv: ['/opt/google/chrome/chrome', '--remote-debugging-port=9333'], sockets: [123] });
+  await proc(root, 70, { exe: '/usr/bin/python3 (deleted)', argv: ['python3'], sockets: [124] });
+  assert.deepEqual(await listenerProcess(9333, deps(root)), { pid: 60, address: '127.0.0.1' });
+  assert.equal(await listenerProcess(9334, deps(root)), undefined);
+});
+
+test('systemctl show output and a busy port read the same way everywhere', () => {
+  assert.deepEqual(showProperties('MainPID=42\nEnvironment=A=1 B=2\nDropInPaths=\n'), { MainPID: '42', Environment: 'A=1 B=2', DropInPaths: '' });
+  assert.equal(portInUse(9222, { pid: 77, exe: '/usr/bin/nc' }).message, 'port 9222 is in use by /usr/bin/nc (pid 77)');
+  assert.equal(portInUse(9222).message, 'port 9222 is in use');
 });
 
 test('tcp6 loopback and IPv4-mapped loopback both report friendly addresses', async t => {

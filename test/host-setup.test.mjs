@@ -316,18 +316,6 @@ test('a Docker-era install converts to option A and prints its leftovers without
   assert.doesNotMatch(await fs.readFile(servicePath, 'utf8'), /docker/);
 });
 
-test('a v2 option B receipt stops at the stub before touching anything', async t => {
-  const stub = { message: 'Taking over an existing browser is not implemented yet' };
-  const x = await harness(t);
-  await x.install();
-  await rewriteReceipt(x, saved => Object.assign(saved, { option: 'existing', profile: 'user' }));
-  Object.assign(x.o, { option: 'existing', profile: 'user' });
-  x.calls.length = 0;
-  await assert.rejects(x.plan(), stub);
-  assert.deepEqual(fsWrites(x.calls), []);
-  assert.deepEqual(x.calls.filter(call => call.command === 'systemctl' && call.args[1] !== 'show'), []);
-});
-
 const changedOutside = path => path + ' was changed outside Clawser; restore it or remove it, then rerun setup';
 const healthy = async () => ({ ready: true, profile: 'clawser', cdpUrl: 'http://127.0.0.1:18820', recoveryRequired: false });
 const rewriteReceipt = async (x, change) => { const saved = await x.receipt(); change(saved); await fs.writeFile(x.p.marker, JSON.stringify(saved, null, 2) + '\n', { mode: 0o600 }); };

@@ -4,9 +4,10 @@ import * as fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { runClawser, setupHelpers } from '../src/setup.mjs';
-import { planHost } from '../src/host-setup.mjs';
+import { describeHost, planHost } from '../src/host-setup.mjs';
+import { portHolder } from '../src/host-browser.mjs';
 import { hostWorld, isPatch, systemctl } from './host-fixture.mjs';
-import { net, proc, row } from './proc-fixture.mjs';
+import { NUL, net, proc, row } from './proc-fixture.mjs';
 
 const RESTARTS = /would restart Chrome, so setup won't stop it/;
 const exists = path => fs.lstat(path).then(() => true, () => false);
@@ -24,7 +25,7 @@ async function handWritten(t, { config = userProfile(), chrome = {}, xvfb = {}, 
   await proc(w.root, 401, { argv: ['/opt/google/chrome/chrome', '--type=renderer'], env: ['DISPLAY=:20'], cgroup: slice + 'my-chrome.service' });
   if (xvfb) await proc(w.root, 300, { exe: '/usr/bin/Xvfb', argv: ['/usr/bin/Xvfb', ':20', '-screen', '0', '1280x800x24'], cgroup: slice + 'my-xvfb.service', ...xvfb });
   if (openbox) await proc(w.root, 350, { exe: '/usr/bin/openbox', argv: ['/usr/bin/openbox'], env: ['DISPLAY=:20'], cgroup: slice + 'my-openbox.service', ...openbox });
-  const unit = (name, pid, extra = {}) => ({ MainPID: String(pid), FragmentPath: join(w.unitDir, name), DropInPaths: '', UnitFileState: 'enabled', Environment: '', EnvironmentFiles: '', ...extra });
+  const unit = (name, pid, extra = {}) => ({ MainPID: String(pid), FragmentPath: join(w.unitDir, name), DropInPaths: '', UnitFileState: 'enabled', ActiveState: 'active', Environment: '', EnvironmentFiles: '', ...extra });
   w.foreign['my-chrome.service'] = unit('my-chrome.service', 400, { Environment: 'LANG=fr_FR.UTF-8 DISPLAY=:20' });
   w.foreign['my-xvfb.service'] = unit('my-xvfb.service', 300);
   w.foreign['my-openbox.service'] = unit('my-openbox.service', 350);
@@ -42,10 +43,12 @@ async function handWritten(t, { config = userProfile(), chrome = {}, xvfb = {}, 
   return w;
 }
 
-async function cookieStore(dir, rows) {
+// Chrome 96 and later keep cookies in <folder>/Network/Cookies; older ones in <folder>/Cookies.
+async function cookieStore(dir, rows, { folder = 'Default', legacy = false } = {}) {
   const { DatabaseSync } = await import('node:sqlite');
-  await fs.mkdir(join(dir, 'Default/Network'), { recursive: true });
-  const db = new DatabaseSync(join(dir, 'Default/Network/Cookies'));
+  const parent = legacy ? join(dir, folder) : join(dir, folder, 'Network');
+  await fs.mkdir(parent, { recursive: true });
+  const db = new DatabaseSync(join(parent, 'Cookies'));
   db.exec('CREATE TABLE cookies (encrypted_value BLOB)');
   const insert = db.prepare('INSERT INTO cookies VALUES (?)');
   for (const value of rows) insert.run(Buffer.from(value));
@@ -158,13 +161,18 @@ test('keyring cookies are counted for migration, and --no-migrate-cookies warns 
   await w.unchanged();
 });
 
-test('a CDP install without the explicit mark upgrades through option B with its profile', async t => {
-  const w = await handWritten(t);
+// A CDP install from before the explicit mark, bound to profile user, with its desktop off.
+async function unmarkedCdp(w) {
   w.config.plugins = { entries: { 'browser-handoff': { enabled: true, config: { desktop: { enabled: false }, funnel: { enabled: false }, profiles: { user: 'http://127.0.0.1:9222' }, port: 18796,
     cloudflare: { enabled: true, binaryPath: join(w.root, '.openclaw/clawser-cdp/bin/cloudflared'), startupTimeoutMs: 90_000 } } } } };
   const cdpDir = join(w.root, '.openclaw/clawser-cdp');
   await fs.mkdir(cdpDir, { recursive: true, mode: 0o700 });
   await fs.writeFile(join(cdpDir, 'setup.json'), JSON.stringify({ identity: 'clawser-cdp-setup-v1', uid: w.deps.uid, ownerId: randomUUID(), stateDir: cdpDir, binaryDigest: w.artifacts.cloudflared.sha256 }) + '\n', { mode: 0o600 });
+}
+
+test('a CDP install without the explicit mark upgrades through option B with its profile', async t => {
+  const w = await handWritten(t);
+  await unmarkedCdp(w);
   const result = await runClawser([...w.args, '--dry-run'], w.deps);
   assert.equal(result.ok, true);
   assert.ok(result.plan.includes(`Browser profile: user (existing, at ${w.udd})`), result.plan.join('\n'));
@@ -190,10 +198,11 @@ const healthyUser = async () => ({ ready: true, profile: 'user', cdpUrl: 'http:/
 const verb = name => call => call.command === 'systemctl' && call.args[1] === name;
 const cookieCall = method => call => call.command === 'cookies' && call.args[0] === method;
 const cookieDirs = async w => (await fs.readdir(w.stateDir)).filter(name => name.startsWith('cookies-'));
+const SAVED_COOKIES = [1, 2, 3].map(n => ({ name: 'sid' + n, value: 'cookie-secret-' + n, domain: 'example.com', path: '/' }));
 const exportsThree = async (url, dir) => {
   assert.equal((await fs.stat(dir)).mode & 0o777, 0o700, 'the cookie temp folder is private');
   const path = join(dir, 'cookies.json');
-  await fs.writeFile(path, '[]', { mode: 0o600 });
+  await fs.writeFile(path, JSON.stringify(SAVED_COOKIES), { mode: 0o600 });
   return { path, count: 3 };
 };
 
@@ -473,4 +482,346 @@ test('option B refuses a profile or Chrome it cannot read cleanly', async t => {
   const odd = join(spaced.unitDir, 'my-chrome.service.d/my override.conf'), plain = join(spaced.unitDir, 'my-chrome.service.d/plain.conf');
   spaced.foreign['my-chrome.service'].DropInPaths = `"${odd}" ${plain}`;
   assert.deepEqual((await spaced.plan()).takeover[0].dropIns, [odd, plain]);
+});
+
+// The first matching systemctl call throws, the way a killed setup stops there.
+function crashAt(w, name, unit) {
+  const run = w.deps.run;
+  let crashed = false;
+  w.deps.run = async (command, args = [], more) => {
+    if (!crashed && command === 'systemctl' && args[1] === name && (!unit || args.at(-1) === unit)) { crashed = true; throw new Error('setup was killed'); }
+    return run(command, args, more);
+  };
+}
+// After a finished takeover, Clawser's browser unit is the one listening on the profile port.
+const clawserListens = w => fs.writeFile(join(w.root, 'proc/400/cgroup'), `0::/user.slice/user-${w.deps.uid}.slice/user@${w.deps.uid}.service/app.slice/${w.names.browser}\n`);
+const nobodyListens = w => net(w.root, '');
+const rewriteReceipt = async (w, change) => { const saved = await w.receipt(); change(saved); await fs.writeFile(join(w.stateDir, 'setup.json'), JSON.stringify(saved, null, 2) + '\n', { mode: 0o600 }); };
+const leftover = async (w, name, cookies = SAVED_COOKIES) => {
+  const dir = join(w.stateDir, name);
+  await fs.mkdir(dir, { mode: 0o700 });
+  if (cookies) await fs.writeFile(join(dir, 'cookies.json'), JSON.stringify(cookies), { mode: 0o600 });
+  return dir;
+};
+const RESUME = 'Move the cookies an earlier setup run saved into the new browser';
+const stopAgain = unit => `Stop ${unit} again (Clawser replaced it)`;
+const fsCall = (name, path) => call => call.command === 'fs' && call.args[0] === name && call.args[1] === path;
+
+test("rerunning option B on Clawser's own units takes nothing over and needs no --yes", async t => {
+  const w = await applyWorld(t);
+  assert.equal((await runClawser(w.yes, w.deps)).ok, true);
+  const first = await w.receipt();
+  await clawserListens(w);
+  w.calls.length = 0;
+  const plan = await w.plan();
+  assert.deepEqual(plan.takeover, []);
+  assert.deepEqual(plan.stop, []);
+  assert.equal(plan.cookies, undefined);
+  assert.equal(plan.disruptive, false);
+  // Rendered from the receipt, the units come out exactly as the takeover wrote them.
+  assert.deepEqual(plan.writes, []);
+  assert.deepEqual([plan.start, plan.restart], [[], []]);
+  assert.deepEqual(plan.browser, first.browser);
+  assert.equal(plan.display, 20);
+  w.logs.length = 0;
+  const result = await runClawser(w.args, w.deps);
+  assert.equal(result.ok, true, JSON.stringify(result.plan));
+  for (const name of ['stop', 'disable']) assert.deepEqual(systemctl(w.calls, name), [], name);
+  assert.equal(w.calls.some(cookieCall('exportCookies')), false);
+  assert.deepEqual((await w.receipt()).replaced, first.replaced);
+  assert.ok(w.logs.includes(KEEPS), w.logs.join('\n'));
+});
+
+test('a crash before the takeover stop resumes the takeover without a second backup', async t => {
+  const w = await applyWorld(t);
+  crashAt(w, 'stop');
+  await assert.rejects(runClawser(w.yes, w.deps), /^Error: setup was killed$/);
+  // The interrupted run had recorded only Chrome's unit when it died.
+  await rewriteReceipt(w, saved => { saved.replaced = saved.replaced.filter(item => item.unit === 'my-chrome.service'); });
+  const [chrome] = (await w.receipt()).replaced;
+  assert.equal(chrome?.unit, 'my-chrome.service');
+  for (const name of ['my-xvfb.service', 'my-openbox.service']) await fs.rm(join(chrome.backup, name));
+  assert.ok(await exists(join(chrome.backup, 'my-chrome.service')));
+  await fs.writeFile(join(w.unitDir, 'my-xvfb.service'), '[Service]\nExecStart=/usr/bin/Xvfb :20 -edited\n');
+  const stale = await leftover(w, 'cookies-old');
+  w.calls.length = 0;
+  const plan = await w.plan();
+  assert.deepEqual(plan.takeover.map(item => item.unit), ['my-chrome.service', 'my-xvfb.service', 'my-openbox.service']);
+  assert.equal(plan.disruptive, true);
+  assert.deepEqual(plan.staleCookies, [stale]);
+  assert.equal((await runClawser(w.yes, w.deps)).ok, true);
+  const saved = await w.receipt();
+  assert.equal(saved.replaced.length, 3, JSON.stringify(saved.replaced));
+  assert.deepEqual(saved.replaced[0], chrome);
+  assert.deepEqual(saved.replaced.map(item => item.unit).sort(), MY_UNITS);
+  assert.deepEqual(await fs.readdir(join(w.stateDir, 'backups')), [basename(chrome.backup)]);
+  assert.ok(saved.replaced.every(item => item.backup === chrome.backup), JSON.stringify(saved.replaced));
+  // The units new to this run are backed up as they are now, beside Chrome's first copy.
+  assert.equal(await fs.readFile(join(chrome.backup, 'my-xvfb.service'), 'utf8'), '[Service]\nExecStart=/usr/bin/Xvfb :20 -edited\n');
+  assert.equal(await fs.readFile(join(chrome.backup, 'my-openbox.service'), 'utf8'), w.originals['my-openbox.service']);
+  assert.equal(await fs.readFile(join(chrome.backup, 'my-chrome.service.d/override.conf'), 'utf8'), DROP_IN);
+  assert.equal(w.atFirstStop.replaced.length, 3, 'the new units are recorded before the first stop');
+  assert.deepEqual(systemctl(w.calls, 'stop'), MY_UNITS);
+  assert.deepEqual(systemctl(w.calls, 'disable'), MY_UNITS);
+  // Leftover cookies go under the lock, before anything stops.
+  const lock = w.calls.findIndex(fsCall('mkdir', join(w.stateDir, 'setup.lock'))), removed = w.calls.findIndex(fsCall('rm', stale));
+  assert.ok(lock >= 0 && removed > lock && removed < w.calls.findIndex(verb('stop')), JSON.stringify({ lock, removed }));
+  assert.equal(await exists(stale), false);
+});
+
+test('a crash between stops stops the replaced units again without --yes', async t => {
+  const w = await applyWorld(t);
+  crashAt(w, 'disable', 'my-openbox.service');
+  await assert.rejects(runClawser(w.yes, w.deps), /^Error: setup was killed Setup already stopped my-chrome\.service, my-openbox\.service;/);
+  await nobodyListens(w);
+  assert.equal(w.foreign['my-xvfb.service'].ActiveState, 'active');
+  assert.deepEqual([w.foreign['my-openbox.service'].ActiveState, w.foreign['my-openbox.service'].UnitFileState], ['inactive', 'enabled']);
+  assert.equal((await w.receipt()).replaced.length, 3);
+  w.calls.length = 0;
+  const dry = await runClawser([...w.args, '--dry-run'], w.deps);
+  for (const unit of ['my-xvfb.service', 'my-openbox.service']) assert.ok(dry.plan.includes(stopAgain(unit)), dry.plan.join('\n'));
+  assert.equal(dry.plan.includes(stopAgain('my-chrome.service')), false, 'a unit already stopped and disabled stays alone');
+  assert.equal(dry.plan.some(line => line.startsWith('Take over ') || line.startsWith('Stop the Docker-era')), false, dry.plan.join('\n'));
+  const plan = await w.plan();
+  assert.deepEqual(plan.stop, [{ kind: 'unit', unit: 'my-openbox.service', replaced: true }, { kind: 'unit', unit: 'my-xvfb.service', replaced: true }]);
+  assert.equal(plan.disruptive, false);
+  w.calls.length = 0;
+  const result = await runClawser(w.args, w.deps);
+  assert.equal(result.ok, true, JSON.stringify(result.plan));
+  assert.deepEqual(systemctl(w.calls, 'stop'), ['my-openbox.service', 'my-xvfb.service']);
+  assert.deepEqual(systemctl(w.calls, 'disable'), ['my-openbox.service', 'my-xvfb.service']);
+  assert.ok(w.calls.findLastIndex(verb('disable')) < w.calls.findIndex(verb('enable')), 'the old units stop before Clawser starts its own');
+  assert.ok(w.calls.findLastIndex(verb('disable')) > w.calls.findIndex(verb('daemon-reload')) || !w.calls.some(verb('daemon-reload')));
+  assert.deepEqual(systemctl(w.calls, 'enable'), result.units);
+});
+
+test('a resumed takeover on a different display is refused', async t => {
+  const w = await applyWorld(t);
+  crashAt(w, 'stop');
+  await assert.rejects(runClawser(w.yes, w.deps), /setup was killed/);
+  assert.equal((await w.receipt()).display, 20);
+  await fs.writeFile(join(w.root, 'proc/400/environ'), NUL('DISPLAY=:30'));
+  await fs.writeFile(join(w.root, 'proc/300/cmdline'), NUL('/usr/bin/Xvfb', ':30', '-screen', '0', '1280x800x24'));
+  await fs.writeFile(join(w.root, 'proc/350/environ'), NUL('DISPLAY=:30'));
+  w.calls.length = 0;
+  await assert.rejects(runClawser(w.yes, w.deps), /Setup arguments conflict/);
+  assert.deepEqual(w.mutations(), []);
+});
+
+test('cookies saved by an interrupted run are imported on the next run and then removed', async t => {
+  const w = await applyWorld(t);
+  Object.assign(w.cookies, { importCookies: async () => ({ count: 3 }), countCookies: async () => 3 });
+  crashAt(w, 'disable', 'my-chrome.service');
+  await assert.rejects(runClawser(w.yes, w.deps), /setup was killed/);
+  await nobodyListens(w);
+  assert.equal(Object.hasOwn(await w.receipt(), 'cookieMigration'), false);
+  const older = await leftover(w, 'cookies-old');
+  await fs.utimes(join(older, 'cookies.json'), new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+  const dir = await leftover(w, 'cookies-abc'), path = join(dir, 'cookies.json');
+  w.calls.length = 0;
+  const plan = await w.plan();
+  assert.deepEqual(plan.cookies, { migrate: true, resumeFrom: path });
+  assert.deepEqual(plan.staleCookies, [older]);
+  assert.equal(plan.disruptive, false);
+  const dry = await runClawser([...w.args, '--dry-run'], w.deps);
+  assert.ok(dry.plan.includes(RESUME), dry.plan.join('\n'));
+  assert.equal(dry.plan.some(line => /^Move \d+ keyring/.test(line)), false, dry.plan.join('\n'));
+  const result = await runClawser(w.args, w.deps);
+  assert.equal(result.ok, true, JSON.stringify(result.plan));
+  assert.ok(result.warnings.every(text => !text.startsWith('Moving cookies')), result.warnings.join('\n'));
+  assert.equal(w.calls.some(cookieCall('exportCookies')), false);
+  assert.equal(w.cookieArgs.importCookies?.[1], path);
+  assert.ok(w.calls.findIndex(cookieCall('importCookies')) > w.calls.findLastIndex(verb('enable')));
+  assert.ok(w.calls.findIndex(cookieCall('waitForBrowser')) < w.calls.findIndex(cookieCall('importCookies')));
+  assert.deepEqual(await cookieDirs(w), []);
+  const saved = await w.receipt();
+  assert.deepEqual(saved.cookieMigration, { exported: 3, imported: 3, at: saved.cookieMigration?.at });
+  assert.ok(w.logs.includes(GOOGLE), w.logs.join('\n'));
+  assert.doesNotMatch(w.logs.join('\n') + JSON.stringify(result) + JSON.stringify(saved), /cookie-secret/);
+
+  // A health wait that failed after the takeover kept the export, and the rerun finds Clawser's own browser on the port.
+  const own = await applyWorld(t, { deps: { controllerHealth: async () => ({ ready: false }) } });
+  await cookieStore(own.udd, ['v11a', 'v11b', 'v11c']);
+  Object.assign(own.cookies, { exportCookies: exportsThree, importCookies: async () => ({ count: 3 }), countCookies: async () => 3 });
+  await assert.rejects(runClawser(own.yes, own.deps), /Controller health/);
+  const [kept] = await cookieDirs(own);
+  assert.ok(kept, 'the export stays');
+  await clawserListens(own);
+  own.deps.controllerHealth = async () => { own.calls.push({ command: 'health' }); return healthyUser(); };
+  own.calls.length = 0;
+  const ownPlan = await own.plan();
+  assert.deepEqual(ownPlan.cookies, { migrate: true, resumeFrom: join(own.stateDir, kept, 'cookies.json') });
+  assert.deepEqual([ownPlan.takeover, ownPlan.stop, ownPlan.disruptive], [[], [], false]);
+  own.calls.length = 0;
+  assert.equal((await runClawser(own.args, own.deps)).ok, true);
+  assert.equal(own.calls.some(cookieCall('exportCookies')), false);
+  assert.equal(own.cookieArgs.importCookies?.[1], join(own.stateDir, kept, 'cookies.json'));
+  assert.ok(own.calls.findIndex(cookieCall('importCookies')) > own.calls.findIndex(call => call.command === 'health'), 'the import waits for health');
+  assert.deepEqual(await cookieDirs(own), []);
+  assert.deepEqual((await own.receipt()).cookieMigration, { exported: 3, imported: 3, at: (await own.receipt()).cookieMigration?.at });
+
+  // An import that failed last time kept the export, and the rerun tries again.
+  const failed = await applyWorld(t);
+  await cookieStore(failed.udd, ['v11a', 'v11b', 'v11c']);
+  Object.assign(failed.cookies, { exportCookies: exportsThree, importCookies: async () => { throw new Error('nope'); } });
+  assert.equal((await runClawser(failed.yes, failed.deps)).ok, true);
+  assert.equal((await failed.receipt()).cookieMigration.failed, true);
+  const [retry] = await cookieDirs(failed);
+  await clawserListens(failed);
+  Object.assign(failed.cookies, { importCookies: async () => ({ count: 3 }), countCookies: async () => 3 });
+  failed.calls.length = 0;
+  assert.deepEqual((await failed.plan()).cookies, { migrate: true, resumeFrom: join(failed.stateDir, retry, 'cookies.json') });
+  const retried = await runClawser(failed.args, failed.deps);
+  assert.equal(retried.ok, true);
+  assert.equal(failed.calls.some(cookieCall('exportCookies')), false);
+  assert.equal(failed.cookieArgs.importCookies?.[1], join(failed.stateDir, retry, 'cookies.json'));
+  assert.deepEqual(await cookieDirs(failed), []);
+  const { cookieMigration } = await failed.receipt();
+  assert.deepEqual(cookieMigration, { exported: 3, imported: 3, at: cookieMigration.at });
+});
+
+test('leftover cookie folders are removed when they are not needed', async t => {
+  const w = await applyWorld(t);
+  await cookieStore(w.udd, ['v11a', 'v11b', 'v11c']);
+  Object.assign(w.cookies, { exportCookies: exportsThree, importCookies: async () => ({ count: 3 }), countCookies: async () => 3 });
+  assert.equal((await runClawser(w.yes, w.deps)).ok, true);
+  assert.equal((await w.receipt()).cookieMigration.imported, 3);
+  await clawserListens(w);
+  const folders = [await leftover(w, 'cookies-a'), await leftover(w, 'cookies-b', null)];
+  w.calls.length = 0;
+  const plan = await w.plan();
+  assert.equal(plan.cookies, undefined);
+  assert.deepEqual(plan.staleCookies, folders);
+  assert.equal(describeHost(plan).includes(RESUME), false);
+  const result = await runClawser(w.args, w.deps);
+  assert.equal(result.ok, true);
+  assert.equal(result.warnings.some(text => text.includes('cookies')), false, result.warnings.join('\n'));
+  for (const dir of folders) assert.equal(await exists(dir), false, dir);
+  assert.equal(w.calls.some(cookieCall('importCookies')), false);
+  // --no-migrate-cookies drops a leftover export instead of importing it.
+  const no = await applyWorld(t);
+  assert.equal((await runClawser(no.yes, no.deps)).ok, true);
+  await clawserListens(no);
+  const dropped = await leftover(no, 'cookies-x');
+  no.calls.length = 0;
+  const declined = await no.plan({ migrateCookies: false });
+  assert.deepEqual([declined.cookies, declined.staleCookies], [undefined, [dropped]]);
+  assert.equal((await runClawser([...no.args, '--no-migrate-cookies'], no.deps)).ok, true);
+  assert.equal(await exists(dropped), false);
+  assert.equal(no.calls.some(cookieCall('importCookies')), false);
+});
+
+test('a Docker-era install found through an unmarked CDP install names the profile to keep', async t => {
+  const w = await handWritten(t);
+  await unmarkedCdp(w);
+  await fs.mkdir(w.stateDir, { mode: 0o700 });
+  await fs.writeFile(join(w.stateDir, 'setup.json'), JSON.stringify({ identity: 'clawser-setup-v1', uid: w.deps.uid, ownerId: randomUUID() }) + '\n', { mode: 0o600 });
+  w.calls.length = 0;
+  await assert.rejects(runClawser(w.args, w.deps), { message: 'This state folder holds a Docker-era install, which converts to a new browser profile only, and your CDP viewer uses browser profile user. Run setup --browser-profile user --state-dir <another folder> to keep its logins, or setup --cdp to keep the CDP viewer.' });
+  assert.deepEqual(w.mutations(), []);
+  // Asked for by name, the plain Docker-era message still applies.
+  await assert.rejects(runClawser(w.takeover, w.deps), { message: 'This state folder holds a Docker-era install, which converts to a new browser profile only. Run setup without --browser-profile, or choose another --state-dir.' });
+  assert.deepEqual(w.mutations(), []);
+});
+
+test('doctor checks an option B install against its own profile', async t => {
+  const w = await applyWorld(t);
+  assert.equal((await runClawser(w.yes, w.deps)).ok, true);
+  w.calls.length = 0;
+  const doctor = await runClawser(['doctor', '--state-dir', w.stateDir], w.deps);
+  const row = name => doctor.checks.find(item => item.name === name);
+  assert.equal(row('configuration')?.ok, true, JSON.stringify(doctor.checks));
+  assert.equal(row('controller health')?.ok, true, JSON.stringify(doctor.checks));
+  assert.equal(doctor.ok, true, JSON.stringify(doctor.checks));
+  assert.deepEqual(w.mutations(), []);
+  w.deps.controllerHealth = async () => ({ ready: true, profile: 'clawser', cdpUrl: 'http://127.0.0.1:9222', recoveryRequired: false });
+  const wrong = await runClawser(['doctor', '--state-dir', w.stateDir], w.deps);
+  assert.equal(wrong.checks.find(item => item.name === 'controller health')?.ok, false, JSON.stringify(wrong.checks));
+  assert.equal(wrong.ok, false);
+});
+
+test('an import that sets none of the saved cookies keeps them for a rerun', async t => {
+  const w = await applyWorld(t);
+  await cookieStore(w.udd, ['v11a', 'v11b', 'v11c']);
+  Object.assign(w.cookies, { exportCookies: exportsThree, importCookies: async () => ({ count: 0 }) });
+  const result = await runClawser(w.yes, w.deps);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.warnings.filter(text => text.startsWith('Moving cookies')), ['Moving cookies failed (Chrome accepted none of the saved cookies); rerun setup to try again, or sign in again to sites that ask.']);
+  const saved = await w.receipt();
+  assert.deepEqual(saved.cookieMigration, { exported: 3, imported: 0, failed: true, at: saved.cookieMigration?.at });
+  assert.deepEqual(await cookieDirs(w), [basename(w.cookieArgs.exportCookies[1])]);
+  assert.ok(await exists(join(w.cookieArgs.exportCookies[1], 'cookies.json')));
+  assert.equal(w.calls.some(cookieCall('flushCookies')), false);
+  assert.equal(w.logs.includes(GOOGLE), false);
+});
+
+test('a cookie folder setup cannot remove is a warning, not a failure', async t => {
+  const w = await applyWorld(t);
+  await cookieStore(w.udd, ['v11a', 'v11b', 'v11c']);
+  Object.assign(w.cookies, { exportCookies: exportsThree, importCookies: async () => ({ count: 3 }), countCookies: async () => 3 });
+  const rm = w.deps.fs.rm;
+  w.deps.fs = { ...w.deps.fs, rm: async (path, options) => {
+    if (basename(path).startsWith('cookies-')) throw Object.assign(new Error('EBUSY: resource busy'), { code: 'EBUSY' });
+    return rm(path, options);
+  } };
+  const result = await runClawser(w.yes, w.deps);
+  assert.equal(result.ok, true);
+  const dir = w.cookieArgs.exportCookies[1];
+  assert.ok(result.warnings.includes(`Could not remove ${dir}; delete it yourself, it holds saved cookies.`), result.warnings.join('\n'));
+  const saved = await w.receipt();
+  assert.deepEqual(saved.cookieMigration, { exported: 3, imported: 3, at: saved.cookieMigration?.at });
+  assert.ok(w.logs.includes(GOOGLE), w.logs.join('\n'));
+  assert.equal(await exists(join(w.stateDir, 'setup.lock')), false);
+});
+
+test('option B with --profile-directory names the folder, records it and counts the cookies inside it', async t => {
+  const w = await applyWorld(t);
+  await fs.writeFile(join(w.root, 'proc/400/cmdline'), NUL('/opt/google/chrome/chrome', `--user-data-dir=${w.udd}`, '--profile-directory=Profile 1', '--remote-debugging-port=9222'));
+  await cookieStore(w.udd, ['v11a']);
+  await cookieStore(w.udd, ['v11a', 'v11b', 'v10a'], { folder: 'Profile 1' });
+  const dry = await runClawser([...w.takeover, '--dry-run'], w.deps);
+  assert.ok(dry.plan.includes(`Browser profile: user (existing, at ${w.udd}, folder Profile 1)`), dry.plan.join('\n'));
+  assert.ok(dry.plan.includes('Move 2 keyring-encrypted cookies into the new browser'), dry.plan.join('\n'));
+  const plan = await w.plan();
+  assert.equal(plan.profileDirectory, 'Profile 1');
+  assert.deepEqual(plan.cookies, { migrate: true, count: 2 });
+  assert.match(plan.units[plan.locations.names.browser], /"--profile-directory=Profile 1"/);
+  Object.assign(w.cookies, { exportCookies: exportsThree, importCookies: async () => ({ count: 3 }), countCookies: async () => 3 });
+  assert.equal((await runClawser(w.yes, w.deps)).ok, true);
+  assert.equal((await w.receipt()).profileDirectory, 'Profile 1');
+});
+
+test('option B counts cookies in the legacy <profile>/Cookies store', async t => {
+  const w = await handWritten(t);
+  await cookieStore(w.udd, ['v11a', 'v11b', 'v11c', 'v10a'], { legacy: true });
+  assert.equal(await exists(join(w.udd, 'Default/Network/Cookies')), false);
+  assert.deepEqual((await w.plan()).cookies, { migrate: true, count: 3 });
+  await w.unchanged();
+});
+
+test('a unit file in a sibling of the unit folder is not replaceable', async t => {
+  const w = await handWritten(t);
+  w.foreign['my-chrome.service'].FragmentPath = w.unitDir + '-evil/my-chrome.service';
+  await assert.rejects(runClawser(w.takeover, w.deps), /^Error: my-chrome\.service would restart Chrome, so setup won't stop it/);
+  await w.unchanged();
+});
+
+test('a window manager unit setup cannot replace moves the browser to a free display', async t => {
+  const w = await handWritten(t, { deps: { freeDisplay: async () => 21 } });
+  w.foreign['my-openbox.service'].FragmentPath = '/etc/systemd/user/my-openbox.service';
+  const plan = await w.plan();
+  assert.deepEqual(plan.takeover.map(item => item.unit), ['my-chrome.service']);
+  assert.equal(plan.display, 21);
+  assert.ok(plan.warnings.includes("Display :20 stays running; Clawser's browser uses :21."), plan.warnings.join('\n'));
+  await w.unchanged();
+});
+
+test('a program other than Chrome on the profile port is named', async t => {
+  const w = await handWritten(t, { deps: { portHolder } });
+  await fs.rm(join(w.root, 'proc/400/fd'), { recursive: true });
+  await fs.mkdir(join(w.root, 'proc/400/fd'));
+  await proc(w.root, 77, { exe: '/usr/bin/nc', argv: ['nc', '-l', '9222'], cgroup: w.session, sockets: [4242] });
+  w.busy([9222]);
+  await assert.rejects(runClawser(w.takeover, w.deps), { message: 'port 9222 is in use by /usr/bin/nc (pid 77)' });
+  await w.unchanged();
 });

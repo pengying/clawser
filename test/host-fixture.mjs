@@ -107,6 +107,9 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
         }
         if (verb === 'enable' || verb === 'restart') units.set(name, 'active');
         if (verb === 'stop') units.set(name, 'inactive');
+        // A hand-written unit reports what setup did to it, so a crash leaves the state a rerun would see.
+        if (world.foreign[name] && verb === 'stop') world.foreign[name].ActiveState = 'inactive';
+        if (world.foreign[name] && verb === 'disable') world.foreign[name].UnitFileState = 'disabled';
         return '';
       }
       if (command === 'openclaw') {
