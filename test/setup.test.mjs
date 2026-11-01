@@ -101,20 +101,25 @@ test('owned desktop reenable rejects a non-boolean enable flag even when identit
   await assert.rejects(runClawser(h.args, h.deps), /conflicts/);
 });
 
-test('--browser-profile and an unmarked CDP install route to the takeover, which is not implemented yet', async t => {
+test('--browser-profile and an unmarked CDP install route to the takeover planner', async t => {
   const h = await harness(t, personal());
-  await assert.rejects(runClawser([...h.args, '--browser-profile', 'personal'], h.deps), /^Error: Taking over an existing browser is not implemented yet$/);
+  const nobody = /^Error: Nothing is listening on http:\/\/127\.0\.0\.1:9333\. Start that browser, then rerun setup\.$/;
+  await assert.rejects(runClawser([...h.args, '--browser-profile', 'personal'], h.deps), nobody);
   const cdp = await runClawser(['setup', '--cdp'], h.deps);
-  const receiptPath = join(cdp.stateDir, 'setup.json'), receipt = await fs.readFile(receiptPath, 'utf8');
-  const config = structuredClone(h.config);
+  const receiptPath = join(cdp.stateDir, 'setup.json');
+  // A CDP install from before the explicit mark existed.
+  const { explicitCdp, ...unmarked } = JSON.parse(await fs.readFile(receiptPath, 'utf8'));
+  assert.equal(explicitCdp, true);
+  await fs.writeFile(receiptPath, JSON.stringify(unmarked) + '\n', { mode: 0o600 });
+  const receipt = await fs.readFile(receiptPath, 'utf8'), config = structuredClone(h.config);
   h.calls.length = 0;
-  await assert.rejects(runClawser(h.args, h.deps), /^Error: Taking over an existing browser is not implemented yet$/);
+  await assert.rejects(runClawser(h.args, h.deps), nobody);
   assert.deepEqual(h.mutations(), []);
   assert.deepEqual(h.config, config);
   assert.equal(await fs.readFile(receiptPath, 'utf8'), receipt);
   await assert.rejects(fs.stat(h.stateDir), { code: 'ENOENT' });
   // An explicit CDP install stays out of the takeover path.
-  await fs.writeFile(receiptPath, JSON.stringify({ ...JSON.parse(receipt), explicitCdp: true }) + '\n', { mode: 0o600 });
+  await fs.writeFile(receiptPath, JSON.stringify({ ...unmarked, explicitCdp: true }) + '\n', { mode: 0o600 });
   assert.equal((await runClawser([...h.args, '--dry-run'], h.deps)).ok, true);
 });
 
@@ -176,7 +181,7 @@ test('a disruptive rerun without --yes prints the plan and changes nothing', asy
   assert.equal(applied.ok, true);
   assert.deepEqual(systemctl(h.calls, 'restart'), [h.names.browser]);
   assert.match(await h.unit(h.names.browser), /\/opt\/google\/chrome\/chrome/);
-  assert.deepEqual((await h.receipt()).browser, { path: '/opt/google/chrome/chrome' });
+  assert.deepEqual((await h.receipt()).browser, { path: '/opt/google/chrome/chrome', existingArgs: [], env: [] });
 });
 
 test('setup prints that the agent browser starts with no logins', async t => {

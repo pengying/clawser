@@ -161,7 +161,7 @@ test('option A creates a private profile, a cookie and five owned units, then ma
   assert.equal(saved.packageDir, x.d.packageDir);
   assert.equal(saved.unitDir, x.unitDir);
   assert.equal(saved.userDataDir, x.p.profileDir);
-  assert.deepEqual(saved.browser, { path: '/usr/bin/google-chrome-stable' });
+  assert.deepEqual(saved.browser, { path: '/usr/bin/google-chrome-stable', existingArgs: [], env: [] });
   assert.deepEqual(saved.replaced, []);
   assert.match(saved.ownerId, /^[a-f0-9-]{36}$/);
   assert.equal(saved.configDigest, digest(await fs.readFile(x.p.config)));
@@ -316,10 +316,17 @@ test('a Docker-era install converts to option A and prints its leftovers without
   assert.doesNotMatch(await fs.readFile(servicePath, 'utf8'), /docker/);
 });
 
-test('option B is not implemented yet', async t => {
+test('a v2 option B receipt and option B apply stop at the stub before touching anything', async t => {
+  const stub = { message: 'Taking over an existing browser is not implemented yet' };
   const x = await harness(t);
-  x.o.option = 'existing';
-  await assert.rejects(x.plan(), /not implemented yet/);
+  await x.install();
+  await rewriteReceipt(x, saved => Object.assign(saved, { option: 'existing', profile: 'user' }));
+  Object.assign(x.o, { option: 'existing', profile: 'user' });
+  x.calls.length = 0;
+  await assert.rejects(x.plan(), stub);
+  await assert.rejects(applyHost({ option: 'existing' }, x.o, x.d, h), stub);
+  assert.deepEqual(fsWrites(x.calls), []);
+  assert.deepEqual(x.calls.filter(call => call.command === 'systemctl' && call.args[1] !== 'show'), []);
 });
 
 const changedOutside = path => path + ' was changed outside Clawser; restore it or remove it, then rerun setup';

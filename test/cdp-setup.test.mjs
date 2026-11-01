@@ -380,3 +380,49 @@ test('CDP setup waits for local active generation while public warming remains e
   assert.ok(doctor.checks.some(row => row.name === 'public transport' && row.pending && /warming/.test(row.message)));
   assert.equal(doctor.checks.some(row => /unowned|non-private/.test(row.message ?? '')), false);
 });
+
+const UPGRADE = 'run setup to switch to noVNC, or setup --cdp to keep the CDP viewer';
+const unmark = async marker => {
+  const saved = JSON.parse(await fs.readFile(marker, 'utf8'));
+  delete saved.explicitCdp;
+  await fs.writeFile(marker, JSON.stringify(saved) + '\n', { mode: 0o600 });
+  return saved;
+};
+
+test('setup --cdp marks the receipt explicit', async t => {
+  const h = await harness(t), marker = join(h.stateDir, 'setup.json');
+  assert.equal((await runClawser(['setup', '--cdp'], h.deps)).ok, true);
+  assert.equal(JSON.parse(await fs.readFile(marker, 'utf8')).explicitCdp, true);
+  // A receipt from before the mark existed: a plain doctor leaves it alone, and the next --cdp setup adds it before the config patch.
+  const before = await unmark(marker);
+  await runClawser(['doctor'], h.deps);
+  assert.equal(Object.hasOwn(JSON.parse(await fs.readFile(marker, 'utf8')), 'explicitCdp'), false);
+  h.calls.length = 0;
+  const rename = h.deps.fs.rename;
+  h.deps.fs = { ...fs, rename: async (source, target) => {
+    if (target === marker && JSON.parse(await fs.readFile(source, 'utf8')).explicitCdp === true) h.calls.push({ command: 'mark' });
+    return (rename ?? fs.rename)(source, target);
+  } };
+  assert.equal((await runClawser(['setup', '--cdp'], h.deps)).ok, true);
+  const after = JSON.parse(await fs.readFile(marker, 'utf8'));
+  assert.equal(after.explicitCdp, true);
+  assert.equal(after.ownerId, before.ownerId);
+  const mark = h.calls.findIndex(call => call.command === 'mark');
+  const patch = h.calls.findIndex(call => call.command === 'openclaw' && call.args[1] === 'patch' && !call.args.includes('--dry-run'));
+  assert.ok(mark >= 0 && mark < patch, JSON.stringify({ mark, patch }));
+});
+
+test('CDP doctor warns to switch when the mark is missing', async t => {
+  const h = await harness(t), marker = join(h.stateDir, 'setup.json');
+  await runClawser(['setup', '--cdp'], h.deps);
+  let result = await runClawser(['doctor'], h.deps);
+  assert.equal(result.ok, true, JSON.stringify(result.checks));
+  assert.equal(result.checks.some(row => row.name === 'upgrade'), false);
+  await unmark(marker);
+  h.logs.length = 0;
+  result = await runClawser(['doctor'], h.deps);
+  assert.equal(result.ok, true, JSON.stringify(result.checks));
+  assert.deepEqual(result.checks.find(row => row.name === 'upgrade'), { name: 'upgrade', ok: true, warning: true, message: UPGRADE });
+  assert.ok(h.logs.includes('WARN upgrade: ' + UPGRADE), h.logs.join('\n'));
+  assert.equal(h.logs.some(line => line.startsWith('OK upgrade')), false);
+});

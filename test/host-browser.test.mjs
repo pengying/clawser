@@ -7,34 +7,15 @@ import { pathToFileURL } from 'node:url';
 import {
   classifyOwner, cookieEncryption, displayServices, findBrowserBinary, isSnapBrowser, listenerProcess, portHolder, processInfo, unitMainPid,
 } from '../src/host-browser.mjs';
+import { net, proc, row } from './proc-fixture.mjs';
 
 const UID = 1000;
 const SNAP = "Snap Chromium can't use the hidden folder where Clawser keeps its files. Install Google Chrome, or a Chromium that isn't a snap, then rerun setup.";
-const HEADER = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n';
-const row = (address, port, inode, st = '0A') =>
-  `   0: ${address}:${port.toString(16).toUpperCase().padStart(4, '0')} 00000000:0000 ${st} 00000000:00000000 00:00000000 00000000  1000        0 ${inode} 1 0 100 0\n`;
-const NUL = (...parts) => parts.join('\0') + '\0';
 
 async function tempRoot(t) {
   const root = await realFs.realpath(await realFs.mkdtemp(join(tmpdir(), 'clawser-host-browser-')));
   t.after(() => realFs.rm(root, { recursive: true, force: true }));
   return root;
-}
-
-async function proc(root, pid, { exe = '/opt/google/chrome/chrome', argv = ['/opt/google/chrome/chrome'], env = [], cgroup = '0::/', sockets = [] } = {}) {
-  const dir = join(root, 'proc', String(pid));
-  await realFs.mkdir(join(dir, 'fd'), { recursive: true });
-  await realFs.symlink(exe, join(dir, 'exe'));
-  await realFs.writeFile(join(dir, 'cmdline'), NUL(...argv));
-  await realFs.writeFile(join(dir, 'environ'), NUL(...env));
-  await realFs.writeFile(join(dir, 'cgroup'), cgroup + '\n');
-  for (const [i, inode] of sockets.entries()) await realFs.symlink(`socket:[${inode}]`, join(dir, 'fd', String(i + 3)));
-}
-
-async function net(root, tcp = '', tcp6 = '') {
-  await realFs.mkdir(join(root, 'proc/net'), { recursive: true });
-  await realFs.writeFile(join(root, 'proc/net/tcp'), HEADER + tcp);
-  await realFs.writeFile(join(root, 'proc/net/tcp6'), HEADER + tcp6);
 }
 
 const ownedBy = (owner, root) => ({ ...realFs, stat: async path => {

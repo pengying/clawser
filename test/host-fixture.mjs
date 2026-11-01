@@ -62,6 +62,8 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
   const world = {
     root, stateDir, unitDir, packageDir, config, calls, logs, units, binaries, artifacts, rc,
     names: unitNames(stateDir), args: ['setup', '--state-dir', stateDir], linger: 'yes\n', corrupt: false, fragments: {},
+    // Hand-written user units that option B discovery reads with one systemctl show: unit name to its properties.
+    foreign: {},
     busy: ports => { busy = ports; },
     receipt: async () => JSON.parse(await fs.readFile(join(stateDir, 'setup.json'), 'utf8')),
     unit: name => fs.readFile(join(unitDir, name), 'utf8'),
@@ -69,7 +71,7 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
   };
   world.deps = {
     fs: trackedFs, artifacts, packageDir, env: { XDG_CONFIG_HOME: join(root, 'config') }, homeDir: root, uid: process.getuid(),
-    platform: 'linux', arch: 'x64', nodeVersion: '24.18.0', execPath: '/usr/bin/node',
+    platform: 'linux', arch: 'x64', nodeVersion: '24.18.0', execPath: '/usr/bin/node', procRoot: join(root, 'proc'),
     now: Date.now, sleep: async () => {}, log: message => logs.push(message), readProcessStartTicks: async () => '4242',
     findBrowserBinary: async () => ({ path: '/usr/bin/google-chrome-stable', brand: 'chrome' }),
     freeDisplay: async () => 20, randomBytes: () => Buffer.alloc(16, 7),
@@ -98,6 +100,7 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
       if (command === 'systemctl') {
         const verb = args[1], name = args.at(-1);
         if (verb === 'show-environment') return 'PATH=/usr/bin';
+        if (verb === 'show' && world.foreign[args[2]]) return Object.entries(world.foreign[args[2]]).map(([key, value]) => key + '=' + value).join('\n') + '\n';
         if (verb === 'show') {
           const state = units.get(args[2]);
           return `LoadState=${state ? 'loaded' : 'not-found'}\nFragmentPath=${state ? world.fragments[args[2]] ?? join(unitDir, args[2]) : ''}\nActiveState=${state ?? 'inactive'}\n`;
