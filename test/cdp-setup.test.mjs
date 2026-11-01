@@ -57,7 +57,7 @@ test('default setup reuses existing normal Chrome without desktop prerequisites 
   const h = await harness(t), browser = structuredClone(h.config.browser);
   h.config.plugins = { entries: { 'browser-handoff': { config: { ownerGroupSessions: ['approved'], profiles: { stale: 'http://127.0.0.1:9999' }, desktop: { enabled: true, profile: 'handoff', socketPath: '/owned/desktop.sock' }, funnel: { enabled: true } } } } };
   h.config.tools = { alsoAllow: ['read'] };
-  const result = await runClawser(['setup'], h.deps);
+  const result = await runClawser(['setup', '--cdp'], h.deps);
   assert.equal(result.backend, 'cdp');
   assert.equal(result.stateDir, h.stateDir);
   assert.deepEqual(h.config.browser, browser);
@@ -72,13 +72,13 @@ test('default setup reuses existing normal Chrome without desktop prerequisites 
   assert.deepEqual(h.config.tools.alsoAllow, ['read', 'browser_handoff']);
   assert.deepEqual((await fs.readdir(h.stateDir)).sort(), ['bin', 'setup.json']);
   h.calls.length = 0;
-  assert.equal((await runClawser(['setup'], h.deps)).ok, true);
+  assert.equal((await runClawser(['setup', '--cdp'], h.deps)).ok, true);
   assert.equal(h.calls.filter(call => call.command === 'fetch' && call.args[0] === ARTIFACTS.cloudflared.url).length, 0);
 });
 
 test('CDP dry-run validates connection and plans without creating state or changing configuration', async t => {
   const h = await harness(t), before = structuredClone(h.config);
-  const result = await runClawser(['setup', '--dry-run'], h.deps);
+  const result = await runClawser(['setup', '--cdp', '--dry-run'], h.deps);
   assert.equal(result.backend, 'cdp');
   assert.deepEqual(h.config, before);
   await assert.rejects(fs.stat(h.stateDir), { code: 'ENOENT' });
@@ -88,7 +88,7 @@ test('CDP dry-run validates connection and plans without creating state or chang
 test('missing, closed and incompatible default connections fail without launch, fallback or writes', async t => {
   for (const mutation of [h => { delete h.config.browser.defaultProfile; }, h => { h.config.browser.profiles.personal.attachOnly = false; }, h => { h.config.browser.profiles.personal.driver = 'extension'; }, h => { h.deps.fetch = async () => { throw new Error('ECONNREFUSED'); }; }]) {
     const h = await harness(t); mutation(h);
-    await assert.rejects(runClawser(['setup'], h.deps), /browser|CDP|attachOnly|connection/i);
+    await assert.rejects(runClawser(['setup', '--cdp'], h.deps), /browser|CDP|attachOnly|connection/i);
     await assert.rejects(fs.stat(h.stateDir), { code: 'ENOENT' });
     assert.equal(h.calls.some(call => call.args.includes('patch')), false);
   }
@@ -97,18 +97,18 @@ test('missing, closed and incompatible default connections fail without launch, 
 test('explicit existing profile changes only connection default and rejects absent profiles', async t => {
   const h = await harness(t);
   h.config.browser.profiles.other = structuredClone(h.config.browser.profiles.personal);
-  await runClawser(['setup', '--browser-profile', 'other'], h.deps);
+  await runClawser(['setup', '--cdp', '--browser-profile', 'other'], h.deps);
   assert.equal(h.config.browser.defaultProfile, 'other');
   assert.deepEqual(Object.keys(h.config.browser.profiles), ['personal', 'other']);
-  await assert.rejects(runClawser(['setup', '--browser-profile', 'absent'], h.deps), /existing browser profile/);
+  await assert.rejects(runClawser(['setup', '--cdp', '--browser-profile', 'absent'], h.deps), /existing browser profile/);
 });
 
 test('CDP rejects desktop flags and unowned state paths before making changes', async t => {
   const h = await harness(t);
-  for (const args of [['--cdp-port', '9222'], ['--vnc-port', '5901'], ['--container-name', 'desktop'], ['--no-default-profile']]) await assert.rejects(runClawser(['setup', ...args], h.deps), /--novnc/);
+  for (const args of [['--cdp-port', '9222'], ['--vnc-port', '5901'], ['--container-name', 'desktop'], ['--no-default-profile']]) await assert.rejects(runClawser(['setup', '--cdp', ...args], h.deps), /was removed in 0\.7\.0 along with the Docker desktop/);
   await fs.mkdir(h.stateDir, { recursive: true, mode: 0o700 });
   await fs.writeFile(join(h.stateDir, 'setup.json'), JSON.stringify({ identity: 'clawser-setup-v1' }), { mode: 0o600 });
-  await assert.rejects(runClawser(['setup'], h.deps), /unowned|ownership|receipt/);
+  await assert.rejects(runClawser(['setup', '--cdp'], h.deps), /unowned|ownership|receipt/);
   assert.equal(h.calls.some(call => call.args.includes('patch')), false);
 });
 
@@ -118,7 +118,7 @@ test('CDP doctor is read only and checks actual mapping and endpoint without Doc
   assert.equal(result.backend, 'cdp');
   assert.equal(result.ok, false);
   await assert.rejects(fs.stat(h.stateDir), { code: 'ENOENT' });
-  await runClawser(['setup'], h.deps);
+  await runClawser(['setup', '--cdp'], h.deps);
   h.calls.length = 0;
   result = await runClawser(['doctor'], h.deps);
   assert.equal(result.ok, true, JSON.stringify(result.checks));
@@ -132,7 +132,7 @@ test('CDP doctor is read only and checks actual mapping and endpoint without Doc
 
 test('CDP doctor detects stopped viewer and invalid public transport without creating state', async t => {
   const h = await harness(t);
-  await runClawser(['setup'], h.deps);
+  await runClawser(['setup', '--cdp'], h.deps);
   const fetch = h.deps.fetch;
   h.deps.fetch = (url, options) => url.includes('/assets/') ? Promise.reject(new Error('ECONNREFUSED')) : fetch(url, options);
   const result = await runClawser(['doctor'], h.deps);
@@ -145,7 +145,7 @@ test('CDP policy arrays and download failures preserve existing config and fail 
   for (const mutate of [h => { h.config.tools = { allow: 'bad' }; }, h => { h.config.tools = { deny: ['browser_handoff'] }; }, h => { h.config.plugins = { allow: [7] }; }, h => { const fetch = h.deps.fetch; h.deps.fetch = (url, options) => url === ARTIFACTS.cloudflared.url ? new Response('corrupt') : fetch(url, options); }]) {
     const h = await harness(t); mutate(h);
     const before = structuredClone(h.config);
-    await assert.rejects(runClawser(['setup'], h.deps), /allowlist|policy|checksum/);
+    await assert.rejects(runClawser(['setup', '--cdp'], h.deps), /allowlist|policy|checksum/);
     assert.deepEqual(h.config, before);
     await assert.rejects(fs.stat(h.stateDir), { code: 'ENOENT' });
   }
@@ -159,25 +159,25 @@ test('CDP uses trusted current host invocation for reads, patch and reload', asy
     assert.equal(args[0], '/trusted/openclaw.mjs');
     return run('openclaw', args.slice(1), options);
   };
-  assert.equal((await runClawser(['setup'], h.deps)).ok, true);
+  assert.equal((await runClawser(['setup', '--cdp'], h.deps)).ok, true);
   assert.equal(h.calls.filter(call => call.args.includes('patch')).length, 2);
 });
 
 test('CDP refuses a changed or non-executable pinned binary without replacing it', async t => {
   const h = await harness(t);
-  await runClawser(['setup'], h.deps);
+  await runClawser(['setup', '--cdp'], h.deps);
   const path = join(h.stateDir, 'bin/cloudflared');
   await fs.chmod(path, 0o600);
-  await assert.rejects(runClawser(['setup'], h.deps), /executable/);
+  await assert.rejects(runClawser(['setup', '--cdp'], h.deps), /executable/);
   await fs.chmod(path, 0o700);
   await fs.writeFile(path, 'changed');
-  await assert.rejects(runClawser(['setup'], h.deps), /changed/);
+  await assert.rejects(runClawser(['setup', '--cdp'], h.deps), /changed/);
   assert.equal(await fs.readFile(path, 'utf8'), 'changed');
 });
 
 test('CDP viewer port validation does not reserve unused desktop default ports', async t => {
   const h = await harness(t);
-  const result = await runClawser(['setup', '--dry-run', '--port', '18812'], h.deps);
+  const result = await runClawser(['setup', '--cdp', '--dry-run', '--port', '18812'], h.deps);
   assert.equal(result.patch.plugins.entries['browser-handoff'].config.port, 18812);
 });
 
@@ -202,12 +202,12 @@ for (const window of ['before publication', 'after publication', 'before chmod',
         return result;
       },
     };
-    await assert.rejects(runClawser(['setup'], h.deps), /injected EIO/);
+    await assert.rejects(runClawser(['setup', '--cdp'], h.deps), /injected EIO/);
     const before = JSON.parse(await fs.readFile(marker, 'utf8'));
     assert.equal(before.pendingBinaryDigest ?? before.binaryDigest, h.deps.artifacts.cloudflared.sha256);
     const existing = await fs.stat(binary).catch(error => { if (error.code !== 'ENOENT') throw error; });
     h.deps.fs = fs;
-    assert.equal((await runClawser(['setup'], h.deps)).ok, true);
+    assert.equal((await runClawser(['setup', '--cdp'], h.deps)).ok, true);
     const after = JSON.parse(await fs.readFile(marker, 'utf8'));
     assert.equal(after.ownerId, before.ownerId);
     assert.equal(after.binaryDigest, h.deps.artifacts.cloudflared.sha256);
@@ -220,24 +220,24 @@ for (const window of ['before publication', 'after publication', 'before chmod',
 
 test('CDP refuses a binary without durable installation intent even when its checksum is pinned', async t => {
   const h = await harness(t);
-  await runClawser(['setup'], h.deps);
+  await runClawser(['setup', '--cdp'], h.deps);
   const marker = join(h.stateDir, 'setup.json');
   const saved = JSON.parse(await fs.readFile(marker, 'utf8'));
   delete saved.binaryDigest;
   await fs.writeFile(marker, JSON.stringify(saved));
-  await assert.rejects(runClawser(['setup'], h.deps), /unowned/);
+  await assert.rejects(runClawser(['setup', '--cdp'], h.deps), /unowned/);
 });
 
 test('CDP refuses changed pending installation bytes and doctor never repairs executable permissions', async t => {
   const h = await harness(t), binary = join(h.stateDir, 'bin/cloudflared');
   h.deps.fs = { ...fs, chmod: async () => { throw new Error('interrupted chmod'); } };
-  await assert.rejects(runClawser(['setup'], h.deps), /interrupted chmod/);
+  await assert.rejects(runClawser(['setup', '--cdp'], h.deps), /interrupted chmod/);
   h.deps.fs = fs;
   assert.equal((await fs.stat(binary)).mode & 0o777, 0o600);
   assert.equal((await runClawser(['doctor'], h.deps)).ok, false);
   assert.equal((await fs.stat(binary)).mode & 0o777, 0o600);
   await fs.writeFile(binary, 'unexpected contents');
-  await assert.rejects(runClawser(['setup'], h.deps), /unowned or changed/);
+  await assert.rejects(runClawser(['setup', '--cdp'], h.deps), /unowned or changed/);
   assert.equal(await fs.readFile(binary, 'utf8'), 'unexpected contents');
 });
 
@@ -264,12 +264,12 @@ test('CDP syncs installation intent before publication and binary before complet
       return fs.rename(source, target);
     },
   };
-  assert.equal((await runClawser(['setup'], h.deps)).ok, true);
+  assert.equal((await runClawser(['setup', '--cdp'], h.deps)).ok, true);
 });
 
 test('CDP doctor reports the selected connection identity even when the endpoint is unavailable', async t => {
   const h = await harness(t);
-  await runClawser(['setup'], h.deps);
+  await runClawser(['setup', '--cdp'], h.deps);
   h.config.browser.profiles.personal.cdpUrl = 'http://127.0.0.1:9444';
   const result = await runClawser(['doctor'], h.deps);
   assert.equal(result.profile, 'personal');
@@ -281,7 +281,7 @@ test('CDP doctor reports the selected connection identity even when the endpoint
 test('CDP first setup refuses an occupied viewer port before downloads, state or configuration changes', async t => {
   const h = await harness(t), original = structuredClone(h.config);
   h.deps.isPortFree = async port => { assert.equal(port, 18796); return false; };
-  await assert.rejects(runClawser(['setup'], h.deps), /[Vv]iewer port.*unowned/);
+  await assert.rejects(runClawser(['setup', '--cdp'], h.deps), /[Vv]iewer port.*unowned/);
   assert.deepEqual(h.config, original);
   await assert.rejects(fs.stat(h.stateDir), { code: 'ENOENT' });
   assert.equal(h.calls.some(call => call.args.includes('patch') || call.args[0] === ARTIFACTS.cloudflared.url), false);
@@ -289,25 +289,25 @@ test('CDP first setup refuses an occupied viewer port before downloads, state or
 
 test('CDP repeated setup accepts its healthy configured viewer and refuses a different busy port', async t => {
   const h = await harness(t);
-  await runClawser(['setup'], h.deps);
+  await runClawser(['setup', '--cdp'], h.deps);
   h.deps.isPortFree = async () => false;
-  assert.equal((await runClawser(['setup'], h.deps)).ok, true);
+  assert.equal((await runClawser(['setup', '--cdp'], h.deps)).ok, true);
   const original = structuredClone(h.config);
-  await assert.rejects(runClawser(['setup', '--port', '19999'], h.deps), /[Vv]iewer port.*unowned/);
+  await assert.rejects(runClawser(['setup', '--cdp', '--port', '19999'], h.deps), /[Vv]iewer port.*unowned/);
   assert.deepEqual(h.config, original);
 });
 
 test('CDP setup and doctor accept an upgrade installed into a different plugin directory', async t => {
   const h = await harness(t);
-  await runClawser(['setup'], h.deps);
+  await runClawser(['setup', '--cdp'], h.deps);
   // Earlier releases recorded the package directory. Each Git upgrade moves,
   // because the install directory is a hash of the tagged spec.
   const legacy = JSON.parse(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8'));
   await fs.writeFile(join(h.stateDir, 'setup.json'), JSON.stringify({ ...legacy, packageDir: h.root }) + '\n', { mode: 0o600 });
   h.deps.packageDir = join(h.root, 'git-upgraded/repo');
   h.deps.isPortFree = async () => false;
-  assert.equal((await runClawser(['setup', '--dry-run'], h.deps)).ok, true);
-  assert.equal((await runClawser(['setup'], h.deps)).ok, true);
+  assert.equal((await runClawser(['setup', '--cdp', '--dry-run'], h.deps)).ok, true);
+  assert.equal((await runClawser(['setup', '--cdp'], h.deps)).ok, true);
   const doctor = await runClawser(['doctor'], h.deps);
   assert.equal(doctor.checks.find(row => row.name === 'ownership')?.ok, true);
   const receipt = JSON.parse(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8'));
@@ -316,12 +316,12 @@ test('CDP setup and doctor accept an upgrade installed into a different plugin d
 
 test('CDP repeat setup can repair public transport failure through its healthy owned local viewer', async t => {
   const h = await harness(t);
-  await runClawser(['setup'], h.deps);
+  await runClawser(['setup', '--cdp'], h.deps);
   h.deps.isPortFree = async () => false;
   const fetch = h.deps.fetch;
   h.deps.fetch = (url, options) => url.startsWith('https://fixture.trycloudflare.com/') ? Promise.reject(new Error('Public transport unavailable')) : fetch(url, options);
   h.calls.length = 0;
-  assert.equal((await runClawser(['setup'], h.deps)).ok, true);
+  assert.equal((await runClawser(['setup', '--cdp'], h.deps)).ok, true);
   assert.ok(h.calls.some(call => call.args[0] === 'plugins' && call.args[1] === 'reload'));
   const result = await runClawser(['doctor'], h.deps);
   assert.equal(result.ok, false);
@@ -330,7 +330,7 @@ test('CDP repeat setup can repair public transport failure through its healthy o
   h.config.plugins.entries['browser-handoff'].config.cloudflare.binaryPath = '/unowned/cloudflared';
   const original = structuredClone(h.config);
   h.calls.length = 0;
-  await assert.rejects(runClawser(['setup'], h.deps), /[Vv]iewer port.*unowned/);
+  await assert.rejects(runClawser(['setup', '--cdp'], h.deps), /[Vv]iewer port.*unowned/);
   assert.deepEqual(h.config, original);
   assert.equal(h.calls.some(call => call.args.includes('patch') || call.args.includes('reload')), false);
 });
@@ -341,14 +341,14 @@ test('CDP setup does not report configured when reload leaves the new generation
   h.deps.now = () => time;
   h.deps.sleep = async ms => { time += ms; };
   h.deps.readActivationDiagnostic = async () => undefined;
-  await assert.rejects(runClawser(['setup'], h.deps), /activation.*pending|awaiting.*commit/i);
+  await assert.rejects(runClawser(['setup', '--cdp'], h.deps), /activation.*pending|awaiting.*commit/i);
   assert.equal(h.logs.some(line => line.startsWith('Clawser is configured')), false);
   assert.ok(time >= 30_000 && time <= 31_000);
 });
 
 test('CDP doctor cannot report ready from a viewer alone when Gateway activation is unavailable', async t => {
   const h = await harness(t);
-  await runClawser(['setup'], h.deps);
+  await runClawser(['setup', '--cdp'], h.deps);
   h.deps.readActivationDiagnostic = async () => undefined;
   const result = await runClawser(['doctor'], h.deps);
   assert.equal(result.ok, false);
@@ -368,7 +368,7 @@ test('CDP setup waits for local active generation while public warming remains e
     if (args[0] === 'plugins' && args[1] === 'reload') await h.activation.publish({ phase: 'awaiting-commit', publicTransport: 'warming' });
     return result;
   };
-  const result = await runClawser(['setup'], h.deps);
+  const result = await runClawser(['setup', '--cdp'], h.deps);
   assert.equal(waits, 2);
   assert.equal(result.activation.phase, 'active');
   assert.equal(result.activation.publicTransport, 'warming');

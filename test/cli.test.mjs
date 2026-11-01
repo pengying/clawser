@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { registerClawserCli } from '../src/cli.mjs';
 import { createPlugin } from '../index.mjs';
+import { runClawser } from '../src/setup.mjs';
 
 class Command {
   children = new Map();
@@ -21,8 +22,38 @@ test('CLI registration is inert and forwards setup options without shell parsing
   const program = new Command();
   await registrar({ program });
   const setup = program.children.get('clawser').children.get('setup');
-  await setup.callback({ stateDir: '/tmp/a directory', browserProfile: 'demo', port: '19510', cdpPort: '19511', vncPort: '59512', containerName: 'demo-browser', novnc: true, dryRun: true, defaultProfile: false });
-  assert.deepEqual(received, ['setup', '--state-dir', '/tmp/a directory', '--browser-profile', 'demo', '--port', '19510', '--cdp-port', '19511', '--vnc-port', '59512', '--container-name', 'demo-browser', '--novnc', '--dry-run', '--no-default-profile']);
+  await setup.callback({ stateDir: '/tmp/a directory', browserProfile: 'demo', port: '19510', cdp: true, novnc: true, dryRun: true, yes: true, migrateCookies: false });
+  assert.deepEqual(received, ['setup', '--state-dir', '/tmp/a directory', '--browser-profile', 'demo', '--port', '19510', '--cdp', '--novnc', '--dry-run', '--yes', '--no-migrate-cookies']);
+  await setup.callback({ migrateCookies: true });
+  assert.deepEqual(received, ['setup']);
+});
+
+test('CLI registers the 0.7.0 options and drops the Docker desktop ones', async () => {
+  let registrar;
+  class Recording extends Command {
+    options = []; descriptionText = '';
+    command(name) { const child = new Recording(); this.children.set(name, child); return child; }
+    description(text) { this.descriptionText = text; return this; }
+    option(flags) { this.options.push(flags.split(' ')[0]); return this; }
+  }
+  registerClawserCli({ rootDir: '/installed/clawser', registerCli(fn) { registrar = fn; } }, { runClawser: async () => ({ ok: true }) });
+  const program = new Recording();
+  await registrar({ program });
+  const root = program.children.get('clawser');
+  const setup = root.children.get('setup'), doctor = root.children.get('doctor');
+  assert.equal(setup.descriptionText, 'Give the agent its own browser on a private virtual screen (noVNC); --cdp keeps the CDP viewer');
+  assert.equal(doctor.descriptionText, 'Check the configured browser backend without changing it');
+  assert.deepEqual(setup.options.sort(), ['--browser-profile', '--cdp', '--dry-run', '--no-migrate-cookies', '--novnc', '--port', '--state-dir', '--yes']);
+  assert.deepEqual(doctor.options.sort(), ['--browser-profile', '--cdp', '--novnc', '--port', '--state-dir']);
+});
+
+test('help text says noVNC is the default and --cdp keeps the one-tab viewer', async () => {
+  const logs = [];
+  const result = await runClawser(['help'], { log: message => logs.push(message), run: async () => assert.fail('help runs nothing') });
+  assert.deepEqual(result, { ok: true, command: 'help' });
+  const text = logs.join('\n');
+  assert.ok(text.includes('Usage: clawser <setup|doctor> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--cdp] [--no-migrate-cookies]'), text);
+  assert.ok(text.includes('Default setup gives the agent its own browser on a private virtual screen that you view over noVNC. --cdp keeps the one-tab CDP viewer.'), text);
 });
 
 test('CLI metadata and setup-only discovery never access runtime or register services', () => {

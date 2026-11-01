@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { runClawser, ARTIFACTS } from '../src/setup.mjs';
+import { hostWorld } from './host-fixture.mjs';
 import { HOST_DEPS, installHostDeps, planHostDeps, smokeHostDeps, verifyHostDeps } from '../src/host-deps.mjs';
 import { activationFixture } from './setup-activation-fixture.mjs';
 
@@ -24,7 +25,8 @@ const helpers = {
 };
 
 async function world(t, { system = [], brew = [], os = debian, smoke = {} } = {}) {
-  const root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'clawser-host-deps-')));
+  // A /tmp root keeps setup's socket paths under 107 bytes on macOS too.
+  const root = await fs.realpath(await fs.mkdtemp('/tmp/clawser-host-deps-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const systemBin = join(root, 'usr/bin'), brewBin = join(root, 'brew/bin'), cellar = join(root, 'brew/Cellar');
   await fs.mkdir(systemBin, { recursive: true });
@@ -297,78 +299,59 @@ test('the real smoke test reports a binary that exits instead of serving', async
   assert.match(early.Xvfb, /XKB: Failed to compile keymap/);
 });
 
+
+// Host mode through runClawser with the real resolver over this world's binaries.
 async function setupHarness(t, options) {
   const w = await world(t, options);
-  const root = w.root, stateDir = join(root, 'clawser'), packageDir = join(root, 'package');
-  for (const name of ['bin', 'runtime/desktop']) await fs.mkdir(join(packageDir, name), { recursive: true });
-  for (const name of ['index.mjs', 'bin/desktop-controller.mjs', 'runtime/desktop/Dockerfile', 'runtime/desktop/chromium-seccomp.json']) await fs.writeFile(join(packageDir, name), 'fixture');
-  await fs.mkdir(join(root, 'archive/noVNC-1.7.0/core'), { recursive: true });
-  await fs.writeFile(join(root, 'archive/noVNC-1.7.0/core/rfb.js'), 'export default class RFB {}');
-  await execute('tar', ['-czf', join(root, 'novnc.tgz'), '-C', join(root, 'archive'), 'noVNC-1.7.0']);
-  const binary = Buffer.from('cloudflared'), archive = await fs.readFile(join(root, 'novnc.tgz'));
-  const config = {}, logs = [];
-  let serviceActive = false, servicePath = '';
-  const hostRun = w.d.run;
-  const deps = {
-    ...w.d, packageDir, platform: 'linux', arch: 'x64', nodeVersion: '24.18.0', execPath: '/usr/bin/node', hostDependencies: true,
-    env: { ...w.d.env, XDG_CONFIG_HOME: join(root, 'config') },
-    artifacts: { cloudflared: { ...ARTIFACTS.cloudflared, sha256: digest(binary) }, noVnc: { ...ARTIFACTS.noVnc, sha256: digest(archive) } },
-    log: message => logs.push(message), isPortFree: async () => true, sleep: async () => {},
-    controllerHealth: async () => ({ ready: true, profile: 'handoff', cdpUrl: 'http://127.0.0.1:18812', recoveryRequired: false }),
-    fetch: async url => new Response(url === ARTIFACTS.cloudflared.url ? binary : archive),
-    run: async (command, args, opts = {}) => {
-      if (command === 'tar') { w.calls.push({ command, args, options: opts }); return (await execute(command, args)).stdout; }
-      if (command === 'openclaw') {
-        w.calls.push({ command, args, options: opts });
-        if (args[0] === '--version') return 'OpenClaw 2026.10.4';
-        if (args[1] === 'get') return JSON.stringify(config[args[2]] ?? {});
-        if (args[1] === 'patch') { if (!args.includes('--dry-run')) Object.assign(config, structuredClone({ ...config, ...JSON.parse(opts.input) })); return ''; }
-        if (args[0] === 'plugins') { await activation.publish(); return ''; }
-      }
-      if (command === 'docker') { w.calls.push({ command, args, options: opts }); if (args.includes('inspect') && !args.includes('image')) throw new Error('No such object'); return args.includes('image') ? 'sha256:' + 'a'.repeat(64) : '27.0.0'; }
-      if (command === 'systemctl' || command === '/usr/bin/flock') {
-        w.calls.push({ command, args, options: opts });
-        if (args.includes('show')) return `LoadState=${servicePath ? 'loaded' : 'not-found'}\nFragmentPath=${servicePath}\nActiveState=${serviceActive ? 'active' : 'inactive'}\n`;
-        if (args.includes('enable')) { serviceActive = true; servicePath = join(root, 'config/systemd/user', args.at(-1)); }
-        return '';
-      }
-      return hostRun(command, args, opts);
-    },
-  };
-  const activation = activationFixture(config, deps);
-  return { ...w, stateDir, deps, logs, args: ['setup', '--novnc', '--state-dir', stateDir], doctor: ['doctor', '--novnc', '--state-dir', stateDir] };
+  const h = await hostWorld(t, { root: w.root, stateName: 'clawser', run: w.d.run, calls: w.calls, deps: {
+    hostResolver: undefined, env: { ...w.d.env, XDG_CONFIG_HOME: join(w.root, 'config') },
+    hostPaths: w.d.hostPaths, osReleasePath: w.d.osReleasePath, hostSmoke: w.d.hostSmoke,
+  } });
+  return { ...w, ...h, doctor: ['doctor', '--state-dir', h.stateDir] };
 }
 
-test('noVNC setup leaves host dependencies off by default: no resolver, receipt entry or doctor check', async t => {
-  const h = await setupHarness(t, { os: fedora });
-  delete h.deps.hostDependencies;
-  h.deps.hostResolver = { plan: () => assert.fail('resolver planned'), install: () => assert.fail('resolver installed'), verify: () => assert.fail('resolver verified'), describe: () => assert.fail('resolver described') };
-  assert.equal((await runClawser([...h.args, '--dry-run'], h.deps)).hostDependencies, undefined);
-  assert.equal((await runClawser(h.args, h.deps)).ok, true, 'a host with no display binaries still installs the Docker desktop');
-  assert.equal('hostDeps' in JSON.parse(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8')), false);
+test('host setup always resolves host dependencies', async t => {
+  const h = await setupHarness(t, { system: all, os: fedora });
+  const dry = await runClawser([...h.args, '--dry-run'], h.deps);
+  assert.equal(dry.ok, true);
+  assert.ok(h.calls.some(call => call.command === join(h.systemBin, 'Xvfb') && call.args[0] === '-help'), 'dry-run probes the host binaries');
+  assert.equal(h.smokes.length, 0, 'dry-run must not start processes');
+  assert.equal((await runClawser(h.args, h.deps)).ok, true);
+  const receipt = JSON.parse(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8'));
+  assert.deepEqual(Object.keys(receipt.hostDeps.binaries), ['Xvfb', 'x11vnc', 'openbox', 'python3']);
+  assert.equal(h.smokes.length, 1);
+  assert.match(await fs.readFile(join(h.unitDir, h.names.display), 'utf8'), new RegExp(`ExecStart="${join(h.systemBin, 'Xvfb')}"`));
+  assert.equal(JSON.parse(await fs.readFile(join(h.stateDir, 'state/runtime/supervisor.json'), 'utf8')).x11vnc, join(h.systemBin, 'x11vnc'));
   const doctor = await runClawser(h.doctor, h.deps);
   assert.equal(doctor.ok, true, JSON.stringify(doctor.checks));
-  assert.equal(doctor.checks.some(row => row.name === 'host dependencies' || row.name === 'window manager'), false);
-  assert.equal(h.calls.some(call => /x11vnc|Xvfb|openbox|brew|dpkg/.test(call.command)), false);
-  assert.equal(h.smokes.length, 0);
+  assert.ok(doctor.checks.some(row => row.name === 'host dependencies' && row.ok));
+  assertNoSudo(h.calls);
 });
 
-test('with host dependencies on, setup records them in its private receipt before building, and doctor re-checks them', async t => {
+test('setup records host dependencies in its private receipt before starting services, and doctor re-checks them', async t => {
   const h = await setupHarness(t, { system: ['x11vnc', 'python3'], brew: ['xorg-server'], os: fedora });
   const dry = await runClawser([...h.args, '--dry-run'], h.deps);
-  assert.ok(dry.hostDependencies.some(line => /^Xvfb: .*\(brew 21\.1\.21\)$/.test(line)));
-  assert.match(dry.warnings.join('\n'), /openbox is unavailable.*sudo dnf install openbox/);
+  assert.match(dry.plan.join('\n'), /Warning: openbox is unavailable.*sudo dnf install openbox/);
   assert.equal(h.calls.some(call => call.args[0] === 'install'), false, 'dry-run must not install');
   assert.equal(h.smokes.length, 0, 'dry-run must not start processes');
   await assert.rejects(fs.lstat(h.stateDir), { code: 'ENOENT' });
+  const run = h.deps.run;
+  let recordedAtFirstStart;
+  h.deps.run = async (command, args, options) => {
+    if (command === 'systemctl' && args[1] === 'enable' && !recordedAtFirstStart) recordedAtFirstStart = JSON.parse(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8')).hostDeps ?? null;
+    return run(command, args, options);
+  };
   const result = await runClawser(h.args, h.deps);
+  h.deps.run = run;
   assert.equal(result.ok, true);
   assert.match(result.warnings.join('\n'), /openbox is unavailable/);
+  assert.equal(result.units.includes(h.names.windowManager), false);
   const receipt = JSON.parse(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8'));
   assert.deepEqual(Object.keys(receipt.hostDeps), ['binaries']);
   assert.deepEqual(Object.keys(receipt.hostDeps.binaries), ['Xvfb', 'x11vnc', 'python3']);
   assert.equal(receipt.hostDeps.binaries.Xvfb.source, 'brew');
   assert.equal(h.smokes.length, 1);
+  assert.deepEqual(recordedAtFirstStart, receipt.hostDeps, 'host dependencies are recorded before any service starts');
   h.calls.length = 0;
   assert.equal((await runClawser(h.args, h.deps)).ok, true);
   assert.equal(h.calls.some(call => call.command.endsWith('/brew')), false, 'rerun must reuse the recorded binaries');
@@ -393,15 +376,15 @@ test('with host dependencies on, setup records them in its private receipt befor
   assertNoSudo(h.calls);
 });
 
-test('with host dependencies on, a missing required binary fails noVNC setup before any state, download or build', async t => {
+test('a missing required binary fails host setup before any state, download or service', async t => {
   const h = await setupHarness(t, { os: debian });
-  await assert.rejects(runClawser(h.args, h.deps), /host dependencies: Missing Xvfb, x11vnc, python3\. .*: sudo apt install xvfb x11vnc openbox python3$/);
+  await assert.rejects(runClawser(h.args, h.deps), /^Error: Missing Xvfb, x11vnc, python3\. .*: sudo apt install xvfb x11vnc openbox python3$/);
   await assert.rejects(fs.lstat(h.stateDir), { code: 'ENOENT' });
-  assert.equal(h.calls.some(call => call.command === 'docker' && call.args.includes('build')), false);
+  assert.deepEqual(h.mutations(), []);
   assertNoSudo(h.calls);
 });
 
-test('default CDP setup and doctor never call the host dependency resolver, even with host dependencies on', async t => {
+test('--cdp setup and doctor never call the host dependency resolver', async t => {
   const root = await fs.realpath(await fs.mkdtemp(join(tmpdir(), 'clawser-host-cdp-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const config = { browser: { defaultProfile: 'personal', profiles: { personal: { cdpUrl: 'http://127.0.0.1:9333', attachOnly: true, driver: 'openclaw', engine: 'chromium' } } } };
@@ -410,7 +393,7 @@ test('default CDP setup and doctor never call the host dependency resolver, even
   const deps = {
     fs, homeDir: root, env: { OPENCLAW_STATE_DIR: join(root, 'openclaw') }, packageDir: root, platform: 'linux', arch: 'x64', nodeVersion: '24.18.0', log: () => {},
     artifacts: { ...ARTIFACTS, cloudflared: { ...ARTIFACTS.cloudflared, sha256: digest(binary) } }, isPortFree: async () => true,
-    hostDependencies: true, hostResolver: { plan: forbidden, install: forbidden, verify: forbidden, describe: forbidden }, hostSmoke: forbidden,
+    hostResolver: { plan: forbidden, install: forbidden, verify: forbidden, describe: forbidden }, hostSmoke: forbidden,
     fetch: async url => {
       if (url === ARTIFACTS.cloudflared.url) return new Response(binary);
       if (url.endsWith('/json/version')) return Response.json({ Browser: 'Chrome/149', webSocketDebuggerUrl: 'ws://127.0.0.1:9333/devtools/browser/test' });
@@ -432,8 +415,8 @@ test('default CDP setup and doctor never call the host dependency resolver, even
     },
   };
   const activation = activationFixture(config, deps);
-  assert.equal((await runClawser(['setup', '--dry-run'], deps)).backend, 'cdp');
-  assert.equal((await runClawser(['setup'], deps)).ok, true);
+  assert.equal((await runClawser(['setup', '--cdp', '--dry-run'], deps)).backend, 'cdp');
+  assert.equal((await runClawser(['setup', '--cdp'], deps)).ok, true);
   const doctor = await runClawser(['doctor'], deps);
   assert.equal(doctor.backend, 'cdp');
   assert.equal(doctor.checks.some(row => row.name === 'host dependencies'), false);
