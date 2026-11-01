@@ -5,7 +5,7 @@ export const SNAP_MESSAGE = "Snap Chromium can't use the hidden folder where Cla
 const NOT_FOUND = 'No Google Chrome or Chromium found. Install Google Chrome, then rerun setup.';
 const NAMES = ['google-chrome-stable', 'google-chrome', 'chromium', 'chromium-browser'];
 const OPT_CHROME = '/opt/google/chrome/chrome';
-const procRoot = d => d.procRoot ?? '/proc';
+export const procRoot = d => d.procRoot ?? '/proc';
 
 async function executable(path, d) {
   try { const info = await d.fs.stat(path); return info.isFile() && (info.mode & 0o111) !== 0; }

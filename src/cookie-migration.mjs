@@ -40,11 +40,21 @@ export async function importCookies(cdpUrl, path, d) {
   // A JSON syntax error quotes the text around it, which would put cookie values in the message.
   try { cookies = JSON.parse(await d.fs.readFile(path, 'utf8')); } catch { cookies = undefined; }
   if (!Array.isArray(cookies)) throw new Error('The saved cookies could not be read');
+  let count = 0;
   await withBrowser(cdpUrl, d, async cdp => {
-    for (let i = 0; i < cookies.length; i += BATCH) await cdp.send('Storage.setCookies', { cookies: cookies.slice(i, i + BATCH).map(cookieParam) });
+    const set = params => cdp.send('Storage.setCookies', { cookies: params }).then(() => true, rejected);
+    for (let i = 0; i < cookies.length; i += BATCH) {
+      const batch = cookies.slice(i, i + BATCH).map(cookieParam);
+      if (await set(batch)) { count += batch.length; continue; }
+      // The browser rejects a whole batch for one bad cookie. Set the rest one at a time and skip the bad ones.
+      for (const param of batch) if (await set([param])) count++;
+    }
   });
-  return { count: cookies.length };
+  return { count };
 }
+
+// Only a protocol error rejects a cookie. A dropped connection or a timeout fails the import.
+const rejected = error => { if (error.definitive) return false; throw error; };
 
 export async function closeBrowser(cdpUrl, d) {
   await withBrowser(cdpUrl, d, async cdp => {
@@ -53,18 +63,30 @@ export async function closeBrowser(cdpUrl, d) {
   });
 }
 
+// Polls the endpoint until `done(up)` is true. Returns false when the poll count or the clock runs out first.
+async function poll(cdpUrl, d, timeoutMs, done) {
+  const polls = Math.ceil(timeoutMs / POLL_MS), deadline = d.now() + timeoutMs;
+  for (let attempt = 0; attempt < polls; attempt++) {
+    if (done(await browserEndpoint(cdpUrl, d).then(() => true, () => false))) return true;
+    if (attempt === polls - 1 || d.now() >= deadline) return false;
+    await d.sleep(POLL_MS);
+  }
+  return false;
+}
+
+const seconds = timeoutMs => Math.ceil(timeoutMs / 1000);
+
+/** Waits for the browser at `cdpUrl` to answer on its DevTools port. */
+export async function waitForBrowser(cdpUrl, d, { timeoutMs = 60_000 } = {}) {
+  if (!await poll(cdpUrl, d, timeoutMs, up => up)) throw new Error(`Clawser's browser did not answer within ${seconds(timeoutMs)} seconds.`);
+}
+
 /** Closes the browser so it saves its cookies, then waits for its service to start it again. */
 export async function flushCookies(cdpUrl, d, { timeoutMs = 60_000 } = {}) {
   await closeBrowser(cdpUrl, d);
-  const polls = Math.ceil(timeoutMs / POLL_MS);
   let wentAway = false;
-  for (let poll = 0; poll < polls; poll++) {
-    const up = await browserEndpoint(cdpUrl, d).then(() => true, () => false);
-    if (!up) wentAway = true;
-    else if (wentAway) return;
-    if (poll < polls - 1) await d.sleep(POLL_MS);
-  }
-  throw new Error(`The browser did not come back within ${Math.ceil(timeoutMs / 1000)} seconds after saving cookies.`);
+  const back = up => { if (!up) wentAway = true; return up && wentAway; };
+  if (!await poll(cdpUrl, d, timeoutMs, back)) throw new Error(`The browser did not come back within ${seconds(timeoutMs)} seconds after saving cookies.`);
 }
 
 /** Returns how many cookies the browser at `cdpUrl` holds. */

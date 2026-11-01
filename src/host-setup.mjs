@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, join } from 'node:path';
 import { captureSetupActivation, waitForSetupActivation } from './setup-activation.mjs';
-import { chromeArgs, renderUnits, unitNames } from './host-units.mjs';
+import { cdpUrlFor, chromeArgs, renderUnits, unitNames } from './host-units.mjs';
 import { freeDisplay, xauthorityEntry } from './host-display.mjs';
 import { classifyOwner, findBrowserBinary, portHolder } from './host-browser.mjs';
 import { describeHostPlan, installHostDeps, planHostDeps, verifyHostDeps } from './host-deps.mjs';
@@ -15,7 +15,6 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const json = value => JSON.stringify(value, null, 2) + '\n';
 const fieldsMatch = (current, wanted) => object(current) && Object.entries(wanted).every(([key, value]) => current[key] === value) && Object.keys(current).every(key => own(wanted, key));
-const cdpUrlFor = port => 'http://127.0.0.1:' + port;
 const profileConfig = cdpPort => ({ cdpUrl: cdpUrlFor(cdpPort), driver: 'openclaw', engine: 'chromium', attachOnly: true });
 const ROLES = ['display', 'windowManager', 'browser', 'supervisor', 'controller'];
 const CDP_PORTS = Array.from({ length: 10 }, (_, i) => 18820 + i);
@@ -327,21 +326,18 @@ export async function applyHost(plan, o, d, h) {
     }
     if (unitsWritten) await d.run('systemctl', ['--user', 'daemon-reload']);
     // Every write lands before anything of the person's stops. A failed write never leaves them without a browser.
-    const tempDir = existing && plan.cookies?.migrate ? await d.fs.mkdtemp(join(o.stateDir, 'cookies-')) : undefined;
-    try {
-      const exported = existing ? await takeOver({ plan, tempDir, saved, stateDir: o.stateDir, save: () => save(saved, p, d, h), after }, d, h) : undefined;
-      for (const name of ROLES.map(role => p.names[role])) {
-        if (plan.start.includes(name)) await d.run('systemctl', ['--user', 'enable', '--now', name]);
-        else if (plan.restart.includes(name)) await d.run('systemctl', ['--user', 'restart', name]);
-      }
-      let healthError;
-      for (let attempt = 0; attempt < 120; attempt++) {
-        try { assertHealth(await d.controllerHealth(p.socket), plan.cdpPort, plan.profile); healthError = undefined; break; }
-        catch (error) { healthError = error; if (attempt !== 119) await d.sleep(250); }
-      }
-      if (healthError) throw healthError;
-      if (exported) { saved.cookieMigration = plan.cookieMigration = await moveCookies(plan, exported, d); await save(saved, p, d, h); }
-    } finally { if (tempDir) await d.fs.rm(tempDir, { recursive: true, force: true }); }
+    const exported = existing ? await takeOver({ plan, saved, stateDir: o.stateDir, save: () => save(saved, p, d, h), after }, d, h) : undefined;
+    for (const name of ROLES.map(role => p.names[role])) {
+      if (plan.start.includes(name)) await d.run('systemctl', ['--user', 'enable', '--now', name]);
+      else if (plan.restart.includes(name)) await d.run('systemctl', ['--user', 'restart', name]);
+    }
+    let healthError;
+    for (let attempt = 0; attempt < 120; attempt++) {
+      try { assertHealth(await d.controllerHealth(p.socket), plan.cdpPort, plan.profile); healthError = undefined; break; }
+      catch (error) { healthError = error; if (attempt !== 119) await d.sleep(250); }
+    }
+    if (healthError) throw healthError;
+    if (exported) { saved.cookieMigration = plan.cookieMigration = await moveCookies(plan, exported, after, d); await save(saved, p, d, h); }
     // Re-read immediately before the validated merge so concurrent config edits are preserved.
     const patch = await hostConfigPatch(o, p, saved, d, h, { convertingFrom: plan.convertedFrom, cdpPort: plan.cdpPort, profile: plan.profile, option: plan.option });
     const intended = { browser: await h.configSection('browser', d), plugins: await h.configSection('plugins', d) };

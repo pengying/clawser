@@ -6,6 +6,8 @@ export const CLAWSER_CHROME_FLAGS = Object.freeze(['--ozone-platform', '--passwo
 const env = { dollar: false };
 const OWNED_ENV = new Set(['DISPLAY', 'XAUTHORITY', 'WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS']);
 
+export const cdpUrlFor = port => 'http://127.0.0.1:' + port;
+
 export function systemdValue(value, { dollar = true } = {}) {
   value = String(value);
   if (/[\x00-\x1f\x7f]/.test(value)) throw new Error('Service values must contain no control characters');

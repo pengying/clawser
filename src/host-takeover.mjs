@@ -1,8 +1,8 @@
 import { basename, isAbsolute, join } from 'node:path';
 import { resolveHandoffBrowser } from './browser-config.mjs';
-import { SNAP_MESSAGE, classifyOwner, cookieEncryption, displayServices, isSnapBrowser, listenerProcess, portHolder, processInfo } from './host-browser.mjs';
+import { SNAP_MESSAGE, classifyOwner, cookieEncryption, displayServices, isSnapBrowser, listenerProcess, portHolder, procRoot, processInfo } from './host-browser.mjs';
 import { freeDisplay } from './host-display.mjs';
-import { chromeArgs } from './host-units.mjs';
+import { cdpUrlFor, chromeArgs } from './host-units.mjs';
 
 export const conflict = 'Setup arguments conflict with the owned installation; use the original arguments or a new state directory';
 const OWNED_ENV = new Set(['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS']);
@@ -21,7 +21,10 @@ async function replaceableUnit(info, p, d) {
   const owner = classifyOwner(info.cgroup, d.uid);
   if (owner.kind !== 'user-unit') return undefined;
   const unit = await foreignUnit(owner.unit, d);
-  return unit.dropIns && unit.mainPid === info.pid && unit.fragmentPath.startsWith(p.unitDir + '/') ? unit : undefined;
+  if (unit.mainPid !== info.pid || !unit.fragmentPath.startsWith(p.unitDir + '/')) return undefined;
+  // Backups copy every drop-in. A list setup can't read would leave one out.
+  if (!unit.dropIns) throw new Error(`Could not read the drop-in paths of ${unit.unit}; rerun setup after removing quotes or backslashes from their names.`);
+  return unit;
 }
 
 const takeoverEntry = (role, unit) => ({ role, unit: unit.unit, fragmentPath: unit.fragmentPath, dropIns: unit.dropIns, wasEnabled: unit.wasEnabled });
@@ -141,7 +144,6 @@ export async function discoverExisting(o, p, d, h, { expected } = {}) {
 }
 
 const STOP_ORDER = ['browser', 'windowManager', 'display'];
-const procRoot = d => d.procRoot ?? '/proc';
 // The browser stops first, so nothing it needs goes away under it.
 const inStopOrder = takeover => [...takeover].sort((a, b) => STOP_ORDER.indexOf(a.role) - STOP_ORDER.indexOf(b.role));
 // Loaded only for option B. It pulls in ws, which option A never needs.
@@ -188,12 +190,18 @@ async function waitForExit(pid, d) {
 }
 
 /** Option B's steps between daemon-reload and the first start. Records what stopped in `after` and returns the cookie export, if any. */
-export async function takeOver({ plan, tempDir, saved, stateDir, save, after }, d, h) {
+export async function takeOver({ plan, saved, stateDir, save, after }, d, h) {
   const cookies = await cookieModule(d);
-  let exported;
-  if (tempDir) {
+  if (plan.cookies?.migrate) {
+    const tempDir = await d.fs.mkdtemp(join(stateDir, 'cookies-'));
+    let exported;
     try { exported = await cookies.exportCookies(plan.sourceCdpUrl, tempDir, d); }
-    catch (error) { throw new Error(`Could not read cookies from the running browser (${error.message}). Nothing was stopped; rerun setup, or use --no-migrate-cookies.`); }
+    catch (error) {
+      await removeExport(tempDir, d);
+      throw new Error(`Could not read cookies from the running browser (${error.message}). Nothing was stopped; rerun setup, or use --no-migrate-cookies.`);
+    }
+    // Until an import attempt finishes, the export is the only readable copy of the person's logins.
+    after.export = { ...exported, dir: tempDir };
   }
   if (plan.takeover.length) {
     const replaced = await backupUnits(plan.takeover, stateDir, d, h);
@@ -208,19 +216,31 @@ export async function takeOver({ plan, tempDir, saved, stateDir, save, after }, 
     await waitForExit(item.pid, d);
     after.closed = true;
   }
-  return exported;
+  return after.export;
 }
 
-/** Imports an export into Clawser's browser and returns the `cookieMigration` record. A failure is a warning, not an error. */
-export async function moveCookies(plan, exported, d) {
-  const cookies = await cookieModule(d), cdpUrl = 'http://127.0.0.1:' + plan.cdpPort, at = () => new Date(d.now()).toISOString();
+const removeExport = (dir, d) => d.fs.rm(dir, { recursive: true, force: true });
+
+/** Imports an export into Clawser's browser and returns the `cookieMigration` record. A failure is a warning, not an error. Removes the export once the attempt ends. */
+export async function moveCookies(plan, exported, after, d) {
+  const cookies = await cookieModule(d), cdpUrl = cdpUrlFor(plan.cdpPort), at = () => new Date(d.now()).toISOString();
   try {
-    await cookies.importCookies(cdpUrl, exported.path, d);
-    await cookies.flushCookies(cdpUrl, d);
-    return { exported: exported.count, imported: await cookies.countCookies(cdpUrl, d), at: at() };
-  } catch (error) {
-    plan.warnings.push(`Moving cookies failed (${error.message}); sign in again to sites that ask.`);
-    return { exported: exported.count, imported: 0, failed: true, at: at() };
+    let imported;
+    try {
+      // Controller health never checks the browser, and its unit starts before Chrome answers.
+      await cookies.waitForBrowser(cdpUrl, d);
+      ({ count: imported } = await cookies.importCookies(cdpUrl, exported.path, d));
+      await cookies.flushCookies(cdpUrl, d);
+    } catch (error) {
+      plan.warnings.push(`Moving cookies failed (${error.message}); sign in again to sites that ask.`);
+      return { exported: exported.count, imported: 0, failed: true, at: at() };
+    }
+    // The cookies are in. Only the re-count failed.
+    imported = await cookies.countCookies(cdpUrl, d).catch(() => imported);
+    return { exported: exported.count, imported, at: at() };
+  } finally {
+    delete after.export;
+    await removeExport(exported.dir, d);
   }
 }
 
@@ -229,6 +249,7 @@ export function afterTakeover(error, after) {
   const parts = [];
   if (after.stopped.length) parts.push(`Setup already stopped ${after.stopped.join(', ')}; rerun setup to finish. Their unit files are unchanged, with copies in ${after.backup}.`);
   if (after.closed) parts.push('Setup already closed the browser from your desktop session; rerun setup to finish.');
+  if (parts.length && after.export) parts.push('Its cookies are saved and move over when you rerun setup.');
   if (parts.length && error instanceof Error) error.message += ' ' + parts.join(' ');
   return error;
 }
