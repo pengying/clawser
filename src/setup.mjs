@@ -7,7 +7,6 @@ import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { systemdArgument } from './host-units.mjs';
 import { DesktopRpcClient } from './desktop-rpc.mjs';
-import { DesktopRuntime } from '../runtime/desktop/index.mjs';
 import { activationSummary, captureSetupActivation, inspectSetupActivation, logSetupActivation, requireActiveActivation, waitForSetupActivation } from './setup-activation.mjs';
 
 export const ARTIFACTS = Object.freeze({
@@ -267,11 +266,7 @@ async function resources(o, p, saved, d) {
     const item = await inspectDocker([kind, 'inspect', name], d);
     if (item && (!saved || !receipt?.ownerId || item.Labels?.[runtimeLabel] !== receipt.ownerId)) throw new Error('Refusing unowned Docker ' + ''.concat(kind) + ': ' + ''.concat(name));
   }
-  if (container) {
-    if (!saved || !receipt?.ownerId) throw new Error('Refusing unowned Docker container: ' + ''.concat(o.containerName));
-    const runtime = new DesktopRuntime({ name: o.containerName, stateDir: p.runtime, cdpPort: o.cdpPort, vncPort: o.vncPort, run: args => d.run('docker', [dockerHost, ...args]) });
-    await runtime.owned();
-  }
+  if (container && (!saved || !receipt?.ownerId)) throw new Error('Refusing unowned Docker container: ' + ''.concat(o.containerName));
   return container;
 }
 

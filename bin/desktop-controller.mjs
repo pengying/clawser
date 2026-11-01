@@ -2,7 +2,7 @@
 import { lstat, readFile } from 'node:fs/promises';
 import { isAbsolute, resolve, dirname } from 'node:path';
 import { DesktopController } from '../src/desktop-controller.mjs';
-import { DesktopRuntime } from '../runtime/desktop/index.mjs';
+import { HostDesktopRuntime } from '../runtime/desktop/index.mjs';
 import { CloudflareTransport } from '../src/cloudflare-transport.mjs';
 
 // This file is local operator configuration, never an invitation or browser API.
@@ -17,7 +17,7 @@ if(typeof config.stateDir!=='string'||typeof config.profile!=='string')throw new
 const stateDir=fromConfig(config.stateDir);
 const runtimeOptions={...config.runtime,stateDir:config.runtime?.stateDir?fromConfig(config.runtime.stateDir):resolve(stateDir,'runtime')};
 const transportOptions={...config.transport,stateDir:config.transport?.stateDir?fromConfig(config.transport.stateDir):resolve(stateDir,'tunnel')};
-const runtime=new DesktopRuntime(runtimeOptions);
+const runtime=new HostDesktopRuntime(runtimeOptions);
 const transport=new CloudflareTransport(transportOptions);
 const controller=new DesktopController({stateDir,profile:config.profile,runtime,transport,port:config.port??19410,...(config.socketPath?{socketPath:fromConfig(config.socketPath)}:{}),...(config.noVncAssetsDir?{noVncAssetsDir:fromConfig(config.noVncAssetsDir)}:{})});
 await controller.start();

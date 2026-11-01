@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { lstat, readFile } from 'node:fs/promises';
 import { dirname, isAbsolute, resolve } from 'node:path';
-import { DesktopRuntime } from '../runtime/desktop/index.mjs';
+import { HostDesktopRuntime } from '../runtime/desktop/index.mjs';
 import { reconcileDesktop } from '../src/desktop-recovery.mjs';
 
 // Explicit local operator maintenance, after stopping the controller service.
@@ -16,7 +16,7 @@ try {
   if (typeof config.stateDir !== 'string' || typeof config.profile !== 'string') throw new Error();
   const fromConfig = value => isAbsolute(value) ? value : resolve(dirname(configPath), value);
   const stateDir = fromConfig(config.stateDir);
-  const runtime = new DesktopRuntime({ ...config.runtime, stateDir: config.runtime?.stateDir ? fromConfig(config.runtime.stateDir) : resolve(stateDir, 'runtime') });
+  const runtime = new HostDesktopRuntime({ ...config.runtime, stateDir: config.runtime?.stateDir ? fromConfig(config.runtime.stateDir) : resolve(stateDir, 'runtime') });
   code = 'DESKTOP_RECOVERY_FAILED';
   const result = await reconcileDesktop({ stateDir, profile: config.profile, runtime, leaseId,
     ...(config.socketPath ? { socketPath: fromConfig(config.socketPath) } : {}) });

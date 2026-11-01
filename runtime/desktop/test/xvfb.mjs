@@ -28,6 +28,11 @@ export async function startX() {
     dir,
     run: (script, ...args) => execute('python3', [script, ...args], { env }),
     json: async (...args) => JSON.parse((await execute('python3', [proof, ...args], { env })).stdout),
-    async stop() { child.kill(); await new Promise(r => child.once('exit', r)); await fs.rm(dir, { recursive: true, force: true }); },
+    number,
+    pid: child.pid,
+    async stop() {
+      if (child.exitCode === null && child.signalCode === null) { child.kill(); await new Promise(r => child.once('exit', r)); }
+      await fs.rm(dir, { recursive: true, force: true });
+    },
   };
 }

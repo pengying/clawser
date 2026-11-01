@@ -1,12 +1,49 @@
 #!/usr/bin/python3
-"""Single owner for persistent display/browser and bounded disposable input actors."""
-import functools, json, os, re, secrets, signal, socket, subprocess, threading, time, uuid
+"""Host supervisor for the display and browser, with one disposable x11vnc actor per viewer session."""
+import ctypes, functools, json, os, re, secrets, signal, socket, stat, subprocess, sys, threading, time, urllib.parse, urllib.request, uuid
 
 os.umask(0o077)
-GENERATION = str(uuid.uuid4())
-BROWSER_GENERATION = str(uuid.uuid4())
+HERE=os.path.dirname(os.path.abspath(__file__))
+# Bytecode would change the installed package. PYTHONSAFEPATH would hide xproof.
+sys.dont_write_bytecode=True
+sys.path.insert(0,HERE)
+import xproof
+
+CLIPBOARD=os.path.join(HERE,'clipboard.py')
+BOOT=str(uuid.uuid4())
+HEARTBEAT_TIMEOUT_MS=int(os.environ.get('DESKTOP_TEST_HEARTBEAT_TIMEOUT_MS','30000'))
+if not 1000<=HEARTBEAT_TIMEOUT_MS<=30000: raise RuntimeError('invalid trusted heartbeat test timeout')
+
+def load_config(path):
+    info=os.lstat(path)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode&0o077: raise SystemExit('supervisor config must be an owner-only regular file')
+    with open(path) as file: config=json.load(file)
+    if type(config.get('display')) is not int or not 0<=config['display']<=65535: raise SystemExit('supervisor config display must be a display number')
+    for name in ('xauthority','controlSocket','vncDir'):
+        value=config.get(name)
+        if not isinstance(value,str) or not os.path.isabs(value) or re.search(r'[\x00-\x1f\x7f]',value): raise SystemExit('supervisor config '+name+' must be an absolute path')
+    url=urllib.parse.urlsplit(str(config.get('cdpUrl','')))
+    if url.scheme!='http' or url.hostname not in ('127.0.0.1','localhost','::1') or url.username or url.password or url.query or url.fragment or url.path not in ('','/'): raise SystemExit('supervisor config cdpUrl must be a loopback HTTP origin')
+    config['cdpUrl']='http://'+url.netloc
+    return config
+
+def private_dir(path):
+    try: info=os.lstat(path)
+    except FileNotFoundError: info=None
+    if not info or not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=0o700: raise SystemExit(path+' must be a 0700 directory owned by this user')
+
+if len(sys.argv)!=2: raise SystemExit('usage: supervisor.py <config.json>')
+CONFIG=load_config(sys.argv[1])
+DISPLAY=CONFIG['display'];CONTROL=CONFIG['controlSocket'];VNC_DIR=CONFIG['vncDir'];CDP_URL=CONFIG['cdpUrl']
+X_SOCKET='/tmp/.X11-unix/X%d'%DISPLAY
+for path in (CONTROL,os.path.join(VNC_DIR,'vnc-'+'0'*16+'.sock')):
+    if len(os.fsencode(path))>107: raise SystemExit('socket path exceeds 107 bytes: '+path)
+private_dir(VNC_DIR)
+private_dir(os.path.dirname(CONTROL))
+os.environ['DISPLAY']=':%d'%DISPLAY
+os.environ['XAUTHORITY']=CONFIG['xauthority']
+
 children=[]
-critical=[]
 actor=None
 epoch=0
 tainted=False
@@ -14,16 +51,60 @@ settlements={}
 settlement_pids={}
 clipboard_owner=None
 pending_clipboard={}
+display_known=None
+browser_guid=None
+browser_ready=False
 lifecycle_lock=threading.RLock()
+x_lock=threading.Lock()
 stopping=threading.Event()
-HEARTBEAT_TIMEOUT_MS=int(os.environ.get('DESKTOP_TEST_HEARTBEAT_TIMEOUT_MS','30000'))
-if not 1000<=HEARTBEAT_TIMEOUT_MS<=30000: raise RuntimeError('invalid trusted heartbeat test timeout')
+x_inode=[None]
+xproof.x.XConnectionNumber.argtypes=[ctypes.c_void_p];xproof.x.XConnectionNumber.restype=ctypes.c_int
+# A user's http_proxy must never receive loopback CDP requests.
+opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 def serialized(function):
     @functools.wraps(function)
     def invoke(*args,**kwargs):
         with lifecycle_lock: return function(*args,**kwargs)
     return invoke
+
+def x_alive(d):
+    probe=socket.fromfd(xproof.x.XConnectionNumber(d),socket.AF_UNIX,socket.SOCK_STREAM)
+    try: return probe.recv(1,socket.MSG_PEEK|socket.MSG_DONTWAIT)!=b''
+    except BlockingIOError: return True
+    except OSError: return False
+    finally: probe.close()
+
+def proof(function,*args):
+    # xproof shares one Xlib connection, which is not thread-safe. Its error flag never clears itself.
+    with x_lock:
+        inode=display_inode()
+        # Xlib exits the process on I/O to a dead server. A stale connection is dropped, never closed.
+        if xproof._d[0] and (inode!=x_inode[0] or not x_alive(xproof._d[0])): xproof._d[0]=None
+        x_inode[0]=inode
+        xproof.xerror[0]=0
+        return function(*args)
+
+def display_lost():
+    # Xvfb drops its clients before it unlinks its socket. A dead connection is the earlier signal.
+    with x_lock:
+        d=xproof._d[0]
+        return display_inode()!=display_known or bool(d) and not x_alive(d)
+
+def display_generation(): return BOOT+':'+str(display_known)
+def browser_generation(): return BOOT+':'+(browser_guid or 'none')
+
+def display_inode():
+    try: return os.stat(X_SOCKET).st_ino
+    except OSError: return None
+
+def probe_browser():
+    try:
+        with opener.open(CDP_URL+'/json/version',timeout=2) as response: body=json.loads(response.read(65536))
+        if not re.match(r'(Chrome|Chromium)/',str(body.get('Browser',''))): return False,None
+    except Exception: return False,None
+    match=re.fullmatch(r'/devtools/browser/([A-Za-z0-9._-]{1,128})',urllib.parse.urlsplit(str(body.get('webSocketDebuggerUrl',''))).path)
+    return True,match and match.group(1)
 
 def refresh_heartbeat(current):
     wall=time.time()*1000
@@ -41,43 +122,29 @@ def heartbeat(lease_id,actor_epoch):
     refresh_heartbeat(actor)
     return {'ok':True,'leaseId':lease_id,'epoch':actor_epoch,'heartbeatDeadline':actor['heartbeatDeadline'],'expiresAt':actor['expiresAt']}
 
-class InheritedProxy:
-    """Bootstrap child stays UID1001; PID1 can reap and observe it without caps."""
-    def __init__(self,pid): self.pid=pid;self.args=['socat'];self.returncode=None
-    def poll(self):
-        if self.returncode is not None: return self.returncode
-        try:
-            pid,status=os.waitpid(self.pid,os.WNOHANG)
-            if pid: self.returncode=os.waitstatus_to_exitcode(status)
-        except ChildProcessError: self.returncode=1
-        return self.returncode
-
-def listening(port,uid=1000):
-    with open('/proc/net/tcp') as table:
-        for line in list(table)[1:]:
-            fields=line.split()
-            if fields[3]=='0A' and int(fields[1].split(':')[1],16)==port and int(fields[7])==uid: return True
-    return False
-
-def launch(args, **kwargs):
-    with open('/tmp/desktop/'+os.path.basename(args[0])+'-'+secrets.token_hex(4)+'.stderr','xb') as log:
-        process=subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log, start_new_session=True, **kwargs)
+def launch(args):
+    process=subprocess.Popen(args,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,start_new_session=True)
     children.append(process)
     return process
 
 def command(args, data=None, timeout=8):
     return subprocess.run(args,input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout,check=True).stdout
 
-def proof(op,*pids):
-    return json.loads(command(['/opt/desktop/x11-proof',op,*map(str,pids)]))
+def clipboard_read(timeout=8):
+    try: return command([sys.executable,CLIPBOARD,'read'],timeout=timeout)
+    except subprocess.CalledProcessError as error: raise RuntimeError(error.stderr.decode('utf-8','replace').strip()[-200:] or 'clipboard unavailable') from None
+
+def remove(path):
+    try: os.unlink(path)
+    except FileNotFoundError: pass
 
 def group_pids(pgid):
     found=[]
     for name in os.listdir('/proc'):
         if name.isdigit():
             try:
-                stat=open('/proc/'+name+'/stat').read().rsplit(')',1)[1].split()
-                if int(stat[2])==pgid and stat[0]!='Z': found.append(int(name))
+                fields=open('/proc/'+name+'/stat').read().rsplit(')',1)[1].split()
+                if int(fields[2])==pgid and fields[0]!='Z': found.append(int(name))
             except (FileNotFoundError,ProcessLookupError): pass
     return found
 
@@ -87,22 +154,25 @@ def retire(lease_id,may_be_writable=None,reason='controller_request'):
     if actor is None and lease_id in settlements:
         cached=settlements[lease_id]
         if may_be_writable is True and cached['readOnly']:
-            try: upgraded=proof('settle',*settlement_pids[lease_id])
+            try: upgraded=proof(xproof.settle,settlement_pids[lease_id])
             except Exception:
                 tainted=True
                 raise
             epoch+=1
-            upgraded.update(vncProcessesExited=True,readOnly=False,inputResetRequired=True,displayGeneration=GENERATION,browserGeneration=BROWSER_GENERATION,epoch=epoch,leaseId=lease_id)
+            upgraded.update(vncProcessesExited=True,readOnly=False,inputResetRequired=True,displayGeneration=display_generation(),browserGeneration=browser_generation(),epoch=epoch,leaseId=lease_id)
             settlements[lease_id]=upgraded
             return upgraded
         return cached
     if not actor or actor['leaseId']!=lease_id: raise ValueError('active lease mismatch')
     current=actor
+    reason=current.setdefault('reason',reason)
     process=current['process']
     # The ingress owner must already have fenced sockets and queued operations.
     pids=set(current['pids']) | set(group_pids(process.pid))
     current['fenced']=True
     try:
+        remove(current['socketPath'])
+        remove(current['passwordFile'])
         for sig,limit in [(signal.SIGTERM,1),(signal.SIGKILL,3)]:
             try: os.killpg(process.pid,sig)
             except ProcessLookupError: pass
@@ -110,32 +180,28 @@ def retire(lease_id,may_be_writable=None,reason='controller_request'):
             while group_pids(process.pid) and time.monotonic()<deadline: time.sleep(.01)
             if not group_pids(process.pid): break
         process.wait(timeout=1)
-        # PID 1 adopts any actor descendants; reap the entire owned group.
-        while True:
-            try:
-                reaped,_=os.waitpid(-process.pid,os.WNOHANG)
-                if reaped==0: break
-            except ChildProcessError: break
         if group_pids(process.pid): raise RuntimeError('actor process group remains')
         for pid,(owner,lease) in list(pending_clipboard.items()):
             if lease is current:
                 stop_clipboard_owner(owner)
                 pending_clipboard.pop(pid,None)
+        if display_lost():
+            tainted=True
+            current['reason']=reason='critical_child_exit'
         reset_required=current['role']=='control' or may_be_writable is True
-        result=proof('settle' if reset_required else 'absent',*sorted(pids))
+        result=proof(xproof.settle if reset_required else xproof.absent,sorted(pids))
         epoch+=1
-        result.update(vncProcessesExited=True,readOnly=not reset_required,inputResetRequired=reset_required,displayGeneration=GENERATION,browserGeneration=BROWSER_GENERATION,epoch=epoch,leaseId=lease_id,retirementReason=reason)
+        result.update(vncProcessesExited=True,readOnly=not reset_required,inputResetRequired=reset_required,displayGeneration=display_generation(),browserGeneration=browser_generation(),epoch=epoch,leaseId=lease_id,retirementReason=reason)
         settlements[lease_id]=result
         settlement_pids[lease_id]=sorted(pids)
         if len(settlements)>32:
             oldest=next(iter(settlements));del settlements[oldest];settlement_pids.pop(oldest,None)
         actor=None
         if process in children: children.remove(process)
-        try: os.unlink(current['passwordFile'])
-        except FileNotFoundError: pass
         return result
     except Exception:
         tainted=True
+        current['retryAt']=time.monotonic()+.5
         raise
 
 @serialized
@@ -151,29 +217,36 @@ def start(lease_id,role,expires_at=None):
     settlements.pop(lease_id,None)
     settlement_pids.pop(lease_id,None)
     password=secrets.token_urlsafe(12)[:8]
-    password_file='/tmp/desktop/vnc-'+secrets.token_hex(8)
-    open(password_file,'w').write(password+'\n')
-    args=['x11vnc','-display','unix/:1','-rfbport','5900','-listen','0.0.0.0','-passwdfile',password_file,
+    password_file=os.path.join(VNC_DIR,'vnc-'+secrets.token_hex(8))
+    socket_path=os.path.join(VNC_DIR,'vnc-'+secrets.token_hex(8)+'.sock')
+    with open(password_file,'x') as file: file.write(password+'\n')
+    # A person's ~/.x11vncrc must not add options to an actor.
+    args=['x11vnc','-display','unix/:%d'%DISPLAY,'-unixsock',socket_path,'-rfbport','0','-no6','-rfbportv6','-1','-passwdfile',password_file,
           '-forever','-shared','-noxdamage','-noxrecord','-nosel','-noprimary','-noclipboard','-nosetclipboard',
-          '-nosetprimary','-noremote','-nocmds','-no6','-noipv6','-o','/dev/null']
+          '-nosetprimary','-noremote','-nocmds','-o','/dev/null','-norc']
     if role=='watch': args.append('-viewonly')
-    process=launch(args)
-    actor={'process':process,'leaseId':lease_id,'role':role,'pids':[process.pid],'passwordFile':password_file,'expiresAt':expires_at}
+    try: process=launch(args)
+    except Exception:
+        remove(password_file)
+        raise
+    actor={'process':process,'leaseId':lease_id,'role':role,'pids':[process.pid],'passwordFile':password_file,'socketPath':socket_path,'expiresAt':expires_at}
     try:
         deadline=time.monotonic()+8
         while time.monotonic()<deadline:
             if process.poll() is not None: raise RuntimeError('x11vnc exited before identity verification')
-            clients=proof('clients')
-            owned=[c for c in clients if c['pid'] in group_pids(process.pid)]
+            group=set(group_pids(process.pid))
+            owned=[c for c in proof(xproof.clients) if c['pid'] in group]
             if any(c['pid']==process.pid for c in owned):
-                if listening(5900): break
+                try:
+                    if stat.S_ISSOCK(os.lstat(socket_path).st_mode): break
+                except FileNotFoundError: pass
             time.sleep(.025)
         else: raise RuntimeError('x11vnc PID not proven by XRes')
         actor['pids']=group_pids(process.pid)
         epoch+=1
         actor['epoch']=epoch
         refresh_heartbeat(actor)
-        return {'pid':process.pid,'xClients':owned,'password':password,'role':role,'leaseId':lease_id,'epoch':epoch,'expiresAt':expires_at,'heartbeatDeadline':actor['heartbeatDeadline'],'heartbeatTimeoutMs':HEARTBEAT_TIMEOUT_MS,'displayGeneration':GENERATION,'browserGeneration':BROWSER_GENERATION}
+        return {'pid':process.pid,'xClients':owned,'password':password,'role':role,'leaseId':lease_id,'epoch':epoch,'expiresAt':expires_at,'heartbeatDeadline':actor['heartbeatDeadline'],'heartbeatTimeoutMs':HEARTBEAT_TIMEOUT_MS,'displayGeneration':display_generation(),'browserGeneration':browser_generation(),'socketPath':socket_path}
     except Exception:
         retire(lease_id)
         raise
@@ -181,13 +254,18 @@ def start(lease_id,role,expires_at=None):
 def dispatch(request):
     global clipboard_owner
     op=request.get('op')
-    with lifecycle_lock: healthy=all(child.poll() is None for child in critical)
     if op=='status':
-        with lifecycle_lock: return {'ready':healthy and not tainted,'displayGeneration':GENERATION,'browserGeneration':BROWSER_GENERATION,'epoch':epoch,'tainted':tainted,'heartbeatTimeoutMs':HEARTBEAT_TIMEOUT_MS,'viewer':None if not actor else {'leaseId':actor['leaseId'],'role':actor['role'],'pid':actor['process'].pid,'epoch':actor.get('epoch'),'expiresAt':actor['expiresAt'],'heartbeatDeadline':actor.get('heartbeatDeadline')},'criticalProcesses':[{'name':child.args[0],'pid':child.pid,'running':child.poll() is None} for child in critical],'browserSandbox':True,'authenticatedInternetReady':healthy and not tainted,'sandboxVerification':'headed Chromium with namespace/seccomp profile; see deployment proof','isolation':'browser-userns-seccomp-and-dedicated-container-no-host-mounts'}
+        with lifecycle_lock:
+            displayed=os.path.exists(X_SOCKET) and proof(xproof.display_ok)
+            return {'ready':displayed and not tainted,'browserReady':browser_ready,'displayGeneration':display_generation(),'browserGeneration':browser_generation(),'epoch':epoch,'tainted':tainted,'heartbeatTimeoutMs':HEARTBEAT_TIMEOUT_MS,'viewer':None if not actor else {'leaseId':actor['leaseId'],'role':actor['role'],'pid':actor['process'].pid,'epoch':actor.get('epoch'),'expiresAt':actor['expiresAt'],'heartbeatDeadline':actor.get('heartbeatDeadline')},'isolation':'host-user-services','browserSandbox':'chrome-os-sandbox','egressFirewall':False}
     if op=='stopViewerAndSettle': return retire(request.get('leaseId'),request.get('mayBeWritable'))
-    if not healthy or tainted: raise RuntimeError('desktop unavailable or quarantined; do not resume browser automation')
+    with lifecycle_lock: healthy=os.path.exists(X_SOCKET) and not tainted
+    if not healthy: raise RuntimeError('desktop unavailable or quarantined; do not resume browser automation')
     if op=='heartbeatViewer': return heartbeat(request.get('leaseId'),request.get('epoch'))
-    if op=='startViewer': return start(request.get('leaseId'),request.get('role','watch'),request.get('expiresAt'))
+    if op=='startViewer':
+        # An idle restart the monitor hasn't seen yet would otherwise count as a change under this actor.
+        observe(display_inode(),*probe_browser())
+        return start(request.get('leaseId'),request.get('role','watch'),request.get('expiresAt'))
     if op=='promoteViewer':
         with lifecycle_lock:
             lease=request.get('leaseId')
@@ -198,11 +276,10 @@ def dispatch(request):
     if op=='clipboardWrite':
         text=request.get('text')
         if not isinstance(text,str) or len(text.encode('utf-8'))>1048576: raise ValueError('invalid clipboard text')
-        # Foreground ownership avoids xclip's default fork retaining command pipes.
         with lifecycle_lock:
             lease=actor;operation_epoch=epoch
             check_clipboard_lease(request,lease,operation_epoch)
-            owner=subprocess.Popen(['xclip','-quiet','-selection','clipboard','-in','-target','UTF8_STRING'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+            owner=subprocess.Popen([sys.executable,CLIPBOARD,'own'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
             children.append(owner)
             pending_clipboard[owner.pid]=(owner,lease)
         committed=False
@@ -213,9 +290,9 @@ def dispatch(request):
             while True:
                 check_clipboard_lease(request,lease,operation_epoch)
                 if owner.poll() is not None: raise RuntimeError('clipboard owner exited before selection verification')
-                selected=proof('selection-owner')
+                selected=proof(xproof.selection_owner)
                 if selected['pid']==owner.pid:
-                    if command(['xclip','-selection','clipboard','-out','-target','UTF8_STRING'],timeout=1)==data and proof('selection-owner')['pid']==owner.pid: break
+                    if clipboard_read(timeout=2)==data and proof(xproof.selection_owner)['pid']==owner.pid: break
                 if time.monotonic()>deadline: raise RuntimeError('clipboard selection verification timed out')
                 time.sleep(.01)
             with lifecycle_lock:
@@ -233,7 +310,7 @@ def dispatch(request):
     if op=='clipboardRead':
         lease=actor;operation_epoch=epoch
         check_clipboard_lease(request,lease,operation_epoch)
-        data=command(['xclip','-selection','clipboard','-out','-target','UTF8_STRING'])
+        data=clipboard_read()
         if len(data)>1048576: raise ValueError('clipboard exceeds limit')
         check_clipboard_lease(request,lease,operation_epoch)
         return {'text':data.decode('utf-8'),'leaseId':lease['leaseId'],'epoch':operation_epoch}
@@ -253,7 +330,7 @@ def stop_clipboard_owner(owner):
             except ProcessLookupError: pass
         owner.wait(timeout=1)
         deadline=time.monotonic()+5
-        while any(client['pid']==owner.pid for client in proof('clients')):
+        while any(client['pid']==owner.pid for client in proof(xproof.clients)):
             if time.monotonic()>deadline: raise RuntimeError('retired clipboard owner X clients remain')
             time.sleep(.002)
         if owner in children: children.remove(owner)
@@ -261,32 +338,19 @@ def stop_clipboard_owner(owner):
         tainted=True
         raise
 
-def cleanup(*unused):
-    stopping.set()
-    signal.signal(signal.SIGTERM,signal.SIG_IGN)
-    signal.signal(signal.SIGINT,signal.SIG_IGN)
-    # Keep X alive while Chrome flushes its profile and removes Singleton locks.
-    for child in reversed(children):
-        if child.args[0] in ('Xvfb','openbox'): continue
-        try: os.killpg(child.pid,signal.SIGTERM)
-        except ProcessLookupError: pass
-    deadline=time.monotonic()+4
-    for child in reversed(children):
-        if child.args[0] in ('Xvfb','openbox'): continue
-        try: child.wait(timeout=max(.01,deadline-time.monotonic()))
-        except subprocess.TimeoutExpired: pass
-    for child in reversed(children):
-        try: os.killpg(child.pid,signal.SIGKILL)
-        except ProcessLookupError: pass
-    raise SystemExit(0)
-
 def watchdog():
     global tainted
     while not stopping.wait(.05):
         with lifecycle_lock:
-            if not all(child.poll() is None for child in critical): tainted=True
             current=actor
-            if not current or current.get('fenced'): continue
+            if not current: continue
+            if current.get('fenced'):
+                # A retirement that failed while the display was down completes once it is back.
+                if time.monotonic()>=current.get('retryAt',float('inf')):
+                    try: retire(current['leaseId'])
+                    except Exception: pass
+                continue
+            if display_lost(): tainted=True
             reason=None
             if tainted: reason='critical_child_exit'
             elif time.time()*1000>=current['expiresAt']: reason='lease_expired'
@@ -296,35 +360,85 @@ def watchdog():
                 try: retire(current['leaseId'],reason=reason)
                 except Exception: tainted=True
 
-signal.signal(signal.SIGTERM,cleanup)
-signal.signal(signal.SIGINT,cleanup)
-critical.append(InheritedProxy(int(os.environ['DESKTOP_PROXY_PID'])))
-critical.append(launch(['Xvfb',':1','-screen','0','1280x900x24','-dpi','96','-ac','-nolisten','tcp','+extension','XTEST','+extension','X-Resource']))
-deadline=time.monotonic()+10
-while not os.path.exists('/tmp/.X11-unix/X1'):
-    if time.monotonic()>deadline: raise RuntimeError('display startup timeout')
-    time.sleep(.02)
-proof('clients')
-os.makedirs('/home/browser/.config/openbox',exist_ok=True)
-open('/home/browser/.config/openbox/rc.xml','w').write('''<openbox_config xmlns="http://openbox.org/3.4/rc"><applications><application class="*"><decor>no</decor><maximized>yes</maximized></application></applications></openbox_config>''')
-critical.append(launch(['openbox','--config-file','/home/browser/.config/openbox/rc.xml']))
-# The host adapter proves this dedicated volume has no running users before boot.
-# Chrome's SIGTERM/crash can leave lock symlinks naming a previous container.
-for singleton in ('SingletonLock','SingletonCookie','SingletonSocket'):
-    path='/profile/'+singleton
-    if os.path.lexists(path):
-        if not os.path.islink(path): raise RuntimeError('unexpected non-symlink Chromium singleton lock')
-        os.unlink(path)
-critical.append(launch(['chromium','--test-type','--no-first-run','--no-default-browser-check','--password-store=basic','--user-data-dir=/profile','--remote-debugging-address=127.0.0.1','--remote-debugging-port=9222','--force-device-scale-factor=1','--high-dpi-support=1','--start-maximized','--window-position=0,0','--window-size=1280,900','--disable-dev-shm-usage','https://example.com']))
+@serialized
+def observe(inode,ready,guid):
+    global tainted,display_known,browser_guid,browser_ready
+    changed=inode!=display_known or (guid is not None and guid!=browser_guid)
+    if changed and actor is not None and not actor.get('fenced'): tainted=True
+    if inode is not None: display_known=inode
+    if guid is not None: browser_guid=guid
+    browser_ready=ready
+
+def monitor():
+    while not stopping.wait(.5): observe(display_inode(),*probe_browser())
+
+def take_control_path():
+    try: info=os.lstat(CONTROL)
+    except FileNotFoundError: return
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid!=os.getuid(): raise SystemExit('refusing to replace '+CONTROL+': not a socket owned by this user')
+    probe=socket.socket(socket.AF_UNIX);probe.settimeout(1)
+    try:
+        probe.connect(CONTROL)
+        raise SystemExit('another supervisor is serving '+CONTROL)
+    except (ConnectionRefusedError,FileNotFoundError): pass
+    finally: probe.close()
+    remove(CONTROL)
+
+def shutdown():
+    with lifecycle_lock:
+        if actor:
+            try: retire(actor['leaseId'],reason='supervisor_stop')
+            except Exception as error: print('supervisor: retirement on stop failed: '+str(error),file=sys.stderr)
+        for child in children:
+            if child.poll() is None:
+                try: os.killpg(child.pid,signal.SIGKILL)
+                except ProcessLookupError: pass
+                try: child.wait(timeout=1)
+                except subprocess.TimeoutExpired: pass
+        try:
+            if os.lstat(CONTROL).st_ino==control_inode: os.unlink(CONTROL)
+        except FileNotFoundError: pass
+    raise SystemExit(0)
+
+def stray_actors():
+    found=[]
+    for name in os.listdir('/proc'):
+        if not name.isdigit(): continue
+        try:
+            if os.stat('/proc/'+name).st_uid!=os.getuid(): continue
+            with open('/proc/'+name+'/cmdline','rb') as file: argv=file.read().split(b'\0')
+        except OSError: continue
+        if os.path.basename(argv[0])==b'x11vnc' and b'-unixsock' in argv[:-1] and os.path.dirname(argv[argv.index(b'-unixsock')+1])==os.fsencode(VNC_DIR): found.append(int(name))
+    return found
+
+signal.signal(signal.SIGTERM,lambda *unused: stopping.set())
+signal.signal(signal.SIGINT,lambda *unused: stopping.set())
+take_control_path()
 deadline=time.monotonic()+30
-while not (listening(9222) and listening(9223,1001)):
-    if not all(child.poll() is None for child in critical): raise RuntimeError('critical desktop process exited during startup')
-    if time.monotonic()>deadline: raise RuntimeError('browser startup timeout')
-    time.sleep(.05)
+while not (os.path.exists(X_SOCKET) and proof(xproof.display_ok)):
+    if stopping.is_set(): raise SystemExit(0)
+    if time.monotonic()>deadline: raise SystemExit('display :%d is unavailable'%DISPLAY)
+    time.sleep(.1)
+display_known=display_inode()
+# Outside systemd's control-group kill, a killed supervisor's actors outlive it.
+strays=stray_actors()
+for pid in strays:
+    try: os.kill(pid,signal.SIGKILL)
+    except ProcessLookupError: pass
+# The host display outlives this process. Input a previous supervisor's x11vnc held stays held.
+try: proof(xproof.settle,strays)
+except Exception as error:
+    tainted=True
+    print('supervisor: held input could not be released; quarantined: '+str(error),file=sys.stderr)
+for name in os.listdir(VNC_DIR):
+    if re.fullmatch(r'vnc-[0-9a-f]{16}(\.sock)?',name): remove(os.path.join(VNC_DIR,name))
+browser_ready,browser_guid=probe_browser()
 server=socket.socket(socket.AF_UNIX)
-server.bind('/tmp/desktop/control.sock');server.listen(8);server.settimeout(.25)
+server.bind(CONTROL);server.listen(8);server.settimeout(.25)
+control_inode=os.lstat(CONTROL).st_ino
 threading.Thread(target=watchdog,name='desktop-heartbeat-watchdog',daemon=True).start()
-while True:
+threading.Thread(target=monitor,name='desktop-generation-monitor',daemon=True).start()
+while not stopping.is_set():
     try: connection,_=server.accept()
     except socket.timeout: continue
     connection.settimeout(15)
@@ -340,3 +454,5 @@ while True:
     try: connection.sendall(json.dumps(response,ensure_ascii=False).encode('utf-8'))
     except OSError: pass
     connection.close()
+server.close()
+shutdown()

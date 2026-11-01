@@ -21,10 +21,9 @@ for (const required of [
   'src/cdp-setup.mjs', 'src/setup-activation.mjs', 'src/frame-keyboard.mjs', 'src/host-deps.mjs',
   'bin/clawser.mjs', 'bin/desktop-controller.mjs',
   'public/probe.html', 'public/probe.js', 'public/probe.css',
-  'skills/browser-handoff/SKILL.md', 'runtime/desktop/Dockerfile',
+  'skills/browser-handoff/SKILL.md',
   'runtime/desktop/index.mjs', 'runtime/desktop/supervisor.py',
-  'runtime/desktop/x11-proof.cpp', 'runtime/desktop/entrypoint.sh',
-  'runtime/desktop/chromium-seccomp.json', 'runtime/desktop/MOBY-LICENSE',
+  'runtime/desktop/xproof.py', 'runtime/desktop/openbox_config.py', 'runtime/desktop/clipboard.py',
 ]) assert.ok(files.has(required), `Release archive is missing ${required}`);
 assert.equal(pkg.main, './index.mjs');
 assert.equal(pkg.bin?.clawser, './bin/clawser.mjs');
