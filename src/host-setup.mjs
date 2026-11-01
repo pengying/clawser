@@ -6,7 +6,7 @@ import { freeDisplay, xauthorityEntry } from './host-display.mjs';
 import { classifyOwner, findBrowserBinary, portHolder } from './host-browser.mjs';
 import { describeHostPlan, installHostDeps, planHostDeps, verifyHostDeps } from './host-deps.mjs';
 import { resolveHandoffBrowser } from './browser-config.mjs';
-import { conflict, discoverExisting } from './host-takeover.mjs';
+import { afterTakeover, conflict, discoverExisting, moveCookies, takeOver } from './host-takeover.mjs';
 
 const identity = 'clawser-setup-v2';
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -216,7 +216,7 @@ export async function planHost(o, d, h) {
   // The Docker-era controller stop is not disruptive; closing or taking over the person's browser is.
   const takesOver = Boolean(found && (found.takeover.length || found.stop.length || found.cookies?.migrate));
   return {
-    option, profile, display, cdpPort, port, userDataDir, ...found?.profileDirectory !== undefined ? { profileDirectory: found.profileDirectory } : {}, browser, units,
+    option, profile, display, cdpPort, port, userDataDir, ...found?.profileDirectory !== undefined ? { profileDirectory: found.profileDirectory } : {}, ...found ? { sourceCdpUrl: found.sourceCdpUrl } : {}, browser, units,
     writes: files.filter(file => file.state !== 'current').map(file => ({ path: file.path, digest: file.text === undefined ? null : sha256(file.text), ...file.unit ? { unit: file.unit } : {}, consumer: file.consumer })),
     start, restart, stop, takeover: found?.takeover ?? [], ...found?.cookies ? { cookies: found.cookies } : {},
     disruptive: takesOver || restart.some(name => [p.names.display, p.names.windowManager, p.names.browser].includes(name)),
@@ -268,8 +268,7 @@ async function privateDir(path, d, h) {
 }
 
 export async function applyHost(plan, o, d, h) {
-  if (plan.option === 'existing') throw new Error(optionB);
-  const p = plan.locations, v1 = plan.receipt === 'v1' ? plan.saved : undefined;
+  const p = plan.locations, v1 = plan.receipt === 'v1' ? plan.saved : undefined, existing = plan.option === 'existing';
   let saved = plan.receipt === 'v2' ? structuredClone(plan.saved) : undefined;
   if (plan.receipt === 'none') {
     await d.fs.mkdir(dirname(o.stateDir), { recursive: true, mode: 0o700 });
@@ -283,8 +282,10 @@ export async function applyHost(plan, o, d, h) {
   const lock = join(o.stateDir, 'setup.lock');
   try { await d.fs.mkdir(lock, { mode: 0o700 }); }
   catch (error) { if (error.code === 'EEXIST') throw new Error('Clawser setup is already locked; inspect the existing setup process before retrying'); throw error; }
+  const after = { stopped: [], closed: false };
   try {
-    for (const item of plan.stop) {
+    // A desktop-session browser closes later, after every write, in takeOver.
+    for (const item of plan.stop.filter(item => item.kind === 'unit')) {
       await d.run('systemctl', ['--user', 'stop', item.unit]);
       await d.run('systemctl', ['--user', 'disable', item.unit]);
     }
@@ -296,7 +297,8 @@ export async function applyHost(plan, o, d, h) {
       Object.assign(saved, { packageDir: d.packageDir, execPath: d.execPath, browser: browserRecord(plan) });
       if (!same(saved, plan.saved)) await save(saved, p, d, h);
     }
-    for (const path of [p.state, p.runtime, p.vncDir, dirname(p.binary), dirname(p.assets), dirname(p.openboxConfig), dirname(p.profileDir), p.profileDir]) await privateDir(path, d, h);
+    // Option B runs the person's own profile folder. Clawser creates none.
+    for (const path of [p.state, p.runtime, p.vncDir, dirname(p.binary), dirname(p.assets), dirname(p.openboxConfig), ...existing ? [] : [dirname(p.profileDir), p.profileDir]]) await privateDir(path, d, h);
     const { record: hostDeps, warnings } = await resolver(d).install(plan.hostDeps, d, { previous: saved.hostDeps });
     plan.warnings.push(...warnings ?? []);
     // Re-planning without a window manager here would apply a plan nobody was shown.
@@ -324,16 +326,22 @@ export async function applyHost(plan, o, d, h) {
       await save(saved, p, d, h);
     }
     if (unitsWritten) await d.run('systemctl', ['--user', 'daemon-reload']);
-    for (const name of ROLES.map(role => p.names[role])) {
-      if (plan.start.includes(name)) await d.run('systemctl', ['--user', 'enable', '--now', name]);
-      else if (plan.restart.includes(name)) await d.run('systemctl', ['--user', 'restart', name]);
-    }
-    let healthError;
-    for (let attempt = 0; attempt < 120; attempt++) {
-      try { assertHealth(await d.controllerHealth(p.socket), plan.cdpPort, plan.profile); healthError = undefined; break; }
-      catch (error) { healthError = error; if (attempt !== 119) await d.sleep(250); }
-    }
-    if (healthError) throw healthError;
+    // Every write lands before anything of the person's stops. A failed write never leaves them without a browser.
+    const tempDir = existing && plan.cookies?.migrate ? await d.fs.mkdtemp(join(o.stateDir, 'cookies-')) : undefined;
+    try {
+      const exported = existing ? await takeOver({ plan, tempDir, saved, stateDir: o.stateDir, save: () => save(saved, p, d, h), after }, d, h) : undefined;
+      for (const name of ROLES.map(role => p.names[role])) {
+        if (plan.start.includes(name)) await d.run('systemctl', ['--user', 'enable', '--now', name]);
+        else if (plan.restart.includes(name)) await d.run('systemctl', ['--user', 'restart', name]);
+      }
+      let healthError;
+      for (let attempt = 0; attempt < 120; attempt++) {
+        try { assertHealth(await d.controllerHealth(p.socket), plan.cdpPort, plan.profile); healthError = undefined; break; }
+        catch (error) { healthError = error; if (attempt !== 119) await d.sleep(250); }
+      }
+      if (healthError) throw healthError;
+      if (exported) { saved.cookieMigration = plan.cookieMigration = await moveCookies(plan, exported, d); await save(saved, p, d, h); }
+    } finally { if (tempDir) await d.fs.rm(tempDir, { recursive: true, force: true }); }
     // Re-read immediately before the validated merge so concurrent config edits are preserved.
     const patch = await hostConfigPatch(o, p, saved, d, h, { convertingFrom: plan.convertedFrom, cdpPort: plan.cdpPort, profile: plan.profile, option: plan.option });
     const intended = { browser: await h.configSection('browser', d), plugins: await h.configSection('plugins', d) };
@@ -342,5 +350,6 @@ export async function applyHost(plan, o, d, h) {
     if (saved.pendingInertDesktop || saved.convertedFrom) { delete saved.pendingInertDesktop; delete saved.convertedFrom; await save(saved, p, d, h); }
     await h.reloadPlugin(d);
     return await waitForSetupActivation(expected, d, async () => assertHealth(await d.controllerHealth(p.socket), plan.cdpPort, plan.profile));
-  } finally { await d.fs.rm(lock, { recursive: true }); }
+  } catch (error) { throw afterTakeover(error, after); }
+  finally { await d.fs.rm(lock, { recursive: true }); }
 }

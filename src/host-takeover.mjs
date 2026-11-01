@@ -1,4 +1,4 @@
-import { isAbsolute, join } from 'node:path';
+import { basename, isAbsolute, join } from 'node:path';
 import { resolveHandoffBrowser } from './browser-config.mjs';
 import { SNAP_MESSAGE, classifyOwner, cookieEncryption, displayServices, isSnapBrowser, listenerProcess, portHolder, processInfo } from './host-browser.mjs';
 import { freeDisplay } from './host-display.mjs';
@@ -12,7 +12,7 @@ const restarter = detail => new Error(detail + " would restart Chrome, so setup 
 async function foreignUnit(unit, d) {
   const output = await d.run('systemctl', ['--user', 'show', unit, '--property=MainPID,FragmentPath,DropInPaths,UnitFileState,Environment,EnvironmentFiles', '--no-pager']);
   const show = Object.fromEntries(String(output).split('\n').filter(Boolean).map(row => [row.slice(0, row.indexOf('=')), row.slice(row.indexOf('=') + 1)]));
-  return { unit, mainPid: Number(show.MainPID), fragmentPath: show.FragmentPath ?? '', dropIns: String(show.DropInPaths ?? '').split(' ').filter(Boolean),
+  return { unit, mainPid: Number(show.MainPID), fragmentPath: show.FragmentPath ?? '', dropIns: splitWords(show.DropInPaths ?? ''),
     wasEnabled: show.UnitFileState === 'enabled', environment: show.Environment ?? '', environmentFiles: show.EnvironmentFiles ?? '' };
 }
 
@@ -21,13 +21,16 @@ async function replaceableUnit(info, p, d) {
   const owner = classifyOwner(info.cgroup, d.uid);
   if (owner.kind !== 'user-unit') return undefined;
   const unit = await foreignUnit(owner.unit, d);
-  return unit.mainPid === info.pid && unit.fragmentPath.startsWith(p.unitDir + '/') ? unit : undefined;
+  return unit.dropIns && unit.mainPid === info.pid && unit.fragmentPath.startsWith(p.unitDir + '/') ? unit : undefined;
 }
 
 const takeoverEntry = (role, unit) => ({ role, unit: unit.unit, fragmentPath: unit.fragmentPath, dropIns: unit.dropIns, wasEnabled: unit.wasEnabled });
 
-/** Splits systemd's Environment= property into NAME=value words, or returns undefined when it can't. */
-function splitEnvironment(text) {
+// systemd's shell_maybe_quote double-quotes a word and escapes \\ " $ ` inside it. Any other escape is refused.
+const ESCAPED = new Set(['"', '\\', '$', '`']);
+
+/** Splits a systemctl show list value into words, or returns undefined when it can't. */
+function splitWords(text) {
   const words = [];
   let word = '', quoted = false, started = false;
   for (let i = 0; i < text.length; i++) {
@@ -36,7 +39,7 @@ function splitEnvironment(text) {
     if (quoted) {
       if (c === '"') quoted = false;
       else if (c !== '\\') word += c;
-      else if (text[i + 1] === '"' || text[i + 1] === '\\') word += text[++i];
+      else if (ESCAPED.has(text[i + 1])) word += text[++i];
       else return undefined;
     } else if (c === '"') { quoted = true; started = true; }
     else if (c === ' ' || c === '\t') { if (started) words.push(word); word = ''; started = false; }
@@ -45,7 +48,13 @@ function splitEnvironment(text) {
   }
   if (quoted) return undefined;
   if (started) words.push(word);
-  if (!words.every(item => /^[A-Za-z_][A-Za-z0-9_]*=/.test(item))) return undefined;
+  return words;
+}
+
+/** Splits systemd's Environment= property into [NAME, value] pairs, or returns undefined when it can't. */
+function splitEnvironment(text) {
+  const words = splitWords(text);
+  if (!words?.every(item => /^[A-Za-z_][A-Za-z0-9_]*=/.test(item))) return undefined;
   return words.map(item => [item.slice(0, item.indexOf('=')), item.slice(item.indexOf('=') + 1)]);
 }
 
@@ -127,6 +136,99 @@ export async function discoverExisting(o, p, d, h, { expected } = {}) {
   const cookies = (takeover.length || stop.length) && v11 > 0 && o.migrateCookies !== false ? { migrate: true, count: v11 } : undefined;
   if (o.migrateCookies === false && v11 > 0) warnings.push(`${v11} keyring-encrypted cookies will be unreadable; you'll need to sign in to those sites again.`);
 
-  return { profile: name, cdpUrl, cdpPort, userDataDir, ...profileDirectory !== undefined ? { profileDirectory } : {},
+  return { profile: name, cdpUrl, sourceCdpUrl: cdpUrl, cdpPort, userDataDir, ...profileDirectory !== undefined ? { profileDirectory } : {},
     browser: { path: info.exe, existingArgs, env }, args, display, takeover, stop, ...cookies ? { cookies } : {}, warnings };
+}
+
+const STOP_ORDER = ['browser', 'windowManager', 'display'];
+const procRoot = d => d.procRoot ?? '/proc';
+// The browser stops first, so nothing it needs goes away under it.
+const inStopOrder = takeover => [...takeover].sort((a, b) => STOP_ORDER.indexOf(a.role) - STOP_ORDER.indexOf(b.role));
+// Loaded only for option B. It pulls in ws, which option A never needs.
+const cookieModule = async d => d.cookieMigration ?? await import('./cookie-migration.mjs');
+
+/** Copies each taken-over unit's fragment and drop-ins into a new 0700 folder under `<stateDir>/backups/`. Returns the `replaced` entries in stop order. */
+export async function backupUnits(takeover, stateDir, d, h) {
+  const root = join(stateDir, 'backups'), folder = join(root, new Date(d.now()).toISOString().replace(/[:.]/g, '-'));
+  await h.noSymlinks(root, d);
+  if (await h.stat(root, d)) await h.privatePath(root, 'directory', d);
+  else await d.fs.mkdir(root, { mode: 0o700 });
+  await d.fs.mkdir(folder, { mode: 0o700 });
+  const copy = async (from, to) => {
+    // readFile follows links. A linked unit file is saved by its contents.
+    const bytes = await d.fs.readFile(from);
+    const file = await d.fs.open(to, 'wx', 0o600);
+    try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
+  };
+  const ordered = inStopOrder(takeover);
+  for (const item of ordered) {
+    await copy(item.fragmentPath, join(folder, item.unit));
+    if (item.dropIns.length) await d.fs.mkdir(join(folder, item.unit + '.d'), { mode: 0o700 });
+    for (const path of item.dropIns) await copy(path, join(folder, item.unit + '.d', basename(path)));
+  }
+  return ordered.map(item => ({ unit: item.unit, fragmentPath: item.fragmentPath, dropIns: item.dropIns, wasEnabled: item.wasEnabled, backup: folder }));
+}
+
+/** Stops, then disables, each taken-over unit in stop order. Calls `stopped(unit)` after each stop. */
+export async function stopTakeover(takeover, d, stopped = () => {}) {
+  for (const item of inStopOrder(takeover)) {
+    await d.run('systemctl', ['--user', 'stop', item.unit]);
+    stopped(item.unit);
+    await d.run('systemctl', ['--user', 'disable', item.unit]);
+  }
+}
+
+async function waitForExit(pid, d) {
+  const path = join(procRoot(d), String(pid));
+  for (let attempt = 0; attempt < 120; attempt++) {
+    if (!await d.fs.stat(path).then(() => true, () => false)) return;
+    if (attempt !== 119) await d.sleep(250);
+  }
+  throw new Error('The browser did not close within 30 seconds; close it yourself, then rerun setup.');
+}
+
+/** Option B's steps between daemon-reload and the first start. Records what stopped in `after` and returns the cookie export, if any. */
+export async function takeOver({ plan, tempDir, saved, stateDir, save, after }, d, h) {
+  const cookies = await cookieModule(d);
+  let exported;
+  if (tempDir) {
+    try { exported = await cookies.exportCookies(plan.sourceCdpUrl, tempDir, d); }
+    catch (error) { throw new Error(`Could not read cookies from the running browser (${error.message}). Nothing was stopped; rerun setup, or use --no-migrate-cookies.`); }
+  }
+  if (plan.takeover.length) {
+    const replaced = await backupUnits(plan.takeover, stateDir, d, h);
+    saved.replaced = [...saved.replaced ?? [], ...replaced];
+    await save();
+    after.backup = replaced[0].backup;
+    await stopTakeover(plan.takeover, d, unit => after.stopped.push(unit));
+  }
+  for (const item of plan.stop) {
+    if (item.kind !== 'close-browser') continue;
+    await cookies.closeBrowser(plan.sourceCdpUrl, d);
+    await waitForExit(item.pid, d);
+    after.closed = true;
+  }
+  return exported;
+}
+
+/** Imports an export into Clawser's browser and returns the `cookieMigration` record. A failure is a warning, not an error. */
+export async function moveCookies(plan, exported, d) {
+  const cookies = await cookieModule(d), cdpUrl = 'http://127.0.0.1:' + plan.cdpPort, at = () => new Date(d.now()).toISOString();
+  try {
+    await cookies.importCookies(cdpUrl, exported.path, d);
+    await cookies.flushCookies(cdpUrl, d);
+    return { exported: exported.count, imported: await cookies.countCookies(cdpUrl, d), at: at() };
+  } catch (error) {
+    plan.warnings.push(`Moving cookies failed (${error.message}); sign in again to sites that ask.`);
+    return { exported: exported.count, imported: 0, failed: true, at: at() };
+  }
+}
+
+/** Tells the person what setup already stopped or closed when a later step fails. */
+export function afterTakeover(error, after) {
+  const parts = [];
+  if (after.stopped.length) parts.push(`Setup already stopped ${after.stopped.join(', ')}; rerun setup to finish. Their unit files are unchanged, with copies in ${after.backup}.`);
+  if (after.closed) parts.push('Setup already closed the browser from your desktop session; rerun setup to finish.');
+  if (parts.length && error instanceof Error) error.message += ' ' + parts.join(' ');
+  return error;
 }

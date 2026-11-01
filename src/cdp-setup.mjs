@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { resolveHandoffBrowser } from './browser-config.mjs';
+import { browserEndpoint } from './cdp.mjs';
 import { activationSummary, captureSetupActivation, inspectSetupActivation, logSetupActivation, requireActiveActivation, waitForSetupActivation } from './setup-activation.mjs';
 
 const identity = 'clawser-cdp-setup-v1';
@@ -38,14 +39,7 @@ function binding(config, o, configured = false) {
 
 async function browserReady(connection, d) {
   try {
-    const response = await d.fetch(connection.cdpUrl + '/json/version', { redirect: 'error', signal: AbortSignal.timeout(5000) });
-    if (!response.ok) throw new Error('HTTP ' + response.status);
-    const value = await response.json();
-    const socket = new URL(value.webSocketDebuggerUrl);
-    const origin = new URL(connection.cdpUrl);
-    if (!/^(?:HeadlessChrome|Chrome|Chromium)\//.test(value.Browser) || socket.protocol !== 'ws:' ||
-        !['localhost', '127.0.0.1', '[::1]'].includes(socket.hostname) || socket.port !== origin.port ||
-        socket.username || socket.password || socket.search || socket.hash || !/^\/devtools\/browser\/[^/]+$/.test(socket.pathname)) throw new Error('Invalid Chromium browser endpoint');
+    await browserEndpoint(connection.cdpUrl, d);
   } catch {
     throw new Error('Existing browser CDP endpoint is unavailable or incompatible. Keep the configured browser open with its existing loopback CDP connection and retry; setup never launches a browser.');
   }

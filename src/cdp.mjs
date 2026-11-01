@@ -68,6 +68,22 @@ export function validateCdpUrl(value) {
     throw new Error('CDP must be a loopback HTTP origin without credentials or query');
   return url;
 }
+/** Returns the browser-target WebSocket URL of the loopback Chromium serving `cdpUrl`. */
+export async function browserEndpoint(cdpUrl, d) {
+  try {
+    const response = await d.fetch(cdpUrl + '/json/version', { redirect: 'error', signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+    const value = await response.json();
+    const socket = new URL(value.webSocketDebuggerUrl);
+    const origin = new URL(cdpUrl);
+    if (!/^(?:HeadlessChrome|Chrome|Chromium)\//.test(value.Browser) || socket.protocol !== 'ws:' ||
+        !['localhost', '127.0.0.1', '[::1]'].includes(socket.hostname) || socket.port !== origin.port ||
+        socket.username || socket.password || socket.search || socket.hash || !/^\/devtools\/browser\/[^/]+$/.test(socket.pathname)) throw new Error('Invalid endpoint');
+    return socket.href;
+  } catch {
+    throw new Error('Invalid Chromium browser endpoint');
+  }
+}
 export const isWebPage = (value) => {
   try { return ['http:', 'https:'].includes(new URL(value).protocol); } catch { return false; }
 };

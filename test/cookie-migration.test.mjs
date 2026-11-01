@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocketServer } from 'ws';
-import { closeBrowser, exportCookies, flushCookies, importCookies } from '../src/cookie-migration.mjs';
+import { closeBrowser, countCookies, exportCookies, flushCookies, importCookies } from '../src/cookie-migration.mjs';
 
 const COOKIES = [
   { name: 'SID', value: 'sid-secret-value', domain: '.google.com', path: '/', expires: 1893456000, size: 19, httpOnly: true, secure: true, session: false,
@@ -61,6 +61,8 @@ test("exportCookies writes the browser's cookies to a 0600 file and never logs t
   assert.deepEqual(JSON.parse(await fs.readFile(result.path, 'utf8')), COOKIES);
   const logged = b.logs.join('\n');
   for (const text of COOKIES.flatMap(cookie => [cookie.name, cookie.value, cookie.domain])) assert.equal(logged.includes(text), false, 'logged ' + text.length + ' cookie characters');
+  assert.equal(await countCookies(b.cdpUrl, b.d), 3);
+  assert.equal(b.logs.join('\n').includes('secret'), false);
   // The export never overwrites a file already in the folder.
   await assert.rejects(exportCookies(b.cdpUrl, dir, b.d), { code: 'EEXIST' });
 });
@@ -99,7 +101,7 @@ test('closeBrowser treats a disconnect before the reply as success', async t => 
 test('flushCookies waits for the browser to go away and come back, or gives up after 60 seconds', async t => {
   const b = await browser(t, { reply: (command, socket) => socket.terminate() });
   const answer = b.d.fetch, seen = [];
-  // The first answer is closeBrowser's endpoint check; the polls then see the browser up, gone, and back.
+  // The first answer is closeBrowser's endpoint check. The polls then see the browser up, gone, and back.
   const sequence = ['ok', 'ok', 'fail', 'ok'];
   b.d.fetch = async (url, options) => {
     const state = sequence[seen.length] ?? 'unexpected';

@@ -187,10 +187,14 @@ const DROP_IN = '[Service]\nTimeoutStopSec=5\n';
 const healthyUser = async () => ({ ready: true, profile: 'user', cdpUrl: 'http://127.0.0.1:9222', recoveryRequired: false });
 const verb = name => call => call.command === 'systemctl' && call.args[1] === name;
 const cookieCall = method => call => call.command === 'cookies' && call.args[0] === method;
-const exportsThree = async (url, dir) => { const path = join(dir, 'cookies.json'); await fs.writeFile(path, '[]', { mode: 0o600 }); return { path, count: 3 }; };
+const exportsThree = async (url, dir) => {
+  assert.equal((await fs.stat(dir)).mode & 0o777, 0o700, 'the cookie temp folder is private');
+  const path = join(dir, 'cookies.json');
+  await fs.writeFile(path, '[]', { mode: 0o600 });
+  return { path, count: 3 };
+};
 
-// handWritten plus what applying option B touches: the my-* unit files on disk (my-chrome.service has a drop-in),
-// a controller healthy on profile user, and a cookie module whose calls land in w.calls beside systemctl and openclaw.
+// handWritten plus the my-* unit files on disk, a controller healthy on profile user, and a cookie module that records its calls in w.calls.
 async function applyWorld(t, options = {}) {
   const w = await handWritten(t, { ...options, deps: { controllerHealth: healthyUser, ...options.deps } });
   w.originals = {};
@@ -218,7 +222,7 @@ async function applyWorld(t, options = {}) {
   return w;
 }
 
-// 8a test 3's world: Chrome runs in the desktop session, with no display units.
+// Chrome runs in the desktop session, with no display units.
 async function sessionWorld(t) {
   const w = await applyWorld(t, { xvfb: null, openbox: null, deps: { freeDisplay: async () => 21 } });
   await fs.rm(join(w.root, 'proc/400'), { recursive: true });
@@ -353,6 +357,10 @@ test('a failure after the takeover names the stopped units and their backups', a
   assert.ok(replaced[0]?.backup, 'the receipt records the backup');
   assert.ok(error.message.endsWith(` Setup already stopped my-chrome.service, my-openbox.service, my-xvfb.service; rerun setup to finish. Their unit files are unchanged, with copies in ${replaced[0].backup}.`), error.message);
   assert.match(error.message, /^Controller health or profile identity is not ready/);
+  const session = await sessionWorld(t);
+  session.deps.controllerHealth = async () => ({ ready: false });
+  session.cookies.closeBrowser = async () => { await fs.rm(join(session.root, 'proc/400'), { recursive: true }); };
+  await assert.rejects(runClawser(session.yes, session.deps), error => error.message.endsWith(' Setup already closed the browser from your desktop session; rerun setup to finish.'));
 });
 
 test('option B on an option A install or a Docker-era install is refused', async t => {

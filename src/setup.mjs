@@ -374,7 +374,9 @@ async function hostSetup(o, d) {
   await d.run('openclaw', ['config', 'patch', '--stdin', '--dry-run'], { input: JSON.stringify(plan.patch) + '\n' });
   const activation = await applyHost(plan, o, d, setupHelpers);
   for (const line of ['Clawser is configured.', ...units.map(name => 'Unit: ' + name), 'State: ' + o.stateDir, 'Display: :' + plan.display,
-    "The agent's browser starts with no logins. Sign in to sites from a handoff link when the agent needs them.",
+    ...plan.option === 'existing'
+      ? ["The agent's browser keeps the logins from " + plan.profile + '.', ...plan.cookieMigration && !plan.cookieMigration.failed ? ['Sign in to Google once in a handoff link, and re-save any saved site passwords.'] : []]
+      : ["The agent's browser starts with no logins. Sign in to sites from a handoff link when the agent needs them."],
     ...(plan.dockerLeftovers ?? []).map(command => 'Run yourself afterwards: ' + command), ...plan.warnings.map(message => 'Warning: ' + message)]) d.log(line);
   logSetupActivation(activation, d);
   return { ok: true, command: 'setup', backend: 'novnc', activation: activationSummary(activation), dryRun: false, stateDir: o.stateDir, units, display: plan.display, warnings: plan.warnings, ...(plan.dockerLeftovers ? { dockerLeftovers: plan.dockerLeftovers } : {}) };
