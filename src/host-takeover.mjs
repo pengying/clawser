@@ -151,14 +151,17 @@ export async function rerunExisting(o, p, saved, d, h) {
   let found;
   if (resumed) {
     found = await discoverExisting(o, p, d, h, { expected: { userDataDir: saved.userDataDir, profileDirectory: saved.profileDirectory } });
-    // The X cookie and the supervisor config are bound to the first display, and the receipt to the first port.
-    if (found.display !== saved.display || found.cdpPort !== saved.cdpPort) throw new Error(conflict);
+    // The X cookie and the supervisor config are bound to the first display, and the receipt to the first port and profile folder.
+    if (found.display !== saved.display || found.cdpPort !== saved.cdpPort || found.profileDirectory !== saved.profileDirectory) throw new Error(conflict);
   } else {
     const { userDataDir, profileDirectory, cdpPort, browser } = saved;
     found = { profile: saved.profile, cdpPort, userDataDir, ...profileDirectory !== undefined ? { profileDirectory } : {}, browser, display: saved.display,
       args: chromeArgs({ existing: browser.existingArgs, userDataDir, profileDirectory, cdpPort }), takeover: [], stop: listener ? [] : await stillReplaced(saved.replaced ?? [], d), warnings: [] };
   }
-  return { ...found, ...await leftoverCookies(o, saved, resumed, d, h) };
+  const leftovers = await leftoverCookies(o, saved, resumed, d, h);
+  // Saving the imported cookies closes and restarts the browser, so a resume into Clawser's running browser needs --yes.
+  if (leftovers.cookies && listener) leftovers.cookies.closesBrowser = true;
+  return { ...found, ...leftovers };
 }
 
 // A crash between stop and disable leaves a replaced unit enabled, so it would come back at the next login.
@@ -171,7 +174,10 @@ async function stillReplaced(replaced, d) {
   return stop;
 }
 
-/** R46: the newest export an interrupted run left resumes until an import succeeds, unless a fresh export supersedes it. Every other cookies-* folder goes. */
+/**
+ * R46: the newest export an interrupted run left resumes until an import succeeds, unless a fresh export supersedes it. Only a cookies.json
+ * holding a non-empty JSON array can resume. Every other cookies-* folder goes.
+ */
 async function leftoverCookies(o, saved, resumed, d, h) {
   const folders = [], exports = [];
   for (const name of (await d.fs.readdir(o.stateDir)).sort()) {
@@ -179,7 +185,7 @@ async function leftoverCookies(o, saved, resumed, d, h) {
     if (!name.startsWith('cookies-') || !(await h.stat(dir, d))?.isDirectory()) continue;
     folders.push(dir);
     const file = await h.stat(join(dir, 'cookies.json'), d);
-    if (file?.isFile()) exports.push({ dir, at: file.mtimeMs });
+    if (file?.isFile() && (await savedExport(join(dir, 'cookies.json'), d)).count > 0) exports.push({ dir, at: file.mtimeMs });
   }
   const newest = exports.reduce((best, item) => !best || item.at >= best.at ? item : best, undefined);
   const resume = newest && !resumed && (!saved.cookieMigration || saved.cookieMigration.failed === true) && o.migrateCookies !== false;

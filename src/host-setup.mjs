@@ -210,8 +210,8 @@ export async function planHost(o, d, h) {
   const converted = v1 ? convertedFrom(v1) : v2?.convertedFrom;
   const patch = await hostConfigPatch(o, p, v2, d, h, { convertingFrom: converted, cdpPort, profile, option });
   const previousDefaultProfile = v2 ? v2.previousDefaultProfile ?? null : (await h.configSection('browser', d)).defaultProfile ?? null;
-  // The Docker-era controller stop, re-stopping a replaced unit and resuming saved cookies are not disruptive; closing or taking over the person's browser is.
-  const takesOver = Boolean(found && (found.takeover.length || found.stop.some(item => !item.replaced) || (found.cookies?.migrate && !found.cookies.resumeFrom)));
+  // The Docker-era controller stop, re-stopping a replaced unit and resuming cookies into a stopped browser are not disruptive; closing or taking over a browser is.
+  const takesOver = Boolean(found && (found.takeover.length || found.stop.some(item => !item.replaced) || (found.cookies?.migrate && (!found.cookies.resumeFrom || found.cookies.closesBrowser))));
   return {
     option, profile, display, cdpPort, port, userDataDir, ...found?.profileDirectory !== undefined ? { profileDirectory: found.profileDirectory } : {}, ...found?.sourceCdpUrl ? { sourceCdpUrl: found.sourceCdpUrl } : {}, browser, units,
     writes: files.filter(file => file.state !== 'current').map(file => ({ path: file.path, digest: file.text === undefined ? null : sha256(file.text), ...file.unit ? { unit: file.unit } : {}, consumer: file.consumer })),
