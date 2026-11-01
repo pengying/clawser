@@ -263,26 +263,35 @@ test('a port held by another program is refused and names it', async t => {
   assert.equal(await exists(x.stateDir), false);
 });
 
-test('a Docker-era install converts to option A and prints its leftovers without running docker', async t => {
-  const x = await harness(t, { config: { browser: { defaultProfile: 'handoff', profiles: { handoff: { cdpUrl: 'http://127.0.0.1:18812', driver: 'openclaw', engine: 'chromium', attachOnly: true } } } } });
-  const containerName = 'openclaw-handoff-desktop', imageId = 'sha256:' + 'a'.repeat(64), ownerId = randomUUID();
-  const servicePath = join(x.unitDir, x.names.controller);
+const handoffBrowser = { browser: { defaultProfile: 'handoff', profiles: { handoff: { cdpUrl: 'http://127.0.0.1:18812', driver: 'openclaw', engine: 'chromium', attachOnly: true } } } };
+const containerName = 'openclaw-handoff-desktop', imageId = 'sha256:' + 'a'.repeat(64);
+const leftovers = [`docker rm -f ${containerName}`, `docker network rm ${containerName}-net`, `docker volume rm ${containerName}-profile`, `docker image rm ${imageId}`];
+
+async function seedV1(x, { withImage = true, serviceUnit = x.names.controller } = {}) {
+  const ownerId = randomUUID(), servicePath = join(x.unitDir, x.names.controller);
   for (const dir of [x.stateDir, x.p.state, x.p.runtime, dirname(x.p.binary), dirname(x.p.assets), join(x.p.assets, 'core'), x.unitDir]) await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   await fs.writeFile(x.p.binary, 'verified cloudflared fixture', { mode: 0o700 });
   await fs.writeFile(join(x.p.assets, 'core/rfb.js'), 'export default class RFB {}', { mode: 0o600 });
   const oldConfig = JSON.stringify({ stateDir: x.p.state, profile: 'handoff', port: 19410, runtime: { name: containerName, image: imageId } }) + '\n';
   const oldUnit = '# Managed by Clawser\n[Unit]\nAfter=network-online.target docker.service\n';
-  await fs.writeFile(x.p.config, oldConfig, { mode: 0o600 });
-  await fs.writeFile(servicePath, oldUnit, { mode: 0o600 });
-  const v1 = { identity: 'clawser-setup-v1', uid: x.d.uid, ownerId, imageId, serviceUnit: x.names.controller,
+  if (withImage) await fs.writeFile(x.p.config, oldConfig, { mode: 0o600 });
+  if (withImage) await fs.writeFile(servicePath, oldUnit, { mode: 0o600 });
+  const v1 = { identity: 'clawser-setup-v1', uid: x.d.uid, ownerId, ...withImage ? { imageId } : {}, serviceUnit,
     options: { stateDir: x.stateDir, profile: 'handoff', port: 19410, cdpPort: 18812, vncPort: 59092, containerName, defaultProfile: true, packageDir: x.d.packageDir, execPath: x.d.execPath, servicePath },
-    configDigest: digest(oldConfig), serviceDigest: digest(oldUnit), assetsDigest: await h.treeDigest(x.p.assets, x.d) };
+    ...withImage ? { configDigest: digest(oldConfig), serviceDigest: digest(oldUnit) } : {}, assetsDigest: await h.treeDigest(x.p.assets, x.d) };
   await fs.writeFile(x.p.marker, JSON.stringify(v1, null, 2) + '\n', { mode: 0o600 });
+  if (!withImage) return { v1, ownerId, servicePath };
   x.config.plugins = { entries: { 'browser-handoff': { enabled: true, config: { desktop: { enabled: true, socketPath: x.p.socket, profile: 'handoff' }, cloudflare: { enabled: false } } } } };
   x.units.set(x.names.controller, 'active');
+  return { v1, ownerId, servicePath };
+}
+
+test('a Docker-era install converts to option A and prints its leftovers without running docker', async t => {
+  const x = await harness(t, { config: structuredClone(handoffBrowser) });
+  const { v1, ownerId, servicePath } = await seedV1(x);
   const plan = await x.plan();
   assert.deepEqual(plan.stop, [{ kind: 'unit', unit: x.names.controller }]);
-  assert.deepEqual(plan.dockerLeftovers, [`docker rm -f ${containerName}`, `docker network rm ${containerName}-net`, `docker volume rm ${containerName}-profile`, `docker image rm ${imageId}`]);
+  assert.deepEqual(plan.dockerLeftovers, leftovers);
   assert.equal(plan.disruptive, false);
   assert.ok(plan.start.includes(x.names.controller));
   const lines = describeHost(plan).join('\n');
@@ -311,4 +320,124 @@ test('option B is not implemented yet', async t => {
   const x = await harness(t);
   x.o.option = 'existing';
   await assert.rejects(x.plan(), /not implemented yet/);
+});
+
+const changedOutside = path => path + ' was changed outside Clawser; restore it or remove it, then rerun setup';
+const healthy = async () => ({ ready: true, profile: 'clawser', cdpUrl: 'http://127.0.0.1:18820', recoveryRequired: false });
+const rewriteReceipt = async (x, change) => { const saved = await x.receipt(); change(saved); await fs.writeFile(x.p.marker, JSON.stringify(saved, null, 2) + '\n', { mode: 0o600 }); };
+
+test('a conversion that fails after the stop can be rerun and still prints the leftovers', async t => {
+  const x = await harness(t, { config: structuredClone(handoffBrowser) });
+  const { ownerId } = await seedV1(x);
+  x.d.controllerHealth = async () => ({ ready: false });
+  await assert.rejects(x.install(), /Controller health/);
+  assert.equal(x.config.plugins.entries['browser-handoff'].config.desktop.profile, 'handoff');
+  assert.deepEqual((await x.receipt()).convertedFrom, { profile: 'handoff', containerName, imageId });
+  x.d.controllerHealth = healthy;
+  x.calls.length = 0;
+  const plan = await x.plan();
+  assert.deepEqual(plan.dockerLeftovers, leftovers);
+  assert.deepEqual(plan.stop, []);
+  const lines = describeHost(plan);
+  for (const command of leftovers) assert.ok(lines.includes('Run yourself afterwards: ' + command), command);
+  await applyHost(plan, x.o, x.d, h);
+  assert.equal(x.calls.some(call => call.command === 'docker'), false);
+  assert.equal(x.config.plugins.entries['browser-handoff'].config.desktop.profile, 'clawser');
+  const saved = await x.receipt();
+  assert.equal(saved.identity, 'clawser-setup-v2');
+  assert.equal(saved.ownerId, ownerId);
+  assert.equal(Object.hasOwn(saved, 'convertedFrom'), false);
+  assert.equal((await x.plan()).dockerLeftovers, undefined);
+});
+
+test('a rerun where only the x11vnc path changed rewrites supervisor.json and restarts only the supervisor', async t => {
+  const x = await harness(t);
+  await x.install();
+  x.binaries.x11vnc = entry('/home/linuxbrew/.linuxbrew/Cellar/x11vnc/0.9.17/bin/x11vnc');
+  const plan = await x.plan();
+  assert.deepEqual(plan.writes.map(item => item.path), [x.p.supervisorConfig]);
+  assert.deepEqual(plan.restart, [x.names.supervisor]);
+  assert.deepEqual(plan.start, []);
+  assert.equal(plan.disruptive, false);
+  assert.deepEqual(describeHost(plan).filter(line => /^(Write|Start|Restart) /.test(line)), ['Write ' + x.p.supervisorConfig, 'Restart ' + x.names.supervisor]);
+  x.calls.length = 0;
+  await applyHost(plan, x.o, x.d, h);
+  assert.deepEqual(systemctl(x.calls, 'restart'), [x.names.supervisor]);
+  assert.deepEqual([...systemctl(x.calls, 'enable'), ...systemctl(x.calls, 'daemon-reload')], []);
+  assert.equal(JSON.parse(await fs.readFile(x.p.supervisorConfig, 'utf8')).x11vnc, x.binaries.x11vnc.path);
+  assert.equal((await x.receipt()).supervisorConfigDigest, digest(await fs.readFile(x.p.supervisorConfig)));
+});
+
+test('a deleted X cookie is rewritten and restarts the display, which closes the browser', async t => {
+  const x = await harness(t);
+  await x.install();
+  await fs.rm(x.p.xauthority);
+  const plan = await x.plan();
+  assert.deepEqual(plan.writes.map(item => item.path), [x.p.xauthority]);
+  assert.deepEqual(plan.restart, [x.names.display]);
+  assert.equal(plan.disruptive, true);
+});
+
+test('a Docker-era receipt from a failed image build converts without a controller config to verify', async t => {
+  const x = await harness(t, { config: structuredClone(handoffBrowser) });
+  const { ownerId } = await seedV1(x, { withImage: false });
+  const plan = await x.plan();
+  assert.deepEqual(plan.stop, []);
+  assert.deepEqual(plan.dockerLeftovers, leftovers.slice(0, 3));
+  assert.ok(plan.writes.some(item => item.path === x.p.config));
+  await applyHost(plan, x.o, x.d, h);
+  assert.equal((await x.receipt()).ownerId, ownerId);
+  const y = await harness(t);
+  await seedV1(y, { withImage: false });
+  await fs.writeFile(y.p.config, '{}\n', { mode: 0o600 });
+  await assert.rejects(y.plan(), /controller\.json exists but Clawser does not own it/);
+});
+
+test('a Docker-era receipt naming another controller unit is refused', async t => {
+  const x = await harness(t, { config: structuredClone(handoffBrowser) });
+  await seedV1(x, { serviceUnit: 'clawser-desktop-000000000000.service' });
+  await assert.rejects(x.plan(), error => error.message === changedOutside(x.p.marker));
+  assert.equal(x.calls.some(call => call.command === 'systemctl' && call.args[1] !== 'show'), false);
+});
+
+test('openbox failing its smoke test during apply is refused before any state file is written', async t => {
+  const x = await harness(t);
+  const plan = await x.plan();
+  assert.ok(plan.units[x.names.windowManager]);
+  x.d.hostResolver.install = async host => {
+    const binaries = structuredClone(host.binaries);
+    delete binaries.openbox;
+    return { record: { binaries }, warnings: ['openbox is unavailable; it failed the setup smoke test'] };
+  };
+  await assert.rejects(applyHost(plan, x.o, x.d, h), error => error.message === 'openbox is installed but fails to start; repair or remove it, then rerun setup');
+  for (const path of [x.p.xauthority, x.p.openboxConfig, x.p.supervisorConfig, x.p.config, x.p.binary, x.unitDir]) assert.equal(await exists(path), false, path);
+  assert.equal(x.calls.some(call => call.command === 'fetch'), false);
+  assert.equal((await x.receipt()).hostDeps, undefined);
+});
+
+test('a file already matching the plan whose receipt digest is stale is current and the receipt adopts it', async t => {
+  const x = await harness(t);
+  await x.install();
+  await rewriteReceipt(x, saved => { saved.supervisorConfigDigest = 'c'.repeat(64); });
+  const plan = await x.plan();
+  assert.deepEqual([plan.writes, plan.start, plan.restart], [[], [], []]);
+  await applyHost(plan, x.o, x.d, h);
+  assert.equal((await x.receipt()).supervisorConfigDigest, digest(await fs.readFile(x.p.supervisorConfig)));
+});
+
+test('a file already matching the plan with no receipt digest is current and the receipt adopts it', async t => {
+  const x = await harness(t);
+  await x.install();
+  await rewriteReceipt(x, saved => { delete saved.units[x.names.browser]; });
+  const plan = await x.plan();
+  assert.deepEqual([plan.writes, plan.start, plan.restart], [[], [], []]);
+  await applyHost(plan, x.o, x.d, h);
+  assert.equal((await x.receipt()).units[x.names.browser], digest(await fs.readFile(join(x.unitDir, x.names.browser))));
+});
+
+test('an openbox config changed outside Clawser is refused by path', async t => {
+  const x = await harness(t);
+  await x.install();
+  await fs.appendFile(x.p.openboxConfig, '<!-- edited -->\n');
+  await assert.rejects(x.plan(), error => error.message === changedOutside(x.p.openboxConfig));
 });
