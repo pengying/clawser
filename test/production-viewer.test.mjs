@@ -13,12 +13,12 @@ async function fixture(t, options = {}) {
   const supervisor = {
     async create({ probeId }) { return { ownedId: probeId }; },
     async read() { return { state: 'running' }; },
-    async register() { return { endpoint: { host: '127.0.0.1', port: 59090 }, credentials: { watch: 'watch123', control: 'oldadmin' } }; },
-    async promote() { return { endpoint: { host: '127.0.0.1', port: 59090 }, credentials: { watch: 'unused12', control: 'newadmin' } }; },
+    async register() { return { endpoint: { path: '/tmp/fixture.sock' }, credentials: { watch: 'watch123', control: 'oldadmin' } }; },
+    async promote() { return { endpoint: { path: '/tmp/fixture.sock' }, credentials: { watch: 'unused12', control: 'newadmin' } }; },
     async clipboardRead() { return { text }; }, async clipboardWrite(_id, value) { text = value; },
     async destroy() { destroys++; }, async verifyExited() { return true; }, ...options.supervisor,
   };
-  const gateway = new NoVncProbeGateway({ supervisor, tcpConnect: async () => new Socket(),
+  const gateway = new NoVncProbeGateway({ supervisor, upstreamConnect: async () => new Socket(),
     prefix: '/browser/', completionDisposition: 'retained', capabilities: { clipboard: 'utf8' },
     onEnded: options.onEnded, ...options.gateway });
   await gateway.start({ port: 0 }); t.after(() => gateway.close());
@@ -51,7 +51,7 @@ test('new control credentials are returned only after asynchronous runtime promo
   let returned = false;
   const request = ctx.post('control').then(r => { returned = true; return r; });
   await pause(30); assert.equal(returned, false);
-  pending.resolve({ endpoint: { host: '127.0.0.1', port: 59090 }, credentials: { watch: 'unused12', control: 'newadmin' } });
+  pending.resolve({ endpoint: { path: '/tmp/fixture.sock' }, credentials: { watch: 'unused12', control: 'newadmin' } });
   const control = await (await request).json();
   assert.equal(control.password, 'newadmin'); assert.deepEqual(control.capabilities, { clipboard: 'utf8' });
 });
@@ -64,7 +64,7 @@ test('Done waits for a late promotion and does not publish its credentials', asy
   let doneReturned = false;
   const done = ctx.post('done').then(r => { doneReturned = true; return r; });
   await pause(20); assert.equal(doneReturned, false); assert.equal(ctx.destroys(), 0);
-  pending.resolve({ endpoint: { host: '127.0.0.1', port: 59090 }, credentials: { watch: 'unused12', control: 'newadmin' } });
+  pending.resolve({ endpoint: { path: '/tmp/fixture.sock' }, credentials: { watch: 'unused12', control: 'newadmin' } });
   assert.notEqual((await taking).status, 200);
   assert.deepEqual(await (await done).json(), { mode: 'ended', reason: 'done', disposition: 'retained' });
   assert.equal(ctx.destroys(), 1);

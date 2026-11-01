@@ -39,7 +39,7 @@ export async function reconcileDesktop({ stateDir, profile, runtime, socketPath 
     // until retirement, observation and the final idle-runtime check all pass.
     controller.persist = async () => { assertLock(); };
     const idle = (status, epoch) => {
-      if (status?.ready !== true || status.tainted !== false || status.viewer !== null || status.browserSandbox !== true || status.authenticatedInternetReady !== true || status.displayGeneration !== row.displayGeneration || status.browserGeneration !== row.browserGeneration || !Number.isSafeInteger(status.epoch) || status.epoch <= row.epoch || (epoch !== undefined && status.epoch !== epoch)) throw failure('RUNTIME_NOT_IDLE_OR_CHANGED');
+      if (status?.ready !== true || status.browserReady !== true || status.tainted !== false || status.viewer !== null || status.displayGeneration !== row.displayGeneration || status.browserGeneration !== row.browserGeneration || !Number.isSafeInteger(status.epoch) || status.epoch <= row.epoch || (epoch !== undefined && status.epoch !== epoch)) throw failure('RUNTIME_NOT_IDLE_OR_CHANGED');
       assertLock();
     };
     code = 'RUNTIME_UNAVAILABLE';

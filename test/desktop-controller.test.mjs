@@ -8,7 +8,7 @@ import { DesktopController, observeDesktop, activateDesktopTarget } from '../src
 async function setup(t, options={}) {
   const stateDir=await mkdtemp(join(tmpdir(),'desktop-controller-'));
   const events=[];let epoch=0;
-  const runtime={cdpUrl:'http://127.0.0.1:18810',ensure:async()=>({cdpUrl:'http://127.0.0.1:18810'}),status:async()=>({ready:true,displayGeneration:'g1',browserGeneration:'g1',browserSandbox:true,authenticatedInternetReady:true}),tabs:async()=>[{id:'tab',type:'page'}],heartbeatViewer:async({leaseId,epoch})=>({ok:true,leaseId,epoch}),startViewer:async({leaseId})=>{events.push('watch');return{leaseId,host:'127.0.0.1',port:59090,password:'watchpass',displayGeneration:'g1',browserGeneration:'g1',role:'watch',epoch:++epoch};},promoteViewer:async({leaseId})=>{events.push('control');return{leaseId,host:'127.0.0.1',port:59090,password:'ctrlpass',displayGeneration:'g1',browserGeneration:'g1',role:'control',epoch:++epoch};},stopViewerAndSettle:async({leaseId,mayBeWritable})=>{events.push('fence');return{readOnly:mayBeWritable===false,inputResetRequired:mayBeWritable!==false,leaseId,displayGeneration:'g1',browserGeneration:'g1',epoch:++epoch,vncProcessesExited:true,xClientsAbsent:true,heldInputCleared:mayBeWritable!==false,xSyncComplete:true};}};
+  const runtime={cdpUrl:'http://127.0.0.1:18810',ensure:async()=>({cdpUrl:'http://127.0.0.1:18810'}),status:async()=>({ready:true,browserReady:true,displayGeneration:'g1',browserGeneration:'g1'}),tabs:async()=>[{id:'tab',type:'page'}],heartbeatViewer:async({leaseId,epoch})=>({ok:true,leaseId,epoch}),startViewer:async({leaseId})=>{events.push('watch');return{leaseId,socketPath:'/tmp/fixture-watch.sock',password:'watchpass',displayGeneration:'g1',browserGeneration:'g1',role:'watch',epoch:++epoch};},promoteViewer:async({leaseId})=>{events.push('control');return{leaseId,socketPath:'/tmp/fixture-control.sock',password:'ctrlpass',displayGeneration:'g1',browserGeneration:'g1',role:'control',epoch:++epoch};},stopViewerAndSettle:async({leaseId,mayBeWritable})=>{events.push('fence');return{readOnly:mayBeWritable===false,inputResetRequired:mayBeWritable!==false,leaseId,displayGeneration:'g1',browserGeneration:'g1',epoch:++epoch,vncProcessesExited:true,xClientsAbsent:true,heldInputCleared:mayBeWritable!==false,xSyncComplete:true};}};
   Object.assign(runtime,options.runtime);
   const controller=new DesktopController({stateDir,profile:'human',runtime,transport:{ensure:async()=>'https://example.test',close:async()=>{}},port:0,activateTarget:async()=>{},observe:async()=>{events.push('observe');return{snapshotObserved:true,displayGeneration:'g1',browserGeneration:'g1'};},...options.controller});
   await controller.start();
@@ -122,12 +122,12 @@ async function viewerClient(t,controller,lease) {
   const {WebSocket}=await import('ws');
   const {once}=await import('node:events');
   class VncSocket extends Duplex {_read(){} _write(_data,_encoding,done){done();}}
-  controller.gateway.tcpConnect=async()=>new VncSocket();
+  const connects=[];controller.gateway.upstreamConnect=async({path})=>{connects.push(path);return new VncSocket();};
   const invitation=new URL(lease.url),base=controller.gateway.localUrl+invitation.pathname;
   const post=(action,body={},cookie)=>fetch(base+action,{method:'POST',headers:{origin:invitation.origin,'content-type':'application/json',...(cookie?{cookie}:{})},body:JSON.stringify(body)});
   const claimed=await post('claim',{token:invitation.hash.slice(8)});assert.equal(claimed.status,200);
   const cookie=claimed.headers.get('set-cookie').split(';')[0];
-  return{post:(action,body)=>post(action,body,cookie),open:async generation=>{
+  return{connects,post:(action,body)=>post(action,body,cookie),open:async generation=>{
     const ws=new WebSocket(base.replace('http:','ws:')+'stream/'+generation,{origin:invitation.origin,headers:{cookie}});
     ws.on('error',()=>{});t.after(()=>ws.terminate());await once(ws,'open');return ws;
   }};
@@ -141,7 +141,9 @@ test('controller integrates real gateway control credentials, clipboard and dura
   const watching=await(await viewer.post('credentials')).json();assert.equal(watching.password,'watchpass');await viewer.open(watching.generation);
   const response=await viewer.post('control'),control=await response.json();assert.equal(response.status,200,JSON.stringify(control));assert.equal(control.password,'ctrlpass');
   const registration=c.supervisor.register({ownedId:lease.id});assert.notEqual(registration.credentials.watch.slice(0,8),registration.credentials.control.slice(0,8));
+  assert.deepEqual(registration.endpoint,{path:'/tmp/fixture-control.sock'});
   await viewer.open(control.generation);
+  assert.deepEqual(viewer.connects,['/tmp/fixture-watch.sock','/tmp/fixture-control.sock']);
   assert.equal((await viewer.post('clipboard',{action:'write',text:'秘密🙂'})).status,200);
   assert.deepEqual(await(await viewer.post('clipboard',{action:'read'})).json(),{text:'秘密🙂'});
   const done=await viewer.post('done');assert.equal(done.status,200);assert.deepEqual(await done.json(),{mode:'ended',reason:'done',disposition:'retained'});
@@ -203,13 +205,47 @@ test('cancelling a pending acquisition preserves an unrelated active automation 
   await c.request('automationLeave',{callKey:'still-running'});
 });
 
-test('production ensure rejects missing sandbox or authenticated Internet readiness',async t=>{
-  for(const capability of ['browserSandbox','authenticatedInternetReady']){
-    const{controller:c}=await setup(t,{runtime:{status:async()=>({ready:true,displayGeneration:'g1',browserGeneration:'g1',browserSandbox:true,authenticatedInternetReady:true,[capability]:false})}});
-    await assert.rejects(c.request('ensure'),/sandbox|Internet|isolation|readiness/i);
-    await assert.rejects(c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30}),/sandbox|Internet|isolation|readiness/i);
+// Mocks only Date and setTimeout, and only during the readiness wait.
+// Controller startup, heartbeats and shutdown keep real timers.
+async function pastReadinessDeadline(t,operation){
+  t.mock.timers.enable({apis:['Date','setTimeout']});
+  try{
+    const started=Date.now();let settled=false;
+    const outcome=operation().finally(()=>{settled=true;});outcome.catch(()=>{});
+    for(let n=0;n<1000&&!settled;n++){t.mock.timers.tick(100);await new Promise(resolve=>setImmediate(resolve));}
+    assert.equal(settled,true,'readiness wait must end at its deadline');
+    assert.ok(Date.now()-started>=60_000,'readiness wait must last the full deadline');
+    return outcome;
+  }finally{t.mock.timers.reset();}
+}
+
+test('production ensure waits out the readiness deadline when the display or browser is not ready',async t=>{
+  for(const unready of [{ready:false},{browserReady:false}]){
+    let statuses=0;
+    const{controller:c}=await setup(t,{runtime:{status:async()=>{statuses++;return{ready:true,browserReady:true,tainted:false,displayGeneration:'g1',browserGeneration:'g1',...unready};}}});
+    await assert.rejects(pastReadinessDeadline(t,()=>c.request('ensure')),/^Error: Dedicated browser is not ready$/);
+    assert.ok(statuses>1,'ensure polls status until the deadline');
+    await assert.rejects(pastReadinessDeadline(t,()=>c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30})),/not ready/);
     assert.equal(Object.keys(c.ledger.leases).length,0);
   }
+});
+
+test('production ensure rides out a browser restart',async t=>{
+  let statuses=0;
+  const{controller:c}=await setup(t,{runtime:{status:async()=>({ready:true,browserReady:++statuses>2,tainted:false,displayGeneration:'g1',browserGeneration:'g2'})}});
+  const identity=await c.request('ensure');
+  assert.equal(statuses,3);assert.equal(identity.ready,true);assert.equal(identity.browserGeneration,'g2');assert.equal(identity.displayGeneration,'g1');
+});
+
+test('production ensure refuses a tainted desktop without waiting',async t=>{
+  let statuses=0;
+  const{controller:c}=await setup(t,{runtime:{status:async()=>{statuses++;return{ready:false,browserReady:true,tainted:true,displayGeneration:'g1',browserGeneration:'g1'};}}});
+  await assert.rejects(c.request('ensure'),/^Error: Dedicated browser is not ready$/);
+  assert.equal(statuses,1);
+});
+
+test('the noVNC controller defaults to port 19420, clear of the CDP viewer on 19410',()=>{
+  assert.equal(new DesktopController({stateDir:join(tmpdir(),'desktop-controller-port'),profile:'human',runtime:{},transport:{}}).port,19420);
 });
 
 test('completion persistence failure aligns public cleanup failure and private recovery state',async t=>{
