@@ -9,6 +9,7 @@ import { DesktopRpcClient } from './desktop-rpc.mjs';
 import { verifyHostDeps } from './host-deps.mjs';
 import { applyHost, assertHealth, describeHost, hostConfigPatch, hostLocations, planHost, readHostReceipt } from './host-setup.mjs';
 import { activationSummary, inspectSetupActivation, logSetupActivation, requireActiveActivation } from './setup-activation.mjs';
+import { resolveHandoffBrowser } from './browser-config.mjs';
 
 export const ARTIFACTS = Object.freeze({
   cloudflared: Object.freeze({
@@ -302,7 +303,7 @@ async function hostDoctor(o, d, checks) {
   });
   const saved = receipt?.kind === 'v2' ? receipt.saved : undefined;
   if (saved) {
-    await check('configuration', () => hostConfigPatch(o, p, saved, d, h, { requireConfigured: true, convertingFrom: saved.convertedFrom }));
+    await check('configuration', () => hostConfigPatch(o, p, saved, d, h, { requireConfigured: true, convertingFrom: saved.convertedFrom, profile: saved.profile, option: saved.option }));
     await check('pinned assets', async () => {
       await privatePath(p.binary, 'file', d);
       if (sha256(await d.fs.readFile(p.binary)) !== d.artifacts.cloudflared.sha256) throw new Error('Installed cloudflared checksum changed');
@@ -311,7 +312,7 @@ async function hostDoctor(o, d, checks) {
     let warnings = [];
     await check('host dependencies', async () => { warnings = await (d.hostResolver?.verify ?? verifyHostDeps)(saved.hostDeps, d, { stat, noSymlinks }); });
     checks.push(...warnings.map(message => ({ name: 'window manager', ok: true, warning: true, message })));
-    await check('controller health', async () => assertHealth(await d.controllerHealth(p.socket), saved.cdpPort));
+    await check('controller health', async () => assertHealth(await d.controllerHealth(p.socket), saved.cdpPort, saved.profile));
     await check('Gateway activation', async () => {
       activation = await inspectSetupActivation({ browser: await configSection('browser', d), plugins: await configSection('plugins', d) }, d);
       if (activation.backend !== 'novnc') throw new Error('Gateway activation does not match the requested noVNC backend');
@@ -341,7 +342,15 @@ async function selectHostOption(o, d) {
   const receipt = await readHostReceipt(o, hostLocations(o, d), d, setupHelpers);
   if (receipt.kind === 'v2') Object.assign(o, { option: receipt.saved.option, profile: receipt.saved.profile });
   else if (receipt.kind === 'v1' && (await configSection('plugins', d)).entries?.['browser-handoff']?.config?.desktop?.enabled === true) o.option = 'new';
-  else o.option = await unmarkedCdpReceipt(d) ? 'existing' : 'new';
+  else if (!await unmarkedCdpReceipt(d)) o.option = 'new';
+  else {
+    // The takeover serves the profile the CDP viewer was bound to.
+    const browser = await configSection('browser', d);
+    let bound;
+    try { bound = resolveHandoffBrowser({ config: { browser }, pluginConfig: {} }).profile; }
+    catch (error) { throw new Error('The CDP install has no usable default browser profile (' + error.message + '). Rerun setup with --browser-profile <name>, or setup --cdp to keep the CDP viewer.'); }
+    Object.assign(o, { option: 'existing', profile: bound });
+  }
 }
 
 async function hostSetup(o, d) {

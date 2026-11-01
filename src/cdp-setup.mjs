@@ -6,6 +6,8 @@ import { activationSummary, captureSetupActivation, inspectSetupActivation, logS
 const identity = 'clawser-cdp-setup-v1';
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+// An install without the mark predates the noVNC default. Plain setup takes it over.
+const UPGRADE = 'run setup to switch to noVNC, or setup --cdp to keep the CDP viewer';
 
 async function syncPath(path, d) {
   const file = await d.fs.open(path, 'r');
@@ -165,9 +167,10 @@ export async function runCdpSetup(o, d, h) {
       }
     }
     if (saved) await check('pinned cloudflared', () => binary(p, saved, d, h, true));
+    if (saved && saved.explicitCdp !== true) checks.push({ name: 'upgrade', ok: true, warning: true, message: UPGRADE });
     if (connection) d.log('Browser connection: ' + connection.profile + '\nCDP: ' + connection.cdpUrl);
     logSetupActivation(activation, d);
-    for (const row of checks) d.log((row.ok ? 'OK ' : 'FAIL ') + row.name + (row.message ? ': ' + row.message : ''));
+    for (const row of checks) d.log((row.warning ? 'WARN ' : row.ok ? 'OK ' : 'FAIL ') + row.name + (row.message ? ': ' + row.message : ''));
     return { ok: checks.every(row => row.ok), pending: checks.some(row => row.pending), command: o.command, backend: 'cdp', checks, stateDir: o.stateDir, activation: activationSummary(activation), ...(connection ? { profile: connection.profile, cdpUrl: connection.cdpUrl } : {}) };
   }
   const failed = checks.filter(row => !row.ok);
@@ -193,7 +196,7 @@ export async function runCdpSetup(o, d, h) {
     await h.noSymlinks(o.stateDir, d);
     await d.fs.mkdir(o.stateDir, { mode: 0o700 });
     await h.privatePath(o.stateDir, 'directory', d);
-    saved = { identity, uid: d.uid, ownerId: randomUUID(), stateDir: o.stateDir, pendingBinaryDigest: d.artifacts.cloudflared.sha256 };
+    saved = { identity, uid: d.uid, ownerId: randomUUID(), stateDir: o.stateDir, pendingBinaryDigest: d.artifacts.cloudflared.sha256, ...o.explicitCdp ? { explicitCdp: true } : {} };
     const file = await d.fs.open(p.marker, 'wx', 0o600);
     try { await file.writeFile(JSON.stringify(saved) + '\n'); await file.sync(); }
     finally { await file.close(); }
@@ -226,6 +229,10 @@ export async function runCdpSetup(o, d, h) {
       delete saved.pendingBinaryDigest;
       await h.atomicPrivate(p.marker, JSON.stringify(saved) + '\n', d);
       await syncPath(o.stateDir, d);
+    }
+    if (o.explicitCdp && saved.explicitCdp !== true) {
+      saved.explicitCdp = true;
+      await h.atomicPrivate(p.marker, JSON.stringify(saved) + '\n', d);
     }
     config = await current(d, h);
     const latest = binding(config, o);

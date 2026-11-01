@@ -30,7 +30,7 @@ async function handWritten(t, { config = userProfile(), chrome = {}, xvfb = {}, 
   w.foreign['my-xvfb.service'] = unit('my-xvfb.service', 300);
   w.foreign['my-openbox.service'] = unit('my-openbox.service', 350);
   w.takeover = [...w.args, '--browser-profile', 'user'];
-  // Unit texts never leave runClawser, so the rendered units are read from the plan itself.
+  // Unit texts never leave runClawser. The rendered units are read from the plan itself.
   w.plan = (extra = {}) => planHost({ command: 'setup', stateDir: w.stateDir, profile: 'user', port: 19420, dryRun: true, yes: false, cdp: false, migrateCookies: true,
     specified: ['--state-dir', '--browser-profile', '--dry-run'], option: 'existing', ...extra }, w.deps, setupHelpers);
   w.unchanged = async () => {
@@ -213,6 +213,11 @@ test('option B refuses a profile or Chrome it cannot read cleanly', async t => {
       'Chrome was upgraded while it was running; restart it, then rerun setup.'],
     [w => { w.foreign['my-chrome.service'].Environment = '"LANG=fr_FR.UTF-8'; },
       'Could not read the Environment= settings of my-chrome.service; move them onto the Chrome command line or remove them, then rerun setup.'],
+    [w => { w.foreign['my-chrome.service'].Environment = 'LANG=fr_FR.UTF-8 NOVALUE'; }, /^Could not read the Environment= settings of my-chrome\.service/],
+    [w => { w.foreign['my-chrome.service'].Environment = '"GREETING=a\tb"'; }, /^Could not read the Environment= settings of my-chrome\.service/],
+    [async w => { await fs.rm(join(w.root, 'proc/400/exe')); await fs.symlink('/snap/chromium/123/usr/lib/chromium-browser/chrome', join(w.root, 'proc/400/exe')); }, /^Snap Chromium can't use the hidden folder/],
+    [async w => { await fs.writeFile(join(w.root, 'proc/400/cgroup'), `0::/user.slice/user-${w.deps.uid}.slice/user@${w.deps.uid}.service/app.slice/${w.names.browser}\n`); }, /^Setup arguments conflict/],
+    [async w => { await net(w.root, ''); w.busy([9222]); }, 'port 9222 is in use'],
   ];
   for (const [change, message] of cases) {
     const w = await handWritten(t);

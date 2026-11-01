@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import { join } from 'node:path';
 
-// A fake /proc under <root>/proc: pid folders and the net/tcp tables that listenRows parses.
+// A fake /proc under <root>/proc: pid folders and the net/tcp listen tables.
 const HEADER = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n';
 export const row = (address, port, inode, st = '0A') =>
   `   0: ${address}:${port.toString(16).toUpperCase().padStart(4, '0')} 00000000:0000 ${st} 00000000:00000000 00:00000000 00000000  1000        0 ${inode} 1 0 100 0\n`;

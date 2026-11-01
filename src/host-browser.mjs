@@ -121,8 +121,9 @@ async function scanListeners(port, d, accept) {
   }
 }
 
+// A Chrome whose binary was upgraded underneath it reports `<exe> (deleted)`; it is still the listener.
 export const listenerProcess = (port, d) => scanListeners(port, d, (info, row) =>
-  /^(chrome|chromium)$/.test(basename(info.exe)) && !info.argv.some(arg => arg.startsWith('--type=')) && { pid: info.pid, address: row.address });
+  /^(chrome|chromium)$/.test(basename(info.exe.replace(/ \(deleted\)$/, ''))) && !info.argv.some(arg => arg.startsWith('--type=')) && { pid: info.pid, address: row.address });
 
 export const portHolder = (port, d) => scanListeners(port, d, info => ({ pid: info.pid, exe: info.exe, cgroup: info.cgroup }));
 
