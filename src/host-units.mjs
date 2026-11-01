@@ -4,7 +4,8 @@ import { isAbsolute } from 'node:path';
 export const CLAWSER_CHROME_FLAGS = Object.freeze(['--ozone-platform', '--password-store', '--ignore-gpu-blocklist', '--window-size', '--window-position', '--start-maximized', '--remote-debugging-address', '--remote-debugging-port', '--no-first-run', '--no-default-browser-check']);
 // systemd expands $ in Exec words but not in Environment= values.
 const env = { dollar: false };
-const OWNED_ENV = new Set(['DISPLAY', 'XAUTHORITY', 'WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS']);
+/** Variables the browser unit sets or unsets itself, so a taken-over browser's own values are dropped. */
+export const OWNED_ENV = new Set(['DISPLAY', 'XAUTHORITY', 'WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS']);
 
 export const cdpUrlFor = port => 'http://127.0.0.1:' + port;
 

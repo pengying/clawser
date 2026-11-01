@@ -7,6 +7,12 @@ const NAMES = ['google-chrome-stable', 'google-chrome', 'chromium', 'chromium-br
 const OPT_CHROME = '/opt/google/chrome/chrome';
 export const procRoot = d => d.procRoot ?? '/proc';
 
+/** Parses `systemctl show` output into an object of property strings. */
+export const showProperties = text => Object.fromEntries(String(text).split('\n').filter(Boolean).map(row => [row.slice(0, row.indexOf('=')), row.slice(row.indexOf('=') + 1)]));
+
+/** The refusal for a port something else holds, naming the holder when it is known. */
+export const portInUse = (port, holder) => new Error('port ' + port + ' is in use' + (holder ? ' by ' + holder.exe + ' (pid ' + holder.pid + ')' : ''));
+
 async function executable(path, d) {
   try { const info = await d.fs.stat(path); return info.isFile() && (info.mode & 0o111) !== 0; }
   catch { return false; }

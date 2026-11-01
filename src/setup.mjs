@@ -349,7 +349,7 @@ async function selectHostOption(o, d) {
     let bound;
     try { bound = resolveHandoffBrowser({ config: { browser }, pluginConfig: {} }).profile; }
     catch (error) { throw new Error('The CDP install has no usable default browser profile (' + error.message + '). Rerun setup with --browser-profile <name>, or setup --cdp to keep the CDP viewer.'); }
-    Object.assign(o, { option: 'existing', profile: bound });
+    Object.assign(o, { option: 'existing', profile: bound, upgradingCdp: true });
   }
 }
 

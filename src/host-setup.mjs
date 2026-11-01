@@ -3,10 +3,10 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { captureSetupActivation, waitForSetupActivation } from './setup-activation.mjs';
 import { cdpUrlFor, chromeArgs, renderUnits, unitNames } from './host-units.mjs';
 import { freeDisplay, xauthorityEntry } from './host-display.mjs';
-import { classifyOwner, findBrowserBinary, portHolder } from './host-browser.mjs';
+import { classifyOwner, findBrowserBinary, portHolder, portInUse, showProperties } from './host-browser.mjs';
 import { describeHostPlan, installHostDeps, planHostDeps, verifyHostDeps } from './host-deps.mjs';
 import { resolveHandoffBrowser } from './browser-config.mjs';
-import { afterTakeover, conflict, discoverExisting, moveCookies, takeOver } from './host-takeover.mjs';
+import { afterTakeover, conflict, discoverExisting, moveCookies, removeCookies, rerunExisting, takeOver } from './host-takeover.mjs';
 
 const identity = 'clawser-setup-v2';
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -51,14 +51,14 @@ export async function readHostReceipt(o, p, d, h) {
  */
 export async function hostConfigPatch(o, p, saved, d, h, { requireConfigured = false, convertingFrom, cdpPort = saved?.cdpPort, profile = 'clawser', option = 'new' } = {}) {
   const browser = await h.configSection('browser', d), plugins = await h.configSection('plugins', d), tools = await h.configSection('tools', d);
-  const existing = option === 'existing', name = existing ? profile : 'clawser';
+  const existing = option === 'existing', profileName = existing ? profile : 'clawser';
   const owned = browser.profiles?.clawser, entry = plugins.entries?.['browser-handoff'], desktop = entry?.config?.desktop;
-  const ours = { enabled: true, socketPath: p.socket, profile: name };
+  const ours = { enabled: true, socketPath: p.socket, profile: profileName };
   if (existing) {
     let cdpUrl;
-    try { cdpUrl = resolveHandoffBrowser({ config: { browser }, pluginConfig: {}, profile: name }).cdpUrl; }
-    catch (error) { throw new Error(`Browser profile ${name} is no longer usable (${error.message}); restore it, then rerun setup.`); }
-    if (Number(new URL(cdpUrl).port || 80) !== cdpPort) throw new Error(`Browser profile ${name} now points at ${cdpUrl}, not the browser Clawser runs on port ${cdpPort}; restore it, then rerun setup.`);
+    try { cdpUrl = resolveHandoffBrowser({ config: { browser }, pluginConfig: {}, profile: profileName }).cdpUrl; }
+    catch (error) { throw new Error(`Browser profile ${profileName} is no longer usable (${error.message}); restore it, then rerun setup.`); }
+    if (Number(new URL(cdpUrl).port || 80) !== cdpPort) throw new Error(`Browser profile ${profileName} now points at ${cdpUrl}, not the browser Clawser runs on port ${cdpPort}; restore it, then rerun setup.`);
   } else if (owned !== undefined && (!saved || !fieldsMatch(owned, profileConfig(cdpPort)))) throw new Error('Browser profile clawser is unowned or conflicts with Clawser');
   const inertDesktop = (!saved || saved.pendingInertDesktop === true) && fieldsMatch(desktop, { enabled: false });
   if (!saved && inertDesktop) o.pendingInertDesktop = true;
@@ -71,7 +71,7 @@ export async function hostConfigPatch(o, p, saved, d, h, { requireConfigured = f
   const list = (value, name) => { if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) throw new Error('Conflicting ' + name + ' allowlist'); return value; };
   if (plugins.deny?.includes('browser-handoff') || tools.deny?.includes('browser_handoff')) throw new Error('Existing deny policy conflicts with Clawser; resolve it explicitly before setup');
   const patch = {
-    browser: existing ? { defaultProfile: name } : { profiles: { clawser: profileConfig(cdpPort) }, defaultProfile: 'clawser' },
+    browser: existing ? { defaultProfile: profileName } : { profiles: { clawser: profileConfig(cdpPort) }, defaultProfile: 'clawser' },
     plugins: { entries: { 'browser-handoff': { enabled: true, config: { desktop: ours, cloudflare: { enabled: false } } } } },
     tools: {},
   };
@@ -80,7 +80,7 @@ export async function hostConfigPatch(o, p, saved, d, h, { requireConfigured = f
   if (tools.allow !== undefined) list(tools.allow, 'tools.allow');
   if (tools.alsoAllow !== undefined) list(tools.alsoAllow, 'tools.alsoAllow');
   patch.tools[toolKey] = [...new Set([...(tools[toolKey] || []), 'browser_handoff'])];
-  if (requireConfigured && ((!existing && !fieldsMatch(owned, profileConfig(cdpPort))) || !fieldsMatch(desktop, ours) || entry?.enabled !== true || !tools[toolKey]?.includes('browser_handoff') || (plugins.allow && !plugins.allow.includes('browser-handoff')) || browser.defaultProfile !== name)) throw new Error('Owned OpenClaw browser/profile/plugin/tool configuration is incomplete; rerun setup');
+  if (requireConfigured && ((!existing && !fieldsMatch(owned, profileConfig(cdpPort))) || !fieldsMatch(desktop, ours) || entry?.enabled !== true || !tools[toolKey]?.includes('browser_handoff') || (plugins.allow && !plugins.allow.includes('browser-handoff')) || browser.defaultProfile !== profileName)) throw new Error('Owned OpenClaw browser/profile/plugin/tool configuration is incomplete; rerun setup');
   return patch;
 }
 
@@ -101,8 +101,7 @@ async function classify(path, desired, recorded, d, h) {
 }
 
 async function unitStatus(name, p, d) {
-  const output = await d.run('systemctl', ['--user', 'show', name, '--property=LoadState,FragmentPath,ActiveState', '--no-pager']);
-  const status = Object.fromEntries(String(output).split('\n').filter(Boolean).map(row => [row.slice(0, row.indexOf('=')), row.slice(row.indexOf('=') + 1)]));
+  const status = showProperties(await d.run('systemctl', ['--user', 'show', name, '--property=LoadState,FragmentPath,ActiveState', '--no-pager']));
   if (status.LoadState !== 'not-found' && status.FragmentPath !== unitPath(p, name)) throw new Error('Refusing unmanaged conflicting user service: ' + name);
   return status;
 }
@@ -118,7 +117,7 @@ async function checkPort(port, p, d) {
   const holder = await (d.portHolder ?? portHolder)(port, d);
   const owner = holder && classifyOwner(holder.cgroup, d.uid);
   if (owner?.kind === 'user-unit' && Object.values(p.names).includes(owner.unit)) return;
-  throw new Error('port ' + port + ' is in use' + (holder ? ' by ' + holder.exe + ' (pid ' + holder.pid + ')' : ''));
+  throw portInUse(port, holder);
 }
 
 async function firstFreeCdpPort(d) {
@@ -137,8 +136,8 @@ async function linger(d, warnings) {
   if (!on) warnings.push('Linger is off, so these services stop when you log out. Run: loginctl enable-linger');
 }
 
-const optionB = 'Taking over an existing browser is not implemented yet';
 const dockerEra = 'This state folder holds a Docker-era install, which converts to a new browser profile only. Run setup without --browser-profile, or choose another --state-dir.';
+const dockerEraFromCdp = name => `This state folder holds a Docker-era install, which converts to a new browser profile only, and your CDP viewer uses browser profile ${name}. Run setup --browser-profile ${name} --state-dir <another folder> to keep its logins, or setup --cdp to keep the CDP viewer.`;
 const noWm = 'Chrome popups and dialogs open at 0,0 without stacking';
 
 export async function planHost(o, d, h) {
@@ -146,8 +145,7 @@ export async function planHost(o, d, h) {
   const receipt = await readHostReceipt(o, p, d, h);
   const v2 = receipt.kind === 'v2' ? receipt.saved : undefined, v1 = receipt.kind === 'v1' ? receipt.saved : undefined;
   if (v2 && (v2.option !== option || v2.profile !== o.profile)) throw new Error(conflict);
-  if (v2?.option === 'existing') throw new Error(optionB);
-  if (v1 && option === 'existing') throw new Error(dockerEra);
+  if (v1 && option === 'existing') throw new Error(o.upgradingCdp ? dockerEraFromCdp(o.profile) : dockerEra);
   if (v2 && o.specified.includes('--port') && o.port !== v2.port) throw new Error(conflict);
   if (v2 && v2.unitDir !== p.unitDir) throw unitDirMoved(v2.unitDir, p);
   if (v1?.options?.servicePath && v1.options.servicePath !== unitPath(p, p.names.controller)) throw unitDirMoved(dirname(v1.options.servicePath), p);
@@ -157,7 +155,7 @@ export async function planHost(o, d, h) {
   for (const path of [p.socket, p.control, join(p.vncDir, 'vnc-0000000000000000.sock')]) {
     if (Buffer.byteLength(path) > 107) throw new Error('Socket path ' + path + ' is longer than 107 bytes; choose a shorter --state-dir');
   }
-  const found = option === 'existing' ? await discoverExisting(o, p, d, h) : undefined;
+  const found = option !== 'existing' ? undefined : v2 ? await rerunExisting(o, p, v2, d, h) : await discoverExisting(o, p, d, h);
   const browser = found ? found.browser : { path: (await (d.findBrowserBinary ?? findBrowserBinary)(d)).path, existingArgs: [], env: [] };
   const host = await resolver(d).plan(v2?.hostDeps, d, { stat: h.stat, noSymlinks: h.noSymlinks });
   const warnings = [...host.warnings ?? [], ...found?.warnings ?? []], bins = host.binaries;
@@ -169,7 +167,7 @@ export async function planHost(o, d, h) {
   const cdpPort = found ? found.cdpPort : v2 ? v2.cdpPort : await firstFreeCdpPort(d);
   const port = v2 ? v2.port : o.port;
   // A taken-over Chrome holds its own CDP port until the takeover stops it.
-  for (const n of found ? [port] : [cdpPort, port]) await checkPort(n, p, d);
+  for (const n of found?.sourceCdpUrl ? [port] : [cdpPort, port]) await checkPort(n, p, d);
   const cdpUrl = cdpUrlFor(cdpPort), wm = source ? bins.openbox.path : undefined;
   const profile = found ? found.profile : 'clawser', userDataDir = found ? found.userDataDir : p.profileDir;
   const units = renderUnits({
@@ -212,12 +210,12 @@ export async function planHost(o, d, h) {
   const converted = v1 ? convertedFrom(v1) : v2?.convertedFrom;
   const patch = await hostConfigPatch(o, p, v2, d, h, { convertingFrom: converted, cdpPort, profile, option });
   const previousDefaultProfile = v2 ? v2.previousDefaultProfile ?? null : (await h.configSection('browser', d)).defaultProfile ?? null;
-  // The Docker-era controller stop is not disruptive; closing or taking over the person's browser is.
-  const takesOver = Boolean(found && (found.takeover.length || found.stop.length || found.cookies?.migrate));
+  // The Docker-era controller stop, re-stopping a replaced unit and resuming saved cookies are not disruptive; closing or taking over the person's browser is.
+  const takesOver = Boolean(found && (found.takeover.length || found.stop.some(item => !item.replaced) || (found.cookies?.migrate && !found.cookies.resumeFrom)));
   return {
-    option, profile, display, cdpPort, port, userDataDir, ...found?.profileDirectory !== undefined ? { profileDirectory: found.profileDirectory } : {}, ...found ? { sourceCdpUrl: found.sourceCdpUrl } : {}, browser, units,
+    option, profile, display, cdpPort, port, userDataDir, ...found?.profileDirectory !== undefined ? { profileDirectory: found.profileDirectory } : {}, ...found?.sourceCdpUrl ? { sourceCdpUrl: found.sourceCdpUrl } : {}, browser, units,
     writes: files.filter(file => file.state !== 'current').map(file => ({ path: file.path, digest: file.text === undefined ? null : sha256(file.text), ...file.unit ? { unit: file.unit } : {}, consumer: file.consumer })),
-    start, restart, stop, takeover: found?.takeover ?? [], ...found?.cookies ? { cookies: found.cookies } : {},
+    start, restart, stop, takeover: found?.takeover ?? [], ...found?.cookies ? { cookies: found.cookies } : {}, staleCookies: found?.staleCookies ?? [],
     disruptive: takesOver || restart.some(name => [p.names.display, p.names.windowManager, p.names.browser].includes(name)),
     warnings, ...converted ? { dockerLeftovers: dockerLeftovers(converted) } : {},
     patch, previousDefaultProfile, hostDeps: host, openboxSource: source, files, convertedFrom: converted, receipt: receipt.kind, saved: receipt.saved, locations: p,
@@ -231,9 +229,10 @@ export const describeHost = plan => [
   'Display: :' + plan.display,
   'Browser: ' + plan.browser.path,
   ...plan.takeover.map(item => 'Take over ' + item.unit + ' (its unit file is backed up first)'),
+  ...plan.stop.filter(item => item.replaced).map(item => 'Stop ' + item.unit + ' again (Clawser replaced it)'),
   ...plan.stop.filter(item => item.kind === 'close-browser').map(item => 'Close the browser running in your desktop session (pid ' + item.pid + ')'),
-  ...plan.cookies?.migrate ? ['Move ' + plan.cookies.count + ' keyring-encrypted cookies into the new browser'] : [],
-  ...plan.stop.filter(item => item.kind === 'unit').map(item => 'Stop the Docker-era controller ' + item.unit),
+  ...!plan.cookies?.migrate ? [] : plan.cookies.resumeFrom ? ['Move the cookies an earlier setup run saved into the new browser'] : ['Move ' + plan.cookies.count + ' keyring-encrypted cookies into the new browser'],
+  ...plan.stop.filter(item => item.kind === 'unit' && !item.replaced).map(item => 'Stop the Docker-era controller ' + item.unit),
   ...plan.writes.map(item => 'Write ' + (item.unit ?? item.path)),
   ...plan.start.map(name => 'Start ' + name),
   ...plan.restart.map(name => 'Restart ' + name),
@@ -283,8 +282,8 @@ export async function applyHost(plan, o, d, h) {
   catch (error) { if (error.code === 'EEXIST') throw new Error('Clawser setup is already locked; inspect the existing setup process before retrying'); throw error; }
   const after = { stopped: [], closed: false };
   try {
-    // A desktop-session browser closes later, after every write, in takeOver.
-    for (const item of plan.stop.filter(item => item.kind === 'unit')) {
+    // A desktop-session browser and units Clawser replaced stop later, after every write, in takeOver.
+    for (const item of plan.stop.filter(item => item.kind === 'unit' && !item.replaced)) {
       await d.run('systemctl', ['--user', 'stop', item.unit]);
       await d.run('systemctl', ['--user', 'disable', item.unit]);
     }
@@ -296,6 +295,8 @@ export async function applyHost(plan, o, d, h) {
       Object.assign(saved, { packageDir: d.packageDir, execPath: d.execPath, browser: browserRecord(plan) });
       if (!same(saved, plan.saved)) await save(saved, p, d, h);
     }
+    // Saved cookies nobody will import are plaintext; they go before anything stops.
+    await removeCookies(plan.staleCookies, d, plan.warnings);
     // Option B runs the person's own profile folder. Clawser creates none.
     for (const path of [p.state, p.runtime, p.vncDir, dirname(p.binary), dirname(p.assets), dirname(p.openboxConfig), ...existing ? [] : [dirname(p.profileDir), p.profileDir]]) await privateDir(path, d, h);
     const { record: hostDeps, warnings } = await resolver(d).install(plan.hostDeps, d, { previous: saved.hostDeps });

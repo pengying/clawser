@@ -227,6 +227,7 @@ export async function runCdpSetup(o, d, h) {
     if (o.explicitCdp && saved.explicitCdp !== true) {
       saved.explicitCdp = true;
       await h.atomicPrivate(p.marker, JSON.stringify(saved) + '\n', d);
+      await syncPath(o.stateDir, d);
     }
     config = await current(d, h);
     const latest = binding(config, o);

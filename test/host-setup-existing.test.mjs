@@ -540,8 +540,9 @@ test('a crash before the takeover stop resumes the takeover without a second bac
   await rewriteReceipt(w, saved => { saved.replaced = saved.replaced.filter(item => item.unit === 'my-chrome.service'); });
   const [chrome] = (await w.receipt()).replaced;
   assert.equal(chrome?.unit, 'my-chrome.service');
-  for (const name of ['my-xvfb.service', 'my-openbox.service']) await fs.rm(join(chrome.backup, name));
-  assert.ok(await exists(join(chrome.backup, 'my-chrome.service')));
+  // A run killed between its backups and its receipt save leaves an unrecorded copy behind. Openbox's is gone, Xvfb's stays.
+  await fs.rm(join(chrome.backup, 'my-openbox.service'));
+  assert.ok(await exists(join(chrome.backup, 'my-chrome.service')) && await exists(join(chrome.backup, 'my-xvfb.service')));
   await fs.writeFile(join(w.unitDir, 'my-xvfb.service'), '[Service]\nExecStart=/usr/bin/Xvfb :20 -edited\n');
   const stale = await leftover(w, 'cookies-old');
   w.calls.length = 0;
@@ -556,7 +557,7 @@ test('a crash before the takeover stop resumes the takeover without a second bac
   assert.deepEqual(saved.replaced.map(item => item.unit).sort(), MY_UNITS);
   assert.deepEqual(await fs.readdir(join(w.stateDir, 'backups')), [basename(chrome.backup)]);
   assert.ok(saved.replaced.every(item => item.backup === chrome.backup), JSON.stringify(saved.replaced));
-  // The units new to this run are backed up as they are now, beside Chrome's first copy.
+  // The units new to this run are backed up as they are now, beside Chrome's first copy, replacing an unrecorded one.
   assert.equal(await fs.readFile(join(chrome.backup, 'my-xvfb.service'), 'utf8'), '[Service]\nExecStart=/usr/bin/Xvfb :20 -edited\n');
   assert.equal(await fs.readFile(join(chrome.backup, 'my-openbox.service'), 'utf8'), w.originals['my-openbox.service']);
   assert.equal(await fs.readFile(join(chrome.backup, 'my-chrome.service.d/override.conf'), 'utf8'), DROP_IN);
@@ -606,6 +607,18 @@ test('a resumed takeover on a different display is refused', async t => {
   w.calls.length = 0;
   await assert.rejects(runClawser(w.yes, w.deps), /Setup arguments conflict/);
   assert.deepEqual(w.mutations(), []);
+  // The receipt is bound to the first port too, so a profile moved to another one is refused the same way.
+  const moved = await applyWorld(t);
+  crashAt(moved, 'stop');
+  await assert.rejects(runClawser(moved.yes, moved.deps), /setup was killed/);
+  moved.config.browser.profiles.user.cdpUrl = 'http://127.0.0.1:9333';
+  await net(moved.root, row('0100007F', 9222, 4242) + row('0100007F', 9333, 4343));
+  await proc(moved.root, 500, { argv: ['/opt/google/chrome/chrome', `--user-data-dir=${moved.udd}`, '--remote-debugging-port=9333'], env: ['DISPLAY=:20'],
+    cgroup: `0::/user.slice/user-${moved.deps.uid}.slice/user@${moved.deps.uid}.service/app.slice/my-chrome.service`, sockets: [4343] });
+  moved.foreign['my-chrome.service'].MainPID = '500';
+  moved.calls.length = 0;
+  await assert.rejects(runClawser(moved.yes, moved.deps), /Setup arguments conflict/);
+  assert.deepEqual(moved.mutations(), []);
 });
 
 test('cookies saved by an interrupted run are imported on the next run and then removed', async t => {
