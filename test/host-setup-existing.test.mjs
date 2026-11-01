@@ -334,15 +334,40 @@ test('a failed cookie import warns and still finishes setup', async t => {
   Object.assign(w.cookies, { exportCookies: exportsThree, importCookies: async () => { throw new Error('nope'); } });
   const result = await runClawser(w.yes, w.deps);
   assert.equal(result.ok, true);
-  assert.deepEqual(result.warnings.filter(text => text.startsWith('Moving cookies')), ['Moving cookies failed (nope); sign in again to sites that ask.']);
+  assert.deepEqual(result.warnings.filter(text => text.startsWith('Moving cookies')), ['Moving cookies failed (nope); rerun setup to try again, or sign in again to sites that ask.']);
   const saved = await w.receipt();
   assert.equal(saved.cookieMigration.failed, true);
   assert.equal(saved.cookieMigration.imported, 0);
   assert.equal(saved.cookieMigration.exported, 3);
   assert.equal(w.logs.includes(GOOGLE), false);
   assert.ok(w.logs.includes(KEEPS), w.logs.join('\n'));
-  assert.equal(await exists(w.cookieArgs.exportCookies[1]), false, 'the temp folder is removed');
-  assert.deepEqual(await cookieDirs(w), []);
+  // Clawser's browser can't read the profile's keyring cookies, so the export is the only readable copy until an import runs.
+  const kept = async world => {
+    const dirs = await cookieDirs(world);
+    assert.deepEqual(dirs, [basename(world.cookieArgs.exportCookies[1])]);
+    assert.ok(await exists(join(world.stateDir, dirs[0], 'cookies.json')));
+  };
+  await kept(w);
+  // A browser that never answers keeps the export too, and nothing is imported.
+  const slow = await applyWorld(t);
+  await cookieStore(slow.udd, ['v11a', 'v11b', 'v11c']);
+  Object.assign(slow.cookies, { exportCookies: exportsThree, waitForBrowser: async () => { throw new Error('slow'); } });
+  const late = await runClawser(slow.yes, slow.deps);
+  assert.equal(late.ok, true);
+  assert.deepEqual(late.warnings.filter(text => text.startsWith('Moving cookies')), ['Moving cookies failed (slow); rerun setup to try again, or sign in again to sites that ask.']);
+  assert.equal(slow.calls.some(cookieCall('importCookies')), false);
+  assert.equal((await slow.receipt()).cookieMigration.failed, true);
+  assert.equal(slow.logs.includes(GOOGLE), false);
+  await kept(slow);
+  // Once an import has run, a failed flush removes the export, and a rerun has nothing left to retry.
+  const stuck = await applyWorld(t);
+  await cookieStore(stuck.udd, ['v11a', 'v11b', 'v11c']);
+  Object.assign(stuck.cookies, { exportCookies: exportsThree, importCookies: async () => ({ count: 3 }), flushCookies: async () => { throw new Error('stuck'); } });
+  const flushed = await runClawser(stuck.yes, stuck.deps);
+  assert.equal(flushed.ok, true);
+  assert.deepEqual(flushed.warnings.filter(text => text.startsWith('Moving cookies')), ['Moving cookies failed (stuck); sign in again to sites that ask.']);
+  assert.equal((await stuck.receipt()).cookieMigration.failed, true);
+  assert.deepEqual(await cookieDirs(stuck), []);
 });
 
 test('option B closes a desktop-session Chrome and waits for it to exit', async t => {
