@@ -220,7 +220,7 @@ export const describeHost = plan => [
   ...plan.warnings.map(text => 'Warning: ' + text),
 ];
 
-function assertHealth(health, cdpPort) {
+export function assertHealth(health, cdpPort) {
   if (health?.ready !== true || health.recoveryRequired === true || health.profile !== 'clawser' || health.cdpUrl !== cdpUrlFor(cdpPort)) throw new Error('Controller health or profile identity is not ready; inspect its user-service journal before retrying');
 }
 

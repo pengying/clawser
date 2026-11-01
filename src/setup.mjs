@@ -7,7 +7,7 @@ import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DesktopRpcClient } from './desktop-rpc.mjs';
 import { verifyHostDeps } from './host-deps.mjs';
-import { applyHost, describeHost, hostConfigPatch, hostLocations, planHost, readHostReceipt } from './host-setup.mjs';
+import { applyHost, assertHealth, describeHost, hostConfigPatch, hostLocations, planHost, readHostReceipt } from './host-setup.mjs';
 import { activationSummary, inspectSetupActivation, logSetupActivation, requireActiveActivation } from './setup-activation.mjs';
 
 export const ARTIFACTS = Object.freeze({
@@ -285,12 +285,7 @@ async function reloadPlugin(d) {
 
 export const setupHelpers = { stat, noSymlinks, privatePath, readJson, atomicPrivate, download, treeDigest, assets, configSection, reloadPlugin };
 
-const cdpUrlFor = port => 'http://127.0.0.1:' + port;
 const statusLine = row => (row.warning ? 'WARN' : row.ok ? 'OK' : 'FAIL') + ' ' + row.name + (row.message ? ': ' + row.message : '');
-
-function assertHealth(health, cdpPort) {
-  if (health?.ready !== true || health.recoveryRequired === true || health.profile !== 'clawser' || health.cdpUrl !== cdpUrlFor(cdpPort)) throw new Error('Controller health or profile identity is not ready; inspect its user-service journal before retrying');
-}
 
 /** Read-only: it never writes, starts, stops, enables, downloads or patches. */
 async function hostDoctor(o, d, checks) {
@@ -331,6 +326,7 @@ async function hostDoctor(o, d, checks) {
 }
 
 // An unmarked CDP install predates the noVNC default. Plain setup takes over its browser.
+// An enabled Docker-era desktop outranks it: the active backend decides, and Docker converts.
 async function unmarkedCdpReceipt(d) {
   const marker = join(stateRoot(d), 'clawser-cdp', 'setup.json');
   await noSymlinks(marker, d);
@@ -344,6 +340,7 @@ async function selectHostOption(o, d) {
   if (o.specified.includes('--browser-profile')) { o.option = 'existing'; return; }
   const receipt = await readHostReceipt(o, hostLocations(o, d), d, setupHelpers);
   if (receipt.kind === 'v2') Object.assign(o, { option: receipt.saved.option, profile: receipt.saved.profile });
+  else if (receipt.kind === 'v1' && (await configSection('plugins', d)).entries?.['browser-handoff']?.config?.desktop?.enabled === true) o.option = 'new';
   else o.option = await unmarkedCdpReceipt(d) ? 'existing' : 'new';
 }
 
