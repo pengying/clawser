@@ -9,7 +9,7 @@ invitation links, profile contents or private deployment artifacts.
 ```sh
 npm ci --ignore-scripts
 npm test
-npm run test:runtime
+npm run test:desktop
 npm run check:package
 ```
 
@@ -17,7 +17,7 @@ The unit suite includes browser fixtures. Set `CHROME_BIN` to a Chrome/Chromium
 executable; a few fixture tests skip when Chrome is absent, while native picker
 and CDP keyboard integration require it. The CDP fixtures cover focused-frame
 keyboard authority, stale capability revocation and uncertain-input handling.
-`npm run test:runtime` exercises the Docker adapter and readiness logic with test
+`npm run test:desktop` exercises the Docker adapter and readiness logic with test
 doubles and does not start containers.
 
 For the real noVNC/RFB pointer fixtures, download the pinned source archive:
@@ -86,7 +86,7 @@ For development, create a local archive and install its actual filename explicit
 ```sh
 npm ci --ignore-scripts
 npm test
-npm run test:runtime
+npm run test:desktop
 npm pack --ignore-scripts
 openclaw plugins install ./pengying-clawser-VERSION.tgz --force --accept-capabilities
 openclaw clawser setup --dry-run

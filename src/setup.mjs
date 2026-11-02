@@ -29,7 +29,7 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 const stateRoot = d => d.env.OPENCLAW_STATE_DIR || join(d.homeDir, '.openclaw');
 const REMOVED_FLAGS = ['--cdp-port', '--vnc-port', '--container-name', '--no-default-profile'];
 
-function execute(command, args, { input = '', timeoutMs = 30_000, combined = false, env } = {}) {
+export function execute(command, args, { input = '', timeoutMs = 30_000, combined = false, env } = {}) {
   return new Promise((accept, reject) => {
     const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], ...env ? { env } : {} });
     let stdout = '', stderr = '', overflow = false;

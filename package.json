@@ -29,7 +29,8 @@
     "test:live": "node test/live-browser.mjs",
     "demo": "node test/demo.mjs",
     "start": "node src/dev.mjs",
-    "test:runtime": "node --test runtime/desktop/test/*.test.mjs",
+    "test:desktop": "node --test runtime/desktop/test/*.test.mjs",
+    "test:e2e": "node test/host-desktop-e2e.mjs",
     "setup": "node bin/clawser.mjs setup",
     "doctor": "node bin/clawser.mjs doctor",
     "check:package": "node scripts/check-package.mjs"

@@ -37,7 +37,7 @@ const firstLine = child => new Promise((resolve, reject) => {
 });
 
 test('RFB VNC auth reads a pixel from a private x11vnc socket', { skip: noX || (has('x11vnc') ? false : 'needs x11vnc'), timeout: 60_000 }, async () => {
-  const x = await startX({ numbered: true });
+  const x = await startX();
   const socketPath = join(x.dir, 'vnc.sock'), passwordFile = join(x.dir, 'vnc-password'), password = 'e2e-pass';
   let vnc, painter;
   try {

@@ -58,8 +58,8 @@ jobs:
         env:
           CLAWSER_BROWSER_DIAGNOSTICS_DIR: ${{ runner.temp }}/clawser-browser-diagnostics
         run: npm test
-      - name: Runtime adapter and readiness tests
-        run: npm run test:runtime
+      - name: Desktop runtime tests
+        run: npm run test:desktop
       - name: Verify distributable package
         run: npm run check:package
       - name: Retain browser bootstrap diagnostics
@@ -133,5 +133,44 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/clawser-registry" --ignore-scripts --no-audit --no-fund clawhub@0.23.3
           "$RUNNER_TEMP/clawser-registry/node_modules/.bin/clawhub" package publish . --family code-plugin --dry-run --json
 
-  # Docker builds and real desktop integration are intentionally opt-in local
-  # checks; see CONTRIBUTING.md. This workflow never uses a signed-in profile.
+  host-desktop:
+    name: Host noVNC end to end
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install the host desktop packages
+        run: |
+          sudo apt-get update && sudo apt-get install -y xvfb x11vnc openbox
+          sudo loginctl enable-linger "$USER"
+      - name: Wait for the user service manager
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'XDG_RUNTIME_DIR=/run/user/%s\n' "$(id -u)" >> "$GITHUB_ENV"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          for _ in $(seq 60); do test -S "$XDG_RUNTIME_DIR/bus" && break; sleep 1; done
+          timeout 120 systemctl --user is-system-running --wait || true
+      - name: Prepare the disposable browser
+        shell: bash
+        run: |
+          set -euo pipefail
+          chrome_bin=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium)
+          test -x "$chrome_bin"
+          printf 'CHROME_BIN=%s\n' "$chrome_bin" >> "$GITHUB_ENV"
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Desktop runtime tests
+        run: npm run test:desktop
+      - name: Host noVNC end to end
+        env:
+          CLAWSER_HOST_E2E: '1'
+        run: npm run test:e2e

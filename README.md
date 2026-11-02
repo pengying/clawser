@@ -187,7 +187,7 @@ noVNC implementation.
 ```sh
 npm ci --ignore-scripts
 npm test
-npm run test:runtime
+npm run test:desktop
 npm run check:package
 ```
 
