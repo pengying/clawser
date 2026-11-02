@@ -3,13 +3,12 @@ import { isAbsolute, join } from 'node:path';
 import { resolveHandoffBrowser } from './browser-config.mjs';
 import { cookieEncryption, showProperties } from './host-browser.mjs';
 import { verifyHostDeps } from './host-deps.mjs';
-import { assertHealth, hostConfigPatch, hostLocations, readHostReceipt, renderHost, unitDirMoved } from './host-setup.mjs';
-import { cdpUrlFor, chromeArgs } from './host-units.mjs';
+import { LINGER_OFF, ROLES, assertHealth, assertProfilePort, hostConfigPatch, hostLocations, lingerOn, readHostReceipt, renderHost, unitDirMoved } from './host-setup.mjs';
+import { chromeArgs } from './host-units.mjs';
 import { inspectSetupActivation, requireActiveActivation } from './setup-activation.mjs';
 
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const rerun = 'rerun openclaw clawser setup';
-const ROLES = ['display', 'windowManager', 'browser', 'supervisor', 'controller'];
 const firstLine = error => String(error?.message ?? error).split('\n')[0];
 
 async function present(path, d) {
@@ -51,11 +50,10 @@ export async function diagnoseHost(o, d, h, checks) {
   if (!saved) return { activation, saved };
   const units = ROLES.map(role => p.names[role]).filter(name => saved.units?.[name]);
 
+  // readHostReceipt already required a private state folder and receipt, or installation failed.
   const owned = await check('ownership', async () => {
-    await h.privatePath(o.stateDir, 'directory', d);
-    await h.privatePath(p.marker, 'file', d);
     // Unit names, sockets and the X cookie are all bound to the folder setup ran in.
-    if (saved.stateDir !== o.stateDir) throw new Error(`This state folder was set up as ${saved.stateDir}; move it back there, then rerun doctor`);
+    if (saved.stateDir !== o.stateDir) throw new Error(`This state folder was set up as ${saved.stateDir}; move it back there, then rerun openclaw clawser doctor`);
     if (saved.unitDir !== p.unitDir) throw unitDirMoved(saved.unitDir, p);
   });
   await check('configuration', () => hostConfigPatch(o, p, saved, d, h, { requireConfigured: true, convertingFrom: saved.convertedFrom, profile: saved.profile, option: saved.option }));
@@ -102,18 +100,16 @@ export async function diagnoseHost(o, d, h, checks) {
   });
   await check('CDP origin', async () => {
     const { cdpUrl } = resolveHandoffBrowser({ config: { browser: await h.configSection('browser', d) }, pluginConfig: {}, profile: saved.profile });
-    if (cdpUrl !== cdpUrlFor(saved.cdpPort)) throw new Error(`Browser profile ${saved.profile} points at ${cdpUrl}, not ${cdpUrlFor(saved.cdpPort)}; ${rerun}`);
+    assertProfilePort(saved.profile, cdpUrl, saved.cdpPort);
   });
   // Option B's folder is the person's own. Doctor reports a loose mode there too, and never fixes it.
   await check('profile directory', async () => {
     const dir = saved.userDataDir, info = await present(dir, d);
-    if (!info?.isDirectory()) throw new Error(`${dir} is missing`);
+    if (!info) throw new Error(`${dir} is missing`);
+    if (!info.isDirectory()) throw new Error(`${dir} is not a folder`);
     if (info.mode & 0o077) throw new Error(`${dir} is readable by other users; run: chmod 700 ${dir}`);
   });
-  await check('linger', async () => {
-    const on = await d.run('loginctl', ['show-user', String(d.uid), '-p', 'Linger', '--value']).then(out => String(out).trim() === 'yes', () => false);
-    if (!on) throw new Error('Linger is off, so these services stop when you log out. Run: loginctl enable-linger');
-  });
+  await check('linger', async () => { if (!await lingerOn(d)) throw new Error(LINGER_OFF); });
   // Rendering needs the recorded binaries, and the unit files sit where ownership vouched for them.
   const bins = saved.hostDeps?.binaries;
   if (owned && ['Xvfb', 'x11vnc', 'python3'].every(name => typeof bins?.[name]?.path === 'string')) await check('units current', async () => {
@@ -145,14 +141,14 @@ export async function diagnoseHost(o, d, h, checks) {
     const { v11 } = store ? await cookieEncryption(store, d) : { v11: 0 };
     if (v11 > 0) return `${v11} cookies are still encrypted with the desktop keyring, which Clawser's browser can't read; sign in again to sites that ask.`;
   });
-  // A kept export is the only readable copy of the person's logins, in plaintext, until a rerun moves it over.
-  await advise('cookie export', async () => {
+  // Only option B setup saves cookie exports, and only its rerun moves them over and removes them.
+  if (saved.option === 'existing') await advise('cookie export', async () => {
     const folders = [];
     for (const name of (await d.fs.readdir(o.stateDir)).sort()) {
       const dir = join(o.stateDir, name);
       if (name.startsWith('cookies-') && (await h.stat(dir, d))?.isDirectory() && (await h.stat(join(dir, 'cookies.json'), d))?.isFile()) folders.push(dir);
     }
-    if (folders.length) return `An earlier setup run saved cookies in ${folders.join(', ')}; rerun openclaw clawser setup to move them over and remove it.`;
+    if (folders.length) return `An earlier setup run saved cookies in ${folders.join(', ')}; rerun openclaw clawser setup to move them over and remove ${folders.length > 1 ? 'them' : 'it'}.`;
   });
   return { activation, saved, units };
 }

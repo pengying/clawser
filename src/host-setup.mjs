@@ -16,7 +16,7 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 const json = value => JSON.stringify(value, null, 2) + '\n';
 const fieldsMatch = (current, wanted) => object(current) && Object.entries(wanted).every(([key, value]) => current[key] === value) && Object.keys(current).every(key => own(wanted, key));
 const profileConfig = cdpPort => ({ cdpUrl: cdpUrlFor(cdpPort), driver: 'openclaw', engine: 'chromium', attachOnly: true });
-const ROLES = ['display', 'windowManager', 'browser', 'supervisor', 'controller'];
+export const ROLES = ['display', 'windowManager', 'browser', 'supervisor', 'controller'];
 const CDP_PORTS = Array.from({ length: 10 }, (_, i) => 18820 + i);
 const resolver = d => d.hostResolver ?? { plan: planHostDeps, install: installHostDeps, verify: verifyHostDeps, describe: describeHostPlan };
 
@@ -49,6 +49,14 @@ export async function readHostReceipt(o, p, d, h) {
  * `cdpPort` defaults to the receipt's; planning a fresh install passes the chosen one. `convertingFrom` is `{ profile, containerName, imageId? }`.
  * Option B (`option: 'existing'`) points the default and the desktop at the named profile and never writes `browser.profiles`.
  */
+/** A profile reaches Clawser's browser on a loopback name for 127.0.0.1 at the recorded port. Chrome's DevTools does not listen on [::1]. */
+export function assertProfilePort(name, cdpUrl, cdpPort) {
+  const url = new URL(cdpUrl);
+  if (!['127.0.0.1', 'localhost'].includes(url.hostname) || Number(url.port || 80) !== cdpPort) {
+    throw new Error(`Browser profile ${name} now points at ${cdpUrl}, not the browser Clawser runs on port ${cdpPort}; restore it, then rerun setup.`);
+  }
+}
+
 export async function hostConfigPatch(o, p, saved, d, h, { requireConfigured = false, convertingFrom, cdpPort = saved?.cdpPort, profile = 'clawser', option = 'new' } = {}) {
   const browser = await h.configSection('browser', d), plugins = await h.configSection('plugins', d), tools = await h.configSection('tools', d);
   const existing = option === 'existing', profileName = existing ? profile : 'clawser';
@@ -58,7 +66,7 @@ export async function hostConfigPatch(o, p, saved, d, h, { requireConfigured = f
     let cdpUrl;
     try { cdpUrl = resolveHandoffBrowser({ config: { browser }, pluginConfig: {}, profile: profileName }).cdpUrl; }
     catch (error) { throw new Error(`Browser profile ${profileName} is no longer usable (${error.message}); restore it, then rerun setup.`); }
-    if (Number(new URL(cdpUrl).port || 80) !== cdpPort) throw new Error(`Browser profile ${profileName} now points at ${cdpUrl}, not the browser Clawser runs on port ${cdpPort}; restore it, then rerun setup.`);
+    assertProfilePort(profileName, cdpUrl, cdpPort);
   } else if (owned !== undefined && (!saved || !fieldsMatch(owned, profileConfig(cdpPort)))) throw new Error('Browser profile clawser is unowned or conflicts with Clawser');
   const inertDesktop = (!saved || saved.pendingInertDesktop === true) && fieldsMatch(desktop, { enabled: false });
   if (!saved && inertDesktop) o.pendingInertDesktop = true;
@@ -131,9 +139,12 @@ const convertedFrom = v1 => ({ profile: v1.options?.profile, containerName: v1.o
 const dockerLeftovers = ({ containerName: name, imageId }) =>
   [...name ? ['docker rm -f ' + name, 'docker network rm ' + name + '-net', 'docker volume rm ' + name + '-profile'] : [], ...imageId ? ['docker image rm ' + imageId] : []];
 
+export const LINGER_OFF = 'Linger is off, so these services stop when you log out. Run: loginctl enable-linger';
+/** Whether the user's services keep running after they log out. A failed read counts as off. */
+export const lingerOn = d => d.run('loginctl', ['show-user', String(d.uid), '-p', 'Linger', '--value']).then(out => String(out).trim() === 'yes', () => false);
+
 async function linger(d, warnings) {
-  const on = await d.run('loginctl', ['show-user', String(d.uid), '-p', 'Linger', '--value']).then(out => String(out).trim() === 'yes', () => false);
-  if (!on) warnings.push('Linger is off, so these services stop when you log out. Run: loginctl enable-linger');
+  if (!await lingerOn(d)) warnings.push(LINGER_OFF);
 }
 
 const dockerEra = 'This state folder holds a Docker-era install, which converts to a new browser profile only. Run setup without --browser-profile, or choose another --state-dir.';
