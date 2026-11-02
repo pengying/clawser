@@ -1,5 +1,17 @@
 # Changes
 
+## 0.7.0
+
+- Make noVNC on the host the default handoff. Setup gives the agent its own Google Chrome, or Chromium, on a private virtual screen run by five user services. A link shows the whole browser window and every tab, so native dropdowns, date pickers, file choosers, dialogs and popups work from a phone.
+- Remove the Docker desktop. Clawser no longer builds an image, runs a container or needs Docker. The display, window manager, browser, supervisor and controller run as systemd user services. Setup needs Xvfb, x11vnc and python3, and recommends openbox. It installs none of them and prints the distro command for anything missing.
+- Remove the `--container-name`, `--cdp-port`, `--vnc-port` and `--no-default-profile` flags. Passing one now fails. The standalone `bin/clawser.mjs` names it: "<flag> was removed in 0.7.0 along with the Docker desktop".
+- Rerun setup after upgrading: run `openclaw clawser setup --dry-run`, then `openclaw clawser setup --yes`. A CDP install switches to noVNC with the browser profile it already uses. A Docker desktop install converts to a new browser profile, and setup prints the Docker commands to remove its leftovers. Setup does not run them. A `git:` install moves the plugin folder, so rerun setup after every upgrade.
+- Add option B, `--browser-profile <name>`, which hands an existing OpenClaw browser profile to Clawser and keeps its logins. It closes that browser, or takes over the user services that run it, only with `--yes`. Cookies encrypted with the desktop keyring move into the new browser over CDP. Sign in to Google once and re-save site passwords afterwards. `--no-migrate-cookies` skips the move.
+- Keep the one-tab CDP viewer behind `setup --cdp`. Doctor tells an older CDP install to "run setup to switch to noVNC, or setup --cdp to keep the CDP viewer".
+- Add doctor rows for the host install: `services`, `display`, `browser window`, `CDP origin`, `profile directory`, `linger` and `units current`. Option B installs also get `cookie store` and `cookie export` warnings.
+- Run the noVNC viewer's Copy and Paste buttons through a small built-in clipboard helper instead of xclip, so the clipboard needs no extra package.
+- Make handoffs work on hosts whose desktop session runs Wayland.
+
 ## 0.6.3
 
 - Route an ordinary browser call that omits `target` to the host browser instead of refusing it. OpenClaw's browser tool tells agents that `target` defaults to the host, so agents left it out and every first call failed with "Browser access requires target=\"host\"". Explicit sandbox or node targets, other profiles and endpoint overrides are still refused, and non-owners are still blocked.
