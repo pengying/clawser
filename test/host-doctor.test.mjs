@@ -5,13 +5,14 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { runClawser } from '../src/setup.mjs';
 import { hostWorld, movePackage } from './host-fixture.mjs';
-import { applyWorld, cookieDirs, cookieStore, exportsThree } from './host-existing-fixture.mjs';
+import { applyWorld, cookieDirs, cookieStore, exportsThree, userProfile } from './host-existing-fixture.mjs';
 
 const HOST_ROWS = ['installation', 'ownership', 'configuration', 'pinned assets', 'host dependencies', 'services', 'display', 'browser window',
   'CDP origin', 'profile directory', 'linger', 'units current', 'controller health', 'Gateway activation'];
 const LINGER = 'Linger is off, so these services stop when you log out. Run: loginctl enable-linger';
 const KEYRING = n => `${n} cookies are still encrypted with the desktop keyring, which Clawser's browser can't read; sign in again to sites that ask.`;
-const EXPORT = folders => `An earlier setup run saved cookies in ${folders.join(', ')}; rerun openclaw clawser setup to move them over and remove it.`;
+const EXPORT = folders => `An earlier setup run saved cookies in ${folders.join(', ')}; rerun openclaw clawser setup to move them over and remove ${folders.length > 1 ? 'them' : 'it'}.`;
+const ELSEWHERE = (name, url, port) => `Browser profile ${name} now points at ${url}, not the browser Clawser runs on port ${port}; restore it, then rerun setup.`;
 
 // Doctor may read: systemctl show, loginctl show-user, xproof clients, openclaw config get, and the version probes of its prerequisites.
 const readOnly = call => (call.command === 'systemctl' && ['show', 'show-environment'].includes(call.args[1]))
@@ -134,6 +135,10 @@ test('a group-readable profile directory fails doctor', async t => {
   assert.deepEqual(failed(result), ['profile directory']);
   assert.equal(((await fs.stat(dir)).mode & 0o777), 0o750, 'doctor reports and never fixes');
   await fs.rm(dir, { recursive: true });
+  await fs.writeFile(dir, '', { mode: 0o600 });
+  result = await doctor(w);
+  assert.equal(row(result, 'profile directory').message, `${dir} is not a folder`);
+  await fs.rm(dir);
   result = await doctor(w);
   assert.equal(row(result, 'profile directory').message, `${dir} is missing`);
 });
@@ -222,11 +227,48 @@ test('a profile pointing at another port fails the CDP origin check', async t =>
   w.config.browser.profiles.clawser.cdpUrl = 'http://127.0.0.1:18821';
   let result = await doctor(w);
   assert.equal(result.ok, false);
-  assert.equal(row(result, 'CDP origin').message, 'Browser profile clawser points at http://127.0.0.1:18821, not http://127.0.0.1:18820; rerun openclaw clawser setup');
+  assert.equal(row(result, 'CDP origin').message, ELSEWHERE('clawser', 'http://127.0.0.1:18821', 18820));
+  // Chrome's DevTools listens on 127.0.0.1, so an IPv6 loopback origin does not reach it.
+  w.config.browser.profiles.clawser.cdpUrl = 'http://[::1]:18820';
+  result = await doctor(w);
+  assert.equal(row(result, 'CDP origin').message, ELSEWHERE('clawser', 'http://[::1]:18820', 18820));
   w.config.browser.profiles.clawser.cdpUrl = 'http://127.0.0.1:18820';
   w.config.browser.profiles.clawser.attachOnly = false;
   result = await doctor(w);
   assert.equal(row(result, 'CDP origin').message, 'Browser profile requires attachOnly=true; browser launch is unsupported');
+});
+
+test('an option B profile on localhost passes the CDP origin check', async t => {
+  const config = userProfile();
+  config.browser.profiles.user.cdpUrl = 'http://localhost:9222';
+  const w = await applyWorld(t, { config });
+  const setup = await runClawser(w.yes, w.deps);
+  assert.equal(setup.ok, true, JSON.stringify(setup));
+  assert.equal(w.config.browser.profiles.user.cdpUrl, 'http://localhost:9222', 'setup leaves the person\'s profile as it was');
+  const result = await doctor(w);
+  assert.equal(result.ok, true, JSON.stringify(result.checks));
+  assert.deepEqual(row(result, 'CDP origin'), { name: 'CDP origin', ok: true });
+  // Another port on localhost is still the wrong browser.
+  w.config.browser.profiles.user.cdpUrl = 'http://localhost:9223';
+  assert.equal(row(await doctor(w), 'CDP origin').message, ELSEWHERE('user', 'http://localhost:9223', 9222));
+});
+
+test('a moved systemd unit folder fails ownership', async t => {
+  const w = await installed(t);
+  const before = w.deps.env.XDG_CONFIG_HOME, moved = join(w.root, 'config-moved');
+  w.deps.env.XDG_CONFIG_HOME = moved;
+  let result = await doctor(w);
+  assert.equal(result.ok, false);
+  assert.equal(row(result, 'ownership').message, `The systemd user unit folder changed since setup (${join(before, 'systemd/user')} → ${join(moved, 'systemd/user')})`);
+  assert.equal(row(result, 'units current'), undefined, 'unit files are compared only where ownership vouched for them');
+  assert.deepEqual(failed(result), ['ownership']);
+  // A receipt that names another state folder fails the same row.
+  w.deps.env.XDG_CONFIG_HOME = before;
+  const marker = join(w.stateDir, 'setup.json'), saved = await w.receipt(), elsewhere = join(w.root, 'elsewhere');
+  await fs.writeFile(marker, JSON.stringify({ ...saved, stateDir: elsewhere }, null, 2) + '\n', { mode: 0o600 });
+  result = await doctor(w);
+  assert.equal(row(result, 'ownership').message, `This state folder was set up as ${elsewhere}; move it back there, then rerun openclaw clawser doctor`);
+  assert.deepEqual(failed(result), ['ownership']);
 });
 
 test('a saved cookie export is a warning that says to rerun setup', async t => {
@@ -251,6 +293,11 @@ test('a saved cookie export is a warning that says to rerun setup', async t => {
   assert.equal(rerun.ok, true, JSON.stringify(rerun));
   assert.deepEqual(await cookieDirs(w), []);
   assert.equal(row(await doctor(w), 'cookie export'), undefined);
+  // Option A setup never saves or moves cookies, so the rerun advice would not hold there.
+  const a = await installed(t);
+  await fs.mkdir(join(a.stateDir, 'cookies-a'), { mode: 0o700 });
+  await fs.writeFile(join(a.stateDir, 'cookies-a/cookies.json'), '[{"name":"sid"}]', { mode: 0o600 });
+  assert.equal(row(await doctor(a), 'cookie export'), undefined);
 });
 
 test('an option B install checks its own profile directory and warns about keyring cookies left behind', async t => {
