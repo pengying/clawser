@@ -44,6 +44,8 @@ private_dir(VNC_DIR)
 private_dir(os.path.dirname(CONTROL))
 os.environ['DISPLAY']=':%d'%DISPLAY
 os.environ['XAUTHORITY']=CONFIG['xauthority']
+# x11vnc exits when it sees a Wayland session, even with -display.
+os.environ.pop('WAYLAND_DISPLAY',None)
 
 children=[]
 actor=None
