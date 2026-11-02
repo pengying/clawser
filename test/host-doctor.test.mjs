@@ -206,6 +206,11 @@ test('a hand-edited unit file says to rerun setup', async t => {
   assert.deepEqual(failed(result), ['units current']);
   await fs.writeFile(browser, original);
   assert.equal((await doctor(w)).ok, true);
+  // Setup refuses a unit file other users can write, so doctor reports it the way setup would.
+  await fs.chmod(browser, 0o664);
+  result = await doctor(w);
+  assert.equal(row(result, 'units current').message, 'Refusing unowned or non-private file: ' + browser);
+  await fs.chmod(browser, 0o600);
   await fs.rm(join(w.unitDir, w.names.controller));
   result = await doctor(w);
   assert.equal(row(result, 'units current').message, `${w.names.controller} differs from what setup would write; rerun openclaw clawser setup`);
@@ -239,11 +244,13 @@ test('a saved cookie export is a warning that says to rerun setup', async t => {
   assert.equal(hostRows(result).at(-1).name, 'cookie export');
   assert.ok(w.logs.includes('WARN cookie export: ' + EXPORT(folders)), w.logs.join('\n'));
   assert.doesNotMatch(JSON.stringify(result) + w.logs.join('\n'), /"sid"/);
-  // Option A setup never saves or moves cookies, so a rerun would not clear the warning.
-  const a = await installed(t);
-  await fs.mkdir(join(a.stateDir, 'cookies-x'), { mode: 0o700 });
-  await fs.writeFile(join(a.stateDir, 'cookies-x/cookies.json'), '[]', { mode: 0o600 });
-  assert.equal(row(await doctor(a), 'cookie export'), undefined);
+  // A rerun moves the export over and removes it, and the warning goes with it. Clawser's own browser holds the port now.
+  await fs.writeFile(join(w.root, 'proc/400/cgroup'), `0::/user.slice/user-${w.deps.uid}.slice/user@${w.deps.uid}.service/app.slice/${w.names.browser}\n`);
+  Object.assign(w.cookies, { importCookies: async () => ({ count: 1 }), countCookies: async () => 1 });
+  const rerun = await runClawser([...w.args, '--yes'], w.deps);
+  assert.equal(rerun.ok, true, JSON.stringify(rerun));
+  assert.deepEqual(await cookieDirs(w), []);
+  assert.equal(row(await doctor(w), 'cookie export'), undefined);
 });
 
 test('an option B install checks its own profile directory and warns about keyring cookies left behind', async t => {

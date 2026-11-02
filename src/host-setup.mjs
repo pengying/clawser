@@ -125,7 +125,7 @@ async function firstFreeCdpPort(d) {
   throw new Error('No free CDP port between 18820 and 18829');
 }
 
-const unitDirMoved = (old, p) => new Error('The systemd user unit folder changed since setup (' + old + ' → ' + p.unitDir + ')');
+export const unitDirMoved = (old, p) => new Error('The systemd user unit folder changed since setup (' + old + ' → ' + p.unitDir + ')');
 
 const convertedFrom = v1 => ({ profile: v1.options?.profile, containerName: v1.options?.containerName, ...v1.imageId ? { imageId: v1.imageId } : {} });
 const dockerLeftovers = ({ containerName: name, imageId }) =>
@@ -139,6 +139,20 @@ async function linger(d, warnings) {
 const dockerEra = 'This state folder holds a Docker-era install, which converts to a new browser profile only. Run setup without --browser-profile, or choose another --state-dir.';
 const dockerEraFromCdp = name => `This state folder holds a Docker-era install, which converts to a new browser profile only, and your CDP viewer uses browser profile ${name}. Run setup --browser-profile ${name} --state-dir <another folder> to keep its logins, or setup --cdp to keep the CDP viewer.`;
 const noWm = 'Chrome popups and dialogs open at 0,0 without stacking';
+
+/** Pure: the unit texts and the two configs they read. `browser` is `{ path, args, env }`; the args already carry the profile folder. */
+export function renderHost({ p, display, cdpPort, port, profile, browser, bins, wm, execPath }) {
+  const cdpUrl = cdpUrlFor(cdpPort);
+  const units = renderUnits({
+    names: p.names, marker: p.marker, display, xauthority: p.xauthority, xvfb: bins.Xvfb.path, openbox: wm, openboxConfig: p.openboxConfig,
+    python: bins.python3.path, supervisorScript: p.supervisorScript, supervisorConfig: p.supervisorConfig,
+    node: execPath, controllerScript: p.controllerScript, controllerConfig: p.config, browser,
+  });
+  const controller = { stateDir: p.state, profile, port, socketPath: p.socket, noVncAssetsDir: p.assets,
+    runtime: { stateDir: p.runtime, controlSocket: p.control, cdpUrl }, transport: { binaryPath: p.binary, startupTimeoutMs: 90_000 } };
+  const supervisor = { display, xauthority: p.xauthority, controlSocket: p.control, vncDir: p.vncDir, cdpUrl, x11vnc: bins.x11vnc.path };
+  return { units, controller, supervisor };
+}
 
 export async function planHost(o, d, h) {
   const p = hostLocations(o, d), option = o.option === 'existing' ? 'existing' : 'new';
@@ -168,17 +182,10 @@ export async function planHost(o, d, h) {
   const port = v2 ? v2.port : o.port;
   // A taken-over Chrome holds its own CDP port until the takeover stops it.
   for (const n of found?.sourceCdpUrl ? [port] : [cdpPort, port]) await checkPort(n, p, d);
-  const cdpUrl = cdpUrlFor(cdpPort), wm = source ? bins.openbox.path : undefined;
+  const wm = source ? bins.openbox.path : undefined;
   const profile = found ? found.profile : 'clawser', userDataDir = found ? found.userDataDir : p.profileDir;
-  const units = renderUnits({
-    names: p.names, marker: p.marker, display, xauthority: p.xauthority, xvfb: bins.Xvfb.path, openbox: wm, openboxConfig: p.openboxConfig,
-    python: bins.python3.path, supervisorScript: p.supervisorScript, supervisorConfig: p.supervisorConfig,
-    node: d.execPath, controllerScript: p.controllerScript, controllerConfig: p.config,
-    browser: { path: browser.path, args: found ? found.args : chromeArgs({ existing: [], userDataDir, cdpPort }), env: browser.env },
-  });
-  const controller = { stateDir: p.state, profile, port, socketPath: p.socket, noVncAssetsDir: p.assets,
-    runtime: { stateDir: p.runtime, controlSocket: p.control, cdpUrl }, transport: { binaryPath: p.binary, startupTimeoutMs: 90_000 } };
-  const supervisor = { display, xauthority: p.xauthority, controlSocket: p.control, vncDir: p.vncDir, cdpUrl, x11vnc: bins.x11vnc.path };
+  const { units, controller, supervisor } = renderHost({ p, display, cdpPort, port, profile, bins, wm, execPath: d.execPath,
+    browser: { path: browser.path, args: found ? found.args : chromeArgs({ existing: [], userDataDir, cdpPort }), env: browser.env } });
   const names = ROLES.map(role => p.names[role]).filter(name => units[name]);
   const files = [
     { path: p.xauthority, kind: 'xauthority', consumer: p.names.display },

@@ -6,9 +6,9 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DesktopRpcClient } from './desktop-rpc.mjs';
-import { verifyHostDeps } from './host-deps.mjs';
-import { applyHost, assertHealth, describeHost, hostConfigPatch, hostLocations, planHost, readHostReceipt } from './host-setup.mjs';
-import { activationSummary, inspectSetupActivation, logSetupActivation, requireActiveActivation } from './setup-activation.mjs';
+import { diagnoseHost } from './host-doctor.mjs';
+import { applyHost, describeHost, hostLocations, planHost, readHostReceipt } from './host-setup.mjs';
+import { activationSummary, logSetupActivation } from './setup-activation.mjs';
 import { resolveHandoffBrowser } from './browser-config.mjs';
 
 export const ARTIFACTS = Object.freeze({
@@ -29,9 +29,9 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 const stateRoot = d => d.env.OPENCLAW_STATE_DIR || join(d.homeDir, '.openclaw');
 const REMOVED_FLAGS = ['--cdp-port', '--vnc-port', '--container-name', '--no-default-profile'];
 
-function execute(command, args, { input = '', timeoutMs = 30_000, combined = false } = {}) {
+function execute(command, args, { input = '', timeoutMs = 30_000, combined = false, env } = {}) {
   return new Promise((accept, reject) => {
-    const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], ...env ? { env } : {} });
     let stdout = '', stderr = '', overflow = false;
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
     child.stdout.on('data', bytes => {
@@ -288,38 +288,9 @@ export const setupHelpers = { stat, noSymlinks, privatePath, readJson, atomicPri
 
 const statusLine = row => (row.warning ? 'WARN' : row.ok ? 'OK' : 'FAIL') + ' ' + row.name + (row.message ? ': ' + row.message : '');
 
-/** Read-only: it never writes, starts, stops, enables, downloads or patches. */
+/** Read-only: it never writes, starts, stops, enables, downloads or patches. The rows come from diagnoseHost. */
 async function hostDoctor(o, d, checks) {
-  const h = setupHelpers, p = hostLocations(o, d);
-  let receipt, activation;
-  const check = async (name, work) => {
-    try { await work(); checks.push({ name, ok: true }); }
-    catch (error) { checks.push({ name, ok: false, message: error.message, ...(error.pending ? { pending: true } : {}) }); }
-  };
-  await check('installation', async () => {
-    receipt = await readHostReceipt(o, p, d, h);
-    if (receipt.kind === 'v1') throw new Error('This is a Docker desktop install from an older Clawser; rerun openclaw clawser setup');
-    if (receipt.kind === 'none') throw new Error('No owned Clawser setup found; run openclaw clawser setup');
-  });
-  const saved = receipt?.kind === 'v2' ? receipt.saved : undefined;
-  if (saved) {
-    await check('configuration', () => hostConfigPatch(o, p, saved, d, h, { requireConfigured: true, convertingFrom: saved.convertedFrom, profile: saved.profile, option: saved.option }));
-    await check('pinned assets', async () => {
-      await privatePath(p.binary, 'file', d);
-      if (sha256(await d.fs.readFile(p.binary)) !== d.artifacts.cloudflared.sha256) throw new Error('Installed cloudflared checksum changed');
-      if (!saved.assetsDigest || await treeDigest(p.assets, d) !== saved.assetsDigest) throw new Error('Installed noVNC assets checksum changed');
-    });
-    let warnings = [];
-    await check('host dependencies', async () => { warnings = await (d.hostResolver?.verify ?? verifyHostDeps)(saved.hostDeps, d, { stat, noSymlinks }); });
-    checks.push(...warnings.map(message => ({ name: 'window manager', ok: true, warning: true, message })));
-    await check('controller health', async () => assertHealth(await d.controllerHealth(p.socket), saved.cdpPort, saved.profile));
-    await check('Gateway activation', async () => {
-      activation = await inspectSetupActivation({ browser: await configSection('browser', d), plugins: await configSection('plugins', d) }, d);
-      if (activation.backend !== 'novnc') throw new Error('Gateway activation does not match the requested noVNC backend');
-      requireActiveActivation(activation);
-    });
-  }
-  const units = saved && Object.values(p.names).filter(name => saved.units?.[name]);
+  const { activation, saved, units } = await diagnoseHost(o, d, setupHelpers, checks);
   logSetupActivation(activation, d);
   for (const row of checks) d.log(statusLine(row));
   for (const line of [...(units ?? []).map(name => 'Unit: ' + name), 'State: ' + o.stateDir, ...saved ? ['Display: :' + saved.display] : []]) d.log(line);

@@ -295,7 +295,7 @@ test('different execution captures preserve the trusted stable installation in r
     await fs.mkdir(join(capture, 'src'), { recursive: true });
     await fs.mkdir(join(capture, 'runtime/desktop'), { recursive: true });
     for (const relative of ['src/setup.mjs', 'src/setup-activation.mjs', 'src/host-units.mjs', 'src/browser-activation.mjs', 'src/browser-policy.mjs', 'src/browser-config.mjs', 'src/authorization.mjs', 'openclaw.plugin.json', 'src/desktop-rpc.mjs', 'runtime/desktop/index.mjs',
-      'src/host-setup.mjs', 'src/host-takeover.mjs', 'src/host-browser.mjs', 'src/host-deps.mjs', 'src/host-display.mjs']) await fs.copyFile(new URL(`../${relative}`, import.meta.url), join(capture, relative));
+      'src/host-setup.mjs', 'src/host-takeover.mjs', 'src/host-browser.mjs', 'src/host-deps.mjs', 'src/host-display.mjs', 'src/host-doctor.mjs']) await fs.copyFile(new URL(`../${relative}`, import.meta.url), join(capture, relative));
   }
   const firstModule = await import(pathToFileURL(join(captures[0], 'src/setup.mjs')).href);
   const secondModule = await import(pathToFileURL(join(captures[1], 'src/setup.mjs')).href);
@@ -476,7 +476,8 @@ test('doctor validates an owned installation without downloads or mutations', as
   const result = await runClawser(['doctor', '--state-dir', h.stateDir], h.deps);
   assert.equal(result.ok, true, JSON.stringify(result.checks));
   assert.deepEqual(Object.keys(result).sort(), ['activation', 'backend', 'checks', 'command', 'display', 'ok', 'pending', 'stateDir', 'units']);
-  assert.deepEqual(result.checks.map(row => row.name).slice(-6), ['installation', 'configuration', 'pinned assets', 'host dependencies', 'controller health', 'Gateway activation']);
+  assert.deepEqual(result.checks.map(row => row.name).slice(-14), ['installation', 'ownership', 'configuration', 'pinned assets', 'host dependencies', 'services', 'display', 'browser window',
+    'CDP origin', 'profile directory', 'linger', 'units current', 'controller health', 'Gateway activation']);
   assert.deepEqual(h.mutations(), []);
   assert.equal(h.calls.some(call => call.command === 'fetch'), false);
 });
