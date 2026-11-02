@@ -1,15 +1,12 @@
 # Third-party components
 
-`chromium-seccomp.json` derives from the Moby default seccomp profile:
-https://github.com/moby/profiles/blob/main/seccomp/default.json
+noVNC is pinned to upstream 1.7.0. Setup downloads it and checks its SHA-256.
+Its MPL-2.0 license and source files stay in the downloaded asset folder.
 
-The upstream profile is licensed under Apache-2.0; its license is included as
-`MOBY-LICENSE`. Local modifications narrowly permit the namespace and chroot
-operations required by Chromium's sandbox; the deployment verification records
-the tested positive and negative syscall cases.
+Xvfb, x11vnc, openbox, python3 and the X libraries come from the host's
+distribution packages. Their copyright and license files stay where the
+distribution installs them, usually `/usr/share/doc`. Google Chrome or Chromium
+is the operator's own browser. None of these ship in this package.
 
-Chromium, Xvfb, x11vnc, Openbox and other image components are installed from
-Debian packages, whose copyright/license files remain in `/usr/share/doc` inside
-the image. noVNC is separately pinned to upstream1.7.0 with its MPL-2.0 license
-and source files retained in the configured asset directory. cloudflared is an
-operator-installed Cloudflare binary, not part of this package archive.
+cloudflared is a Cloudflare binary that setup downloads and checks. It is not
+part of this package archive.
