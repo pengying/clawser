@@ -65,6 +65,12 @@ test('the supervisor unit kills its x11vnc children with it', () => {
   for (const s of ['KillMode=control-group', 'Restart=on-failure', 'UMask=0077', 'NoNewPrivileges=true', `Wants=${n.display} ${n.browser}`, `After=${n.display} ${n.browser}`, 'ExecStart="/usr/bin/python3" "/pkg/supervisor.py" "/state/sup.json"']) assert.ok(u.includes(s), s);
 });
 
+test('the supervisor unit drops a Wayland session from its x11vnc environment', () => {
+  const n = unitNames('/state');
+  const service = render()[n.supervisor].split('[Service]\n')[1];
+  assert.match(service, /^UnsetEnvironment=WAYLAND_DISPLAY$/m);
+});
+
 test('the controller unit follows the supervisor', () => {
   const n = unitNames('/state');
   const u = render()[n.controller];

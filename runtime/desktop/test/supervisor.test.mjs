@@ -80,7 +80,7 @@ async function until(check, ms, what) {
 const exists = path => fs.lstat(path).then(() => true, () => false);
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-async function desktop(t, { cdpDown = false } = {}) {
+async function desktop(t, { cdpDown = false, extraEnv = {} } = {}) {
   const x = await startX({ numbered: true });
   const cdp = await fakeCdp();
   cdp.down = cdpDown;
@@ -93,6 +93,7 @@ async function desktop(t, { cdpDown = false } = {}) {
   // The config alone must name the display.
   const env = { ...x.env, DESKTOP_TEST_HEARTBEAT_TIMEOUT_MS: '2000' };
   delete env.DISPLAY; delete env.XAUTHORITY;
+  Object.assign(env, extraEnv);
   const children = [], pgids = new Set(), holders = [], timers = new Set(), displays = [];
   const h = {
     x, cdp, display, controlSocket, vncDir, config, env,
@@ -257,6 +258,17 @@ test('a watch viewer serves RFB only on its private socket', opts, async t => {
     for (const row of (await fs.readFile(table, 'utf8').catch(() => '')).split('\n').slice(1).filter(Boolean).map(line => line.trim().split(/\s+/)))
       if (row[3] === '0A') assert.ok(!inodes.has(row[9]), `x11vnc listens on TCP ${row[1]}`);
   }
+});
+
+// A desktop session's user manager exports WAYLAND_DISPLAY, and x11vnc exits when it sees one.
+test('a Wayland session in the environment does not stop the supervisor from starting a viewer', opts, async t => {
+  const h = await desktop(t, { extraEnv: { WAYLAND_DISPLAY: 'wayland-0' } });
+  const viewer = await h.start('wayland-watch', 'watch');
+  assert.ok(alive(viewer.pid), 'x11vnc exited');
+  assert.ok(viewer.xClients.some(client => client.pid === viewer.pid));
+  const { banner } = await rfbSecurityTypes(viewer.socketPath);
+  assert.match(banner, /^RFB 003\.00[38]\n/);
+  assert.ok(alive(viewer.pid), 'x11vnc exited after serving RFB');
 });
 
 test('settling a control viewer releases a key held outside it', opts, async t => {
