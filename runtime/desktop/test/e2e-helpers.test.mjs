@@ -2,16 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { spawn, execFile, execFileSync } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn, execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { skip as noX, startX } from './xvfb.mjs';
-import { processTree, readPixel, tcpListeners } from '../../../test/host-desktop-e2e.mjs';
+import { firstLine, processTree, readPixel, tcpListeners } from './rfb.mjs';
 
-const execute = promisify(execFile);
 const has = bin => { try { execFileSync('which', [bin], { stdio: 'ignore' }); return true; } catch { return false; } };
-const script = new URL('../../../test/host-desktop-e2e.mjs', import.meta.url).pathname;
 const noProc = existsSync('/proc/net/tcp') ? false : 'needs Linux /proc';
 // The painter stays connected until stdin closes: Xvfb resets the root window when its last client leaves.
 const PAINT_ROOT = `
@@ -31,10 +28,6 @@ print('painted',flush=True);sys.stdin.read()
 // argv after -e: the listener kind, then a socket path for 'unix'.
 const LISTENER = "const net=require('node:net');const [kind,path]=process.argv.slice(1);net.createServer().listen(kind==='tcp'?{host:'127.0.0.1',port:0}:{path},()=>process.stdout.write('up\\n'))";
 const PARENT = "require('node:child_process').spawn(process.execPath,['-e',process.argv[1],'tcp'],{stdio:'inherit'})";
-const firstLine = child => new Promise((resolve, reject) => {
-  child.stdout.once('data', bytes => resolve(String(bytes)));
-  child.once('exit', code => reject(new Error('child exited ' + code)));
-});
 
 test('RFB VNC auth reads a pixel from a private x11vnc socket', { skip: noX || (has('x11vnc') ? false : 'needs x11vnc'), timeout: 60_000 }, async () => {
   const x = await startX();
@@ -49,7 +42,7 @@ test('RFB VNC auth reads a pixel from a private x11vnc socket', { skip: noX || (
       await sleep(50);
     }
     painter = spawn('python3', ['-c', PAINT_ROOT], { env: x.env, stdio: ['pipe', 'pipe', 'inherit'] });
-    assert.equal((await firstLine(painter)).trim(), 'painted');
+    assert.equal(await firstLine(painter), 'painted');
     const green = pixel => pixel.g > 200 && pixel.r < 60 && pixel.b < 60;
     const pixel = await readPixel({ socketPath, password, until: green });
     assert.deepEqual({ width: pixel.width, height: pixel.height, x: pixel.x, y: pixel.y }, { width: 640, height: 480, x: 320, y: 240 });
@@ -64,13 +57,13 @@ test('RFB VNC auth reads a pixel from a private x11vnc socket', { skip: noX || (
 
 test('the TCP listener scan finds a listening socket and ignores a unix one', { skip: noProc, timeout: 30_000 }, async () => {
   const dir = await fs.mkdtemp('/tmp/clawser-scan-');
-  const parent = spawn(process.execPath, ['-e', PARENT, LISTENER], { stdio: ['ignore', 'pipe', 'inherit'] });
+  // Its own process group, so the listener it spawns dies with it even if a step fails first.
+  const parent = spawn(process.execPath, ['-e', PARENT, LISTENER], { stdio: ['ignore', 'pipe', 'inherit'], detached: true });
   const unix = spawn(process.execPath, ['-e', LISTENER, 'unix', join(dir, 'listen.sock')], { stdio: ['ignore', 'pipe', 'inherit'] });
-  let tree = [];
   try {
     await Promise.all([firstLine(parent), firstLine(unix)]);
     // The listener is the parent's child, so only the child walk can find it.
-    tree = await processTree(parent.pid);
+    const tree = await processTree(parent.pid);
     assert.equal(tree.length, 2);
     assert.equal(tree[0], parent.pid);
     const found = await tcpListeners(tree);
@@ -80,15 +73,8 @@ test('the TCP listener scan finds a listening socket and ignores a unix one', { 
     assert.deepEqual(await tcpListeners([parent.pid]), []);
     assert.deepEqual(await tcpListeners(await processTree(unix.pid)), []);
   } finally {
-    for (const pid of tree.slice(1)) { try { process.kill(pid); } catch {} }
-    parent.kill(); unix.kill();
+    try { process.kill(-parent.pid, 'SIGKILL'); } catch {}
+    unix.kill();
     await fs.rm(dir, { recursive: true, force: true });
   }
-});
-
-test('the e2e script skips without CLAWSER_HOST_E2E', async () => {
-  const env = { ...process.env };
-  delete env.CLAWSER_HOST_E2E;
-  const { stdout } = await execute(process.execPath, [script], { env });
-  assert.equal(stdout, 'host noVNC end to end skipped (set CLAWSER_HOST_E2E=1 on a disposable runner)\n');
 });
