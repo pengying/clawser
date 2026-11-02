@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import { execFile } from 'node:child_process';
+import { createServer } from 'node:net';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
@@ -31,6 +32,17 @@ export const mutations = (calls, artifacts) => calls.filter(call =>
   (call.command === 'systemctl' && !READ_ONLY_SYSTEMCTL.includes(call.args[1])) || String(call.args?.[0]).endsWith('/openbox_config.py') ||
   isPatch(call) || (call.command === 'openclaw' && call.args[1] === 'reload'));
 
+/** Points `w.deps.packageDir` at a fresh copy of the package, the way a git upgrade moves the plugin. */
+export async function movePackage(w, name = 'package-moved') {
+  const packageDir = join(w.root, name);
+  for (const file of PACKAGE_FILES) {
+    await fs.mkdir(dirname(join(packageDir, file)), { recursive: true });
+    await fs.writeFile(join(packageDir, file), 'fixture');
+  }
+  w.deps.packageDir = packageDir;
+  return packageDir;
+}
+
 /** A Linux host that runClawser can set up in host mode: real tar, fake systemd, loginctl and OpenClaw, and docker is a failure. */
 export async function hostWorld(t, { root, config = {}, stateName = 'state', packageName = 'package', deps = {}, run: fallback, calls = [] } = {}) {
   // macOS tmpdir() is long and behind a symlink; sockets under it would exceed 107 bytes.
@@ -52,7 +64,8 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
   const rc = join(root, 'rc.xml');
   await fs.writeFile(rc, '<openbox_config/>\n');
   const binaries = { Xvfb: entry('/usr/bin/Xvfb'), x11vnc: entry('/home/linuxbrew/.linuxbrew/bin/x11vnc'), python3: entry('/usr/bin/python3'), openbox: entry('/usr/bin/openbox') };
-  const logs = [], units = new Map();
+  const logs = [], units = new Map(), pids = new Map(), sockets = new Map();
+  let nextPid = 5000;
   // A docker call inside a doctor check or a caught probe would otherwise vanish.
   t.after(() => assert.deepEqual(calls.filter(call => call.command === 'docker'), [], 'setup must never run docker'));
   let busy = [];
@@ -62,6 +75,10 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
   const world = {
     root, stateDir, unitDir, packageDir, config, calls, logs, units, binaries, artifacts, rc,
     names: unitNames(stateDir), args: ['setup', '--state-dir', stateDir], linger: 'yes\n', corrupt: false, fragments: {},
+    // Each start of a unit gives it a new main PID. The fake X server's socket lives under the world root.
+    pids, x11SocketDir: join(root, 'x11'),
+    // What xproof clients lists: by default Clawser's browser is the one X client.
+    xproof: () => [{ clientId: 1, pid: pids.get(world.names.browser) ?? 0 }],
     // Hand-written user units that option B discovery reads with one systemctl show: unit name to its properties.
     foreign: {},
     busy: ports => { busy = ports; },
@@ -69,9 +86,20 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
     unit: name => fs.readFile(join(unitDir, name), 'utf8'),
     mutations: () => mutations(calls, artifacts),
   };
+  // Starting the display unit starts a fake Xvfb: a real Unix socket at <x11SocketDir>/X<display>, read from the unit's ExecStart.
+  const startDisplay = async name => {
+    const display = (await fs.readFile(join(unitDir, name), 'utf8').catch(() => '')).match(/ :(\d+) -screen /)?.[1];
+    if (display === undefined || sockets.has(display)) return;
+    await fs.mkdir(world.x11SocketDir, { recursive: true, mode: 0o700 });
+    const server = createServer();
+    await new Promise((accept, reject) => server.once('error', reject).listen(join(world.x11SocketDir, 'X' + display), accept));
+    server.unref();
+    sockets.set(display, server);
+  };
+  t.after(() => Promise.all([...sockets.values()].map(server => new Promise(accept => server.close(() => accept())))));
   world.deps = {
     fs: trackedFs, artifacts, packageDir, env: { XDG_CONFIG_HOME: join(root, 'config') }, homeDir: root, uid: process.getuid(),
-    platform: 'linux', arch: 'x64', nodeVersion: '24.18.0', execPath: '/usr/bin/node', procRoot: join(root, 'proc'),
+    platform: 'linux', arch: 'x64', nodeVersion: '24.18.0', execPath: '/usr/bin/node', procRoot: join(root, 'proc'), x11SocketDir: world.x11SocketDir,
     now: Date.now, sleep: async () => {}, log: message => logs.push(message), readProcessStartTicks: async () => '4242',
     findBrowserBinary: async () => ({ path: '/usr/bin/google-chrome-stable', brand: 'chrome' }),
     freeDisplay: async () => 20, randomBytes: () => Buffer.alloc(16, 7),
@@ -92,7 +120,7 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
       throw new Error('Unexpected network request: ' + url);
     },
     run: async (command, args = [], options = {}) => {
-      calls.push({ command, args, input: options.input, timeoutMs: options.timeoutMs });
+      calls.push({ command, args, input: options.input, timeoutMs: options.timeoutMs, ...options.env ? { env: options.env } : {} });
       if (command === 'docker') assert.fail('setup must never run docker: ' + args.join(' '));
       if (command === 'tar') return args[0] === '--version' ? 'tar (GNU tar) 1.35' : (await execute(command, args)).stdout;
       if (command === '/usr/bin/flock') return 'flock from util-linux 2.39';
@@ -103,10 +131,15 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
         if (verb === 'show' && world.foreign[args[2]]) return Object.entries(world.foreign[args[2]]).map(([key, value]) => key + '=' + value).join('\n') + '\n';
         if (verb === 'show') {
           const state = units.get(args[2]);
-          return `LoadState=${state ? 'loaded' : 'not-found'}\nFragmentPath=${state ? world.fragments[args[2]] ?? join(unitDir, args[2]) : ''}\nActiveState=${state ?? 'inactive'}\n`;
+          const sub = state === 'active' ? 'running' : state === 'failed' ? 'failed' : 'dead';
+          return `LoadState=${state ? 'loaded' : 'not-found'}\nFragmentPath=${state ? world.fragments[args[2]] ?? join(unitDir, args[2]) : ''}\nActiveState=${state ?? 'inactive'}\nSubState=${sub}\nMainPID=${pids.get(args[2]) ?? 0}\n`;
         }
-        if (verb === 'enable' || verb === 'restart') units.set(name, 'active');
-        if (verb === 'stop') units.set(name, 'inactive');
+        if (verb === 'enable' || verb === 'restart') {
+          units.set(name, 'active');
+          pids.set(name, ++nextPid);
+          if (name === world.names.display) await startDisplay(name);
+        }
+        if (verb === 'stop') { units.set(name, 'inactive'); pids.delete(name); }
         // A hand-written unit reports what setup did to it, so a crash leaves the state a rerun would see.
         if (world.foreign[name] && verb === 'stop') world.foreign[name].ActiveState = 'inactive';
         if (world.foreign[name] && verb === 'disable') world.foreign[name].UnitFileState = 'disabled';
@@ -126,6 +159,7 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
         await fs.writeFile(dest, '<!-- rendered -->' + await fs.readFile(source, 'utf8'), { mode: 0o600 });
         return '';
       }
+      if (String(args[0]).endsWith('/runtime/desktop/xproof.py') && args[1] === 'clients') return JSON.stringify(await world.xproof(args, options));
       if (fallback) return fallback(command, args, options);
       throw new Error('unexpected command: ' + command + ' ' + args.join(' '));
     },
