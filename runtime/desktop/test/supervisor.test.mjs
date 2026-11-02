@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { skip as noX, startX, serverArgs, dropStaleLock } from './xvfb.mjs';
 import { supervisorRequest } from '../index.mjs';
+import { processTree, tcpListeners } from './rfb.mjs';
 
 const has = bin => { try { execFileSync('which', [bin], { stdio: 'ignore' }); return true; } catch { return false; } };
 const skip = noX || (has('x11vnc') ? false : 'needs x11vnc');
@@ -248,16 +249,11 @@ test('a watch viewer serves RFB only on its private socket', opts, async t => {
   const { banner, types } = await rfbSecurityTypes(viewer.socketPath);
   assert.match(banner, /^RFB 003\.00[38]\n/);
   assert.deepEqual(types, [2], 'VNC password authentication is the only security type');
-  const inodes = new Set();
-  for (const fd of await fs.readdir(`/proc/${viewer.pid}/fd`)) {
-    const match = (await fs.readlink(`/proc/${viewer.pid}/fd/${fd}`).catch(() => '')).match(/^socket:\[(\d+)\]$/);
-    if (match) inodes.add(match[1]);
-  }
-  assert.ok(inodes.size > 0);
-  for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
-    for (const row of (await fs.readFile(table, 'utf8').catch(() => '')).split('\n').slice(1).filter(Boolean).map(line => line.trim().split(/\s+/)))
-      if (row[3] === '0A') assert.ok(!inodes.has(row[9]), `x11vnc listens on TCP ${row[1]}`);
-  }
+  const links = await Promise.all((await fs.readdir(`/proc/${viewer.pid}/fd`)).map(fd => fs.readlink(`/proc/${viewer.pid}/fd/${fd}`).catch(() => '')));
+  assert.ok(links.some(link => link.startsWith('socket:')), 'x11vnc holds no sockets, so the scan would prove nothing');
+  const tree = await processTree(viewer.pid);
+  assert.equal(tree[0], viewer.pid);
+  assert.deepEqual(await tcpListeners(tree), [], 'x11vnc listens on TCP');
 });
 
 // A desktop session's user manager exports WAYLAND_DISPLAY, and x11vnc exits when it sees one.

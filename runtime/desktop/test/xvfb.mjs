@@ -29,10 +29,11 @@ async function numberedServer(args) {
 }
 
 // A server killed before cleanup leaves its lock. That would burn the number for later tests.
+// EPERM means the pid is alive under another user, so its lock is not stale.
 export async function dropStaleLock(number) {
   const pid = Number((await fs.readFile(`/tmp/.X${number}-lock`, 'utf8').catch(() => '')).trim());
   if (!pid) return;
-  try { process.kill(pid, 0); return; } catch {}
+  try { process.kill(pid, 0); return; } catch (error) { if (error.code === 'EPERM') return; }
   await fs.rm(`/tmp/.X${number}-lock`, { force: true });
   await fs.rm(`/tmp/.X11-unix/X${number}`, { force: true });
 }
@@ -53,6 +54,8 @@ export async function startX({ numbered = false } = {}) {
   }
   await fs.writeFile(join(dir, 'xauth'), xauthorityEntry(number, cookie), { mode: 0o600 });
   const env = { ...process.env, DISPLAY: `:${number}`, XAUTHORITY: join(dir, 'xauth') };
+  // x11vnc exits when it sees a Wayland session.
+  delete env.WAYLAND_DISPLAY;
   return {
     env,
     dir,

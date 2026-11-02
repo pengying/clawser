@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createCipheriv, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import net from 'node:net';
@@ -10,10 +10,13 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { HostDesktopRuntime } from '../runtime/desktop/index.mjs';
+import { firstLine, processTree, readPixel, tcpListeners } from '../runtime/desktop/test/rfb.mjs';
+import { dropStaleLock } from '../runtime/desktop/test/xvfb.mjs';
 import { findBrowserBinary } from '../src/host-browser.mjs';
 import { freeDisplay } from '../src/host-display.mjs';
 import { hostLocations } from '../src/host-setup.mjs';
 import { execute, runClawser } from '../src/setup.mjs';
+import { merge } from './host-fixture.mjs';
 import { activationFixture } from './setup-activation-fixture.mjs';
 
 export const SKIPPED = 'host noVNC end to end skipped (set CLAWSER_HOST_E2E=1 on a disposable runner)';
@@ -25,154 +28,7 @@ x=ctypes.CDLL('libX11.so.6')
 x.XOpenDisplay.argtypes=[ctypes.c_char_p];x.XOpenDisplay.restype=ctypes.c_void_p
 d=x.XOpenDisplay(sys.argv[1].encode())
 print('opened' if d else 'refused')`;
-const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const firstLineOf = error => String(error?.message ?? error).split('\n')[0];
-
-/** The RFB VNC authentication response: DES over the challenge, keyed by the password with each byte's bits reversed. */
-function vncResponse(password, challenge) {
-  const key = Buffer.alloc(8);
-  for (let i = 0; i < 8; i++) {
-    const byte = password.charCodeAt(i) || 0;
-    for (let b = 0; b < 8; b++) key[i] |= ((byte >> b) & 1) << (7 - b);
-  }
-  const cipher = createCipheriv('des-ede3', Buffer.concat([key, key, key]), null);
-  cipher.setAutoPadding(false);
-  return Buffer.concat([cipher.update(challenge), cipher.final()]);
-}
-
-// 32 bpp, depth 24, little-endian true colour, red at bit 16, green at 8, blue at 0.
-const SET_PIXEL_FORMAT = Buffer.from([0, 0, 0, 0, 32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0]);
-const RAW = 0, CURSOR = -239;
-// Xvfb parks the pointer at the screen centre. Without the Cursor pseudo-encoding, x11vnc paints the cursor into the pixels sent.
-const SET_ENCODINGS = Buffer.from([2, 0, 0, 2, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0x11]);
-
-function updateRequest(x, y) {
-  const message = Buffer.alloc(10);
-  message[0] = 3;
-  message.writeUInt16BE(x, 2); message.writeUInt16BE(y, 4); message.writeUInt16BE(1, 6); message.writeUInt16BE(1, 8);
-  return message;
-}
-
-async function updatedPixel(read, x, y) {
-  for (;;) {
-    const type = (await read(1))[0];
-    if (type === 2) continue;
-    if (type === 1) { const head = await read(5); await read(head.readUInt16BE(3) * 6); continue; }
-    if (type === 3) { const head = await read(7); await read(head.readUInt32BE(3)); continue; }
-    if (type !== 0) throw new Error('Unexpected RFB server message ' + type);
-    const count = (await read(3)).readUInt16BE(1);
-    let pixel;
-    for (let i = 0; i < count; i++) {
-      const rect = await read(12);
-      const [rx, ry, width, height] = [0, 2, 4, 6].map(offset => rect.readUInt16BE(offset));
-      const encoding = rect.readInt32BE(8);
-      if (encoding === CURSOR) { await read(width * height * 4 + ((width + 7) >> 3) * height); continue; }
-      if (encoding !== RAW) throw new Error('Unexpected RFB encoding ' + encoding);
-      const data = await read(width * height * 4);
-      if (x >= rx && x < rx + width && y >= ry && y < ry + height) {
-        const value = data.readUInt32LE(((y - ry) * width + (x - rx)) * 4);
-        pixel = { r: (value >> 16) & 255, g: (value >> 8) & 255, b: value & 255 };
-      }
-    }
-    if (pixel) return pixel;
-  }
-}
-
-/**
- * Authenticates to an RFB 3.8 server on a Unix socket and reads the centre pixel with raw 1×1 updates.
- * It re-requests until `until(pixel)` holds or `timeoutMs` passes, and returns the last pixel either way.
- */
-export async function readPixel({ socketPath, password, until = () => true, timeoutMs = 20_000 }) {
-  const socket = net.connect({ path: socketPath });
-  let buffered = Buffer.alloc(0), wake, failure;
-  socket.on('data', bytes => { buffered = Buffer.concat([buffered, bytes]); wake?.(); });
-  socket.on('error', error => { failure = error; wake?.(); });
-  socket.on('close', () => { failure ??= new Error('RFB connection closed'); wake?.(); });
-  const deadline = Date.now() + timeoutMs;
-  const read = async n => {
-    while (buffered.length < n) {
-      if (failure) throw failure;
-      if (Date.now() > deadline) throw new Error('RFB read timed out');
-      await new Promise(accept => { wake = accept; setTimeout(accept, 25); });
-    }
-    const out = buffered.subarray(0, n);
-    buffered = buffered.subarray(n);
-    return out;
-  };
-  try {
-    const banner = (await read(12)).toString('latin1');
-    if (!/^RFB \d{3}\.\d{3}\n$/.test(banner)) throw new Error('Not an RFB server: ' + JSON.stringify(banner));
-    socket.write('RFB 003.008\n');
-    const types = [...await read((await read(1))[0])];
-    if (!types.includes(2)) throw new Error('RFB server offers no VNC authentication: ' + types.join(','));
-    socket.write(Buffer.from([2]));
-    socket.write(vncResponse(password, await read(16)));
-    if ((await read(4)).readUInt32BE() !== 0) throw new Error('VNC authentication failed');
-    socket.write(Buffer.from([1]));
-    const init = await read(24);
-    const width = init.readUInt16BE(0), height = init.readUInt16BE(2);
-    await read(init.readUInt32BE(20));
-    socket.write(SET_PIXEL_FORMAT);
-    socket.write(SET_ENCODINGS);
-    const x = width >> 1, y = height >> 1;
-    for (;;) {
-      socket.write(updateRequest(x, y));
-      const result = { width, height, x, y, ...await updatedPixel(read, x, y) };
-      if (until(result) || Date.now() + 250 > deadline) return result;
-      await sleep(250);
-    }
-  } finally { socket.destroy(); }
-}
-
-/** `pid` and every descendant, through /proc/<pid>/task/<tid>/children. A pid that is gone yields nothing. */
-export async function processTree(pid, procRoot = '/proc') {
-  const found = [];
-  const walk = async current => {
-    let tasks;
-    try { tasks = await fs.readdir(join(procRoot, String(current), 'task')); }
-    catch (error) { if (error.code === 'ENOENT') return; throw error; }
-    if (found.includes(current)) return;
-    found.push(current);
-    for (const task of tasks) {
-      const children = await fs.readFile(join(procRoot, String(current), 'task', task, 'children'), 'utf8').catch(() => '');
-      for (const child of children.split(/\s+/).filter(Boolean)) await walk(Number(child));
-    }
-  };
-  await walk(pid);
-  return found;
-}
-
-/** TCP sockets in LISTEN state that one of `pids` holds open, matched by inode from /proc/net/tcp{,6} to /proc/<pid>/fd. */
-export async function tcpListeners(pids, procRoot = '/proc') {
-  const listening = new Set();
-  for (const file of ['tcp', 'tcp6']) {
-    const text = await fs.readFile(join(procRoot, 'net', file), 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
-    for (const line of text.split('\n').slice(1)) {
-      const fields = line.trim().split(/\s+/);
-      if (fields[3] === '0A') listening.add(fields[9]);
-    }
-  }
-  const found = [];
-  for (const pid of pids) {
-    let fds;
-    try { fds = await fs.readdir(join(procRoot, String(pid), 'fd')); }
-    catch (error) { if (error.code === 'ENOENT') continue; throw error; }
-    for (const fd of fds) {
-      const inode = (await fs.readlink(join(procRoot, String(pid), 'fd', fd)).catch(() => '')).match(/^socket:\[(\d+)\]$/)?.[1];
-      if (inode && listening.has(inode)) found.push({ pid, fd: Number(fd), inode });
-    }
-  }
-  return found;
-}
-
-function merge(base, patch) {
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === null) delete base[key];
-    else if (object(value)) merge(object(base[key]) ? base[key] : (base[key] = {}), value);
-    else base[key] = structuredClone(value);
-  }
-  return base;
-}
 
 /** The OpenClaw CLI calls setup and doctor make, served from an in-memory config. Anything else is a test failure. */
 function fakeOpenclaw(config, activation) {
@@ -195,19 +51,6 @@ const freePort = () => new Promise((accept, reject) => {
   server.once('error', reject);
   server.listen(0, '127.0.0.1', () => { const { port } = server.address(); server.close(() => accept(port)); });
 });
-
-function firstLine(child, timeoutMs = 15_000) {
-  return new Promise((accept, reject) => {
-    let text = '';
-    const timer = setTimeout(() => reject(new Error('fixture printed nothing within ' + timeoutMs + ' ms')), timeoutMs);
-    child.stdout.on('data', bytes => {
-      text += bytes;
-      if (text.includes('\n')) { clearTimeout(timer); accept(text.slice(0, text.indexOf('\n'))); }
-    });
-    child.once('error', error => { clearTimeout(timer); reject(error); });
-    child.once('exit', code => { clearTimeout(timer); reject(new Error('fixture exited (' + code + ') before printing')); });
-  });
-}
 
 // The supervisor retires a viewer after 30 s without a heartbeat.
 function heartbeat(c, runtime, actor) {
@@ -337,17 +180,6 @@ async function steps(c, log, output) {
 
 const exists = path => fs.lstat(path).then(() => true, () => false);
 
-// Our Xvfb removes its lock on SIGTERM. A lock left by a dead server would burn the number.
-async function dropDeadLock(display) {
-  const lock = `/tmp/.X${display}-lock`;
-  const pid = Number((await fs.readFile(lock, 'utf8').catch(() => '')).trim());
-  if (!pid) return;
-  try { process.kill(pid, 0); throw new Error(`display :${display} still has a live server (pid ${pid})`); }
-  catch (error) { if (error.code !== 'ESRCH') throw error; }
-  await fs.rm(lock, { force: true });
-  await fs.rm(`/tmp/.X11-unix/X${display}`, { force: true });
-}
-
 /** Stops and removes everything the run created. Returns the steps that failed; it never throws. */
 async function cleanup(c) {
   c.stopping = true;
@@ -374,26 +206,44 @@ async function cleanup(c) {
   }
   if (c.root) {
     const display = c.display ?? await fs.readFile(join(c.root, 'state/setup.json'), 'utf8').then(text => JSON.parse(text).display, () => undefined);
-    if (Number.isInteger(display)) await attempt('display lock', () => dropDeadLock(display));
+    if (Number.isInteger(display)) await attempt('display lock', async () => {
+      await dropStaleLock(display);
+      if (await exists(`/tmp/.X${display}-lock`)) throw new Error(`display :${display} still has a live server`);
+    });
     await attempt('remove ' + c.root, () => fs.rm(c.root, { recursive: true, force: true }));
   }
   return notes;
 }
 
-export async function endToEnd(log = line => process.stdout.write(line + '\n')) {
+/**
+ * Sends every way the process can die into `abort(reason)`, once, then exits 1 when it settles.
+ * A dropped ssh session without a pty closes stdout and sends no SIGHUP, so the next write fails with EPIPE.
+ */
+export function installCrashCleanup(abort) {
+  let aborting;
+  const fire = reason => { aborting ??= Promise.resolve().then(() => abort(reason)).catch(() => {}).finally(() => process.exit(1)); };
+  for (const stream of [process.stdout, process.stderr]) stream.on('error', error => fire('output closed (' + (error?.code ?? error) + ')'));
+  process.on('uncaughtException', error => fire('uncaught ' + (error?.stack ?? error)));
+  process.on('unhandledRejection', error => fire('unhandled rejection ' + (error?.stack ?? error)));
+  // A second Ctrl-C during a long cleanup must not cut it short.
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => fire('interrupted by ' + signal));
+  return fire;
+}
+
+const print = line => { try { process.stdout.write(line + '\n'); } catch {} };
+
+export async function endToEnd(log = print) {
   const c = { timers: [], children: [] }, output = [];
   let cleaning;
   const clean = () => cleaning ??= cleanup(c);
   const report = notes => {
     if (c.names) log(`step 8: cleanup disabled and removed ${Object.keys(c.names).length} units and deleted the state folder` + (notes.length ? '; problems: ' + notes.join('; ') : ''));
   };
-  const abort = async reason => {
+  const abort = installCrashCleanup(async reason => {
     log('host noVNC end to end failed: ' + reason);
     report(await clean());
-    process.exit(1);
-  };
-  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(signal, () => { void abort('interrupted by ' + signal); });
-  const overall = setTimeout(() => { void abort('timed out after 8 minutes'); }, 480_000);
+  });
+  const overall = setTimeout(() => abort('timed out after 8 minutes'), 480_000);
   let failure;
   try { await steps(c, log, output); }
   catch (error) { failure = error; }
