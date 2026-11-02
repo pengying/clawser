@@ -17,8 +17,9 @@ The unit suite includes browser fixtures. Set `CHROME_BIN` to a Chrome/Chromium
 executable; a few fixture tests skip when Chrome is absent, while native picker
 and CDP keyboard integration require it. The CDP fixtures cover focused-frame
 keyboard authority, stale capability revocation and uncertain-input handling.
-`npm run test:desktop` exercises the Docker adapter and readiness logic with test
-doubles and does not start containers.
+`npm run test:desktop` runs the supervisor, clipboard, X proof and openbox
+tests. Tests that need Xvfb, x11vnc or python3 skip when the program is missing.
+They start their own throwaway displays from `:140` to `:199`.
 
 For the real noVNC/RFB pointer fixtures, download the pinned source archive:
 
@@ -58,24 +59,16 @@ These checks create temporary profiles and localhost fixtures. Screenshots and
 results go to `test-artifacts/`, which must stay out of commits and packages.
 Headless fixture flags do not describe the production Chromium sandbox.
 
-## Full Docker runtime checks (opt-in)
+## Host end-to-end check (opt-in)
 
-Read [the runtime guide](runtime/desktop/README.md) before running these commands.
-They build an image and create named Docker resources and a persistent test
-profile. Use a disposable development host, and check that the documented test
-names and ports are free.
+`npm run test:e2e` installs a real setup with user services, so run it only on a
+disposable machine, with `CLAWSER_HOST_E2E=1`:
 
 ```sh
-docker build -t openclaw-handoff-desktop:20261027 runtime/desktop
-node runtime/desktop/test/integration.mjs
-node runtime/desktop/test/inspect.mjs
-node runtime/desktop/test/heartbeat.mjs
+CLAWSER_HOST_E2E=1 npm run test:e2e
 ```
 
-The integration test deliberately retains its owned desktop for inspection.
-Runtime test names/ports can be overridden with `DESKTOP_NAME`,
-`DESKTOP_CDP_PORT`, `DESKTOP_VNC_PORT` and `DESKTOP_IMAGE`. Do not reuse production
-names, state directories or profile volumes.
+Without that variable it prints a skip message and does nothing.
 
 ## Source installation
 
@@ -92,13 +85,13 @@ openclaw plugins install ./pengying-clawser-VERSION.tgz --force --accept-capabil
 openclaw clawser setup --dry-run
 ```
 
-Default setup attaches to an existing configured attach-only Chromium CDP
-connection. Create only disposable development connections and use separate
-OpenClaw state/config and unused viewer ports. `--browser-profile` selects an
-existing connection; setup must not launch Chrome, create a Chrome user-data
-directory or copy cookies. Docker desktop provisioning requires explicit
-`setup --novnc`; its additional tools and resources are not CDP prerequisites.
-Run `doctor` with the same mode/state after setup. Installing a plugin, running
+Default setup writes user services and starts a browser on a virtual screen.
+Use a disposable machine or account, with separate OpenClaw state/config and
+unused ports. Option B, `--browser-profile`, takes over a running browser, so
+point it only at a disposable profile. Host packages come from the distribution;
+setup only prints the install command. `setup --cdp` attaches to an existing
+attach-only Chromium CDP connection and never launches Chrome. Run `doctor` with
+the same mode/state after setup. Installing a plugin, running
 setup, enabling it and reloading a live Gateway change that deployment; tests and
 packing do not.
 
@@ -107,9 +100,11 @@ packing do not.
 Keep `browser-handoff` as the plugin ID and `browser_handoff` as the agent tool
 unless an explicit compatibility migration is planned. Setup is a local operator
 command, never an agent tool with general shell or administrative authority.
-Preserve unrelated OpenClaw configuration and require matching original receipt,
-installation source/path and identity before reusing persistent service or Docker
-resources. Flipping `desktop.enabled` must not adopt or delete them. Keep distinct
+Preserve unrelated OpenClaw configuration and require a matching original receipt
+before reusing user services, state or a browser profile. Flipping
+`desktop.enabled` must not adopt or delete them. Setup must never install
+packages, run `sudo`, or touch a browser profile other than its own or the one
+named with `--browser-profile`. Keep distinct
 browser connections for separate Gateways; there is no cross-process human-control
 coordination for a shared Chrome.
 
