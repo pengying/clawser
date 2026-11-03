@@ -43,7 +43,7 @@ async function world(t, { system = [], brew = [], os = debian, smoke = {}, missi
     calls.push({ command, args, options });
     const name = basename(command);
     // The X library check prints the libraries ctypes could not load.
-    if (name === 'python3' && args[0] === '-c' && command.startsWith(root)) return args.slice(2).filter(soname => missingLibs.includes(soname)).join(' ');
+    if (name === 'python3' && args[1] === '-c' && command.startsWith(root)) return args.slice(3).filter(soname => missingLibs.includes(soname)).join(' ');
     if (probes[name] && command.startsWith(root)) {
       if (name === 'Xvfb' && args[0] !== '-help') throw Object.assign(new Error(`Xvfb failed (1): Unrecognized option: ${args[0]}\nuse: X [:<display>] [option]`), { code: 1 });
       if (args[0] !== probes[name]) throw Object.assign(new Error(`${name} failed (1): unknown option ${args[0]}`), { code: 1 });
@@ -135,10 +135,12 @@ test('a missing X client library is a required dependency with its distro packag
     [suse, 'sudo zypper install libXRes1'], ['ID=alpine\n', 'sudo apk add libxres']]) {
     const w = await world(t, { system: all, os, missingLibs: ['libXRes.so.1'] });
     await assert.rejects(w.resolve(), { message: 'Missing libXRes.so.1. Ask the owner to install them, then rerun setup: ' + command });
-    const [check, ...more] = w.calls.filter(call => call.args[0] === '-c');
+    const [check, ...more] = w.calls.filter(call => call.args[1] === '-c');
     assert.deepEqual(more, [], 'one library check');
     assert.equal(check.command, join(w.systemBin, 'python3'));
-    assert.deepEqual(check.args.slice(2), ['libX11.so.6', 'libXRes.so.1', 'libXtst.so.6', 'libXi.so.6']);
+    // Isolated mode, so a ctypes.py in the current folder is never imported.
+    assert.equal(check.args[0], '-I');
+    assert.deepEqual(check.args.slice(3), ['libX11.so.6', 'libXRes.so.1', 'libXtst.so.6', 'libXi.so.6']);
     assert.equal(w.smokes.length, 0);
     assertNoSudo(w.calls);
   }
@@ -179,7 +181,7 @@ test('an unchanged recorded set is reused without binary probes, installs or ano
   const again = await w.resolve(record);
   assert.deepEqual(again.record, record);
   // The X libraries are not recorded, so only their check runs again.
-  assert.deepEqual(w.calls.map(call => [call.command, call.args[0]]), [[join(w.systemBin, 'python3'), '-c']]);
+  assert.deepEqual(w.calls.map(call => [call.command, call.args[0]]), [[join(w.systemBin, 'python3'), '-I']]);
   assert.equal(w.smokes.length, 0);
 });
 

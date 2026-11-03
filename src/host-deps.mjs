@@ -101,7 +101,7 @@ async function distro(d) {
 
 async function missingLibraries(python, d) {
   let output;
-  try { output = await d.run(python.path, ['-c', LIBRARY_CHECK, ...LIBRARIES.map(dep => dep.name)], { timeoutMs: 10_000 }); }
+  try { output = await d.run(python.path, ['-I', '-c', LIBRARY_CHECK, ...LIBRARIES.map(dep => dep.name)], { timeoutMs: 10_000 }); }
   catch (error) { throw new Error('python3 at ' + python.path + ' could not check the X client libraries: ' + reason(error)); }
   const failed = new Set(String(output).split(/\s+/));
   return LIBRARIES.filter(dep => failed.has(dep.name));

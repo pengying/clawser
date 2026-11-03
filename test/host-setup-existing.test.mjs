@@ -849,6 +849,7 @@ test('option B finds the profile of a Chrome that rewrote its command line', asy
   const w = await handWritten(t);
   // Chrome for Testing joins its exe path and every flag with spaces into one entry.
   const flags = [`--user-data-dir=${w.udd}`, '--lang=fr', '--remote-debugging-port=9222', '--remote-debugging-address=127.0.0.1', '--window-size=1280,800'];
+  await fs.writeFile(join(w.udd, 'Local State'), '{}');
   await fs.writeFile(join(w.root, 'proc/400/cmdline'), ['/opt/google/chrome/chrome', ...flags].join(' ') + '\0');
   const result = await runClawser([...w.takeover, '--dry-run'], w.deps);
   assert.ok(result.plan.includes(`Browser profile: user (existing, at ${w.udd})`), result.plan.join('\n'));
@@ -872,6 +873,13 @@ test('option B refuses a rewritten command line it cannot split safely', async t
     await assert.rejects(runClawser([...w.takeover, '--yes'], w.deps), { message: refused });
     await w.unchanged();
   }
+  // Every token starts with --, but the profile path itself holds ' --', so the split names a folder Chrome does not use.
+  const w = await handWritten(t);
+  await fs.mkdir(join(w.root, 'p --work'));
+  await fs.writeFile(join(w.root, 'p --work', 'Local State'), '{}');
+  await fs.writeFile(join(w.root, 'proc/400/cmdline'), `/opt/google/chrome/chrome --user-data-dir=${join(w.root, 'p')} --work --remote-debugging-port=9222\0`);
+  await assert.rejects(runClawser([...w.takeover, '--yes'], w.deps), { message: refused });
+  await w.unchanged();
 });
 
 test('a Chrome started from a terminal scope is closed like a desktop session Chrome', async t => {

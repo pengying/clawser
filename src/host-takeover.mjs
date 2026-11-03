@@ -83,7 +83,8 @@ export async function discoverExisting(o, p, d, h, { expected } = {}) {
   }
   if (!['127.0.0.1', '::1'].includes(listener.address)) throw new Error(`The browser on port ${cdpPort} listens on ${listener.address}, which other machines can reach. Restart it listening on 127.0.0.1 only, then rerun setup.`);
   const info = await processInfo(listener.pid, d);
-  if (info.unsplit) throw new Error(`Chrome on port ${cdpPort} rewrote its command line, and its flags or profile path contain spaces; start Chrome with flags and a --user-data-dir path that contain no spaces, then rerun setup.`);
+  const rewrote = `Chrome on port ${cdpPort} rewrote its command line, and its flags or profile path contain spaces; start Chrome with flags and a --user-data-dir path that contain no spaces, then rerun setup.`;
+  if (info.unsplit) throw new Error(rewrote);
 
   // Chrome parses only the = form of these switches.
   const existingArgs = info.argv.slice(1);
@@ -91,6 +92,7 @@ export async function discoverExisting(o, p, d, h, { expected } = {}) {
   const userDataDir = flag('--user-data-dir'), profileDirectory = flag('--profile-directory');
   if (userDataDir === undefined) throw new Error(`The browser on port ${cdpPort} has no --user-data-dir, so setup can't tell which profile folder it uses. Restart it with --user-data-dir, then rerun setup.`);
   if (!isAbsolute(userDataDir)) throw new Error(`The browser on port ${cdpPort} uses a relative --user-data-dir; restart it with an absolute path, then rerun setup.`);
+  if (info.rewritten && !(await h.stat(join(userDataDir, 'Local State'), d))?.isFile()) throw new Error(rewrote);
   if (info.exe.endsWith(' (deleted)')) throw new Error('Chrome was upgraded while it was running; restart it, then rerun setup.');
   if (isSnapBrowser(info.exe)) throw new Error(SNAP_MESSAGE);
 

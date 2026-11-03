@@ -137,24 +137,25 @@ const split = text => { const parts = text.split('\0'); if (parts.at(-1) === '')
 
 // Some Chrome builds rewrite their process title into one entry: the exe path and every flag joined by spaces, padded with NULs.
 // Only flags can be split back safely. Anything else is marked unsplit, so option B can refuse it.
+// A split is marked rewritten, because a path holding ' --' still splits into flags, and option B must check the folder it names.
 function commandLine(parts, exe) {
   const path = exe.replace(/ \(deleted\)$/, ''), title = parts.length && parts.slice(1).every(part => part === '') ? parts[0] : undefined;
   if (!title?.startsWith(path + ' ')) return { argv: parts };
   const flags = title.slice(path.length + 1).split(' ');
-  return flags.every(flag => flag.startsWith('--')) ? { argv: [path, ...flags] } : { argv: [title], unsplit: true };
+  return flags.every(flag => flag.startsWith('--')) ? { argv: [path, ...flags], rewritten: true } : { argv: [title], unsplit: true };
 }
 
 export async function processInfo(pid, d) {
   const dir = join(procRoot(d), String(pid));
   const exe = await d.fs.readlink(join(dir, 'exe'));
-  const { argv, unsplit } = commandLine(split(await d.fs.readFile(join(dir, 'cmdline'), 'utf8')), exe);
+  const { argv, unsplit, rewritten } = commandLine(split(await d.fs.readFile(join(dir, 'cmdline'), 'utf8')), exe);
   const env = new Map();
   for (const item of split(await d.fs.readFile(join(dir, 'environ'), 'utf8'))) {
     const at = item.indexOf('=');
     if (at > 0) env.set(item.slice(0, at), item.slice(at + 1));
   }
   const cgroup = (await d.fs.readFile(join(dir, 'cgroup'), 'utf8')).split('\n').find(line => line.startsWith('0::'))?.slice(3) ?? '';
-  return { pid, exe, argv, env, cgroup, ...unsplit ? { unsplit } : {} };
+  return { pid, exe, argv, env, cgroup, ...unsplit ? { unsplit } : {}, ...rewritten ? { rewritten } : {} };
 }
 
 export function classifyOwner(cgroup, uid) {
@@ -162,7 +163,9 @@ export function classifyOwner(cgroup, uid) {
   const unit = path.match(new RegExp('^/user\\.slice/user-' + uid + '\\.slice/user@' + uid + '\\.service/(?:app\\.slice/)?([^/]+\\.service)$'))?.[1];
   if (unit) return { kind: 'user-unit', unit };
   // systemd never restarts a scope: desktop sessions, apps, terminal tabs (vte-spawn, tmux-spawn) and systemd-run all land in one.
-  if (/\.scope$/.test(path)) return { kind: 'session' };
+  // Only this user's own scopes count. A scope inside a service belongs to that service, and container scopes belong to their engine.
+  const scope = path.match(new RegExp('^/user\\.slice/user-' + uid + '\\.slice/(?:user@' + uid + '\\.service/(?:[^/]+\\.slice/)*)?([^/]+\\.scope)$'))?.[1];
+  if (scope && !/^(docker|libpod|crio|cri-containerd)-/.test(scope)) return { kind: 'session' };
   return { kind: 'unknown', detail: path };
 }
 

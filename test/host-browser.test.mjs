@@ -117,6 +117,9 @@ test('owners are classified as user units, sessions or unknown', () => {
   assert.deepEqual(classifyOwner('/user.slice/user-1000.slice/session-3.scope', UID), { kind: 'session' });
   assert.deepEqual(classifyOwner('/system.slice/chrome.service', UID), { kind: 'unknown', detail: '/system.slice/chrome.service' });
   assert.equal(classifyOwner('/user.slice/user-1001.slice/user@1001.service/app.slice/c.service', UID).kind, 'unknown');
+  // A scope inside a service, a container or another user's session is not a desktop session.
+  for (const path of [`${base}/app.slice/my-chrome.service/sub.scope`, `${base}/user.slice/libpod-4f2a.scope`, '/system.slice/docker-4f2a.scope',
+    '/machine.slice/libpod-4f2a.scope', '/user.slice/user-1001.slice/session-3.scope']) assert.equal(classifyOwner(path, UID).kind, 'unknown', path);
 });
 
 test('unitMainPid asks systemd for the unit main PID', async () => {
