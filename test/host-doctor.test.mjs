@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { runClawser } from '../src/setup.mjs';
-import { hostWorld, movePackage } from './host-fixture.mjs';
+import { hostWorld, movePackage, systemctl } from './host-fixture.mjs';
 import { applyWorld, cookieDirs, cookieStore, exportsThree, userProfile } from './host-existing-fixture.mjs';
 
 const HOST_ROWS = ['installation', 'ownership', 'configuration', 'pinned assets', 'host dependencies', 'services', 'display', 'browser window',
@@ -238,19 +238,22 @@ test('a profile pointing at another port fails the CDP origin check', async t =>
   assert.equal(row(result, 'CDP origin').message, 'Browser profile requires attachOnly=true; browser launch is unsupported');
 });
 
-test('an option B profile on localhost passes the CDP origin check', async t => {
+test('an option B profile on localhost is refused before anything stops', async t => {
   const config = userProfile();
   config.browser.profiles.user.cdpUrl = 'http://localhost:9222';
   const w = await applyWorld(t, { config });
-  const setup = await runClawser(w.yes, w.deps);
-  assert.equal(setup.ok, true, JSON.stringify(setup));
+  await assert.rejects(runClawser(w.yes, w.deps), { message: 'Browser profile user uses http://localhost:9222; point it at http://127.0.0.1:9222, then rerun setup.' });
+  assert.deepEqual(w.mutations(), []);
+  for (const verb of ['stop', 'disable']) assert.deepEqual(systemctl(w.calls, verb), [], verb);
+  assert.equal(w.calls.some(call => call.command === 'cookies'), false, 'no cookie export or close');
   assert.equal(w.config.browser.profiles.user.cdpUrl, 'http://localhost:9222', 'setup leaves the person\'s profile as it was');
-  const result = await doctor(w);
-  assert.equal(result.ok, true, JSON.stringify(result.checks));
-  assert.deepEqual(row(result, 'CDP origin'), { name: 'CDP origin', ok: true });
-  // Another port on localhost is still the wrong browser.
-  w.config.browser.profiles.user.cdpUrl = 'http://localhost:9223';
-  assert.equal(row(await doctor(w), 'CDP origin').message, ELSEWHERE('user', 'http://localhost:9223', 9222));
+  // The controller and the plugin compare against 127.0.0.1, so doctor fails a profile moved to localhost on any port.
+  w.config.browser.profiles.user.cdpUrl = 'http://127.0.0.1:9222';
+  assert.equal((await runClawser(w.yes, w.deps)).ok, true);
+  for (const url of ['http://localhost:9222', 'http://localhost:9223']) {
+    w.config.browser.profiles.user.cdpUrl = url;
+    assert.equal(row(await doctor(w), 'CDP origin').message, ELSEWHERE('user', url, 9222));
+  }
 });
 
 test('a moved systemd unit folder fails ownership', async t => {

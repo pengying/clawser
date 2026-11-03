@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { runClawser } from '../src/setup.mjs';
 import { describeHost } from '../src/host-setup.mjs';
-import { portHolder } from '../src/host-browser.mjs';
+import { classifyOwner, portHolder } from '../src/host-browser.mjs';
 import { isPatch, movePackage, systemctl } from './host-fixture.mjs';
 import { DROP_IN, MY_UNITS, SAVED_COOKIES, applyWorld, cookieDirs, cookieStore, exportsThree, handWritten, healthyUser } from './host-existing-fixture.mjs';
 import { NUL, net, proc, row } from './proc-fixture.mjs';
@@ -131,7 +131,9 @@ async function unmarkedCdp(w) {
 test('a CDP install without the explicit mark upgrades through option B with its profile', async t => {
   const w = await handWritten(t);
   await unmarkedCdp(w);
-  const result = await runClawser([...w.args, '--dry-run'], w.deps);
+  // Only the default state folder continues the CDP install.
+  const plain = ['setup', '--dry-run'];
+  const result = await runClawser(plain, w.deps);
   assert.equal(result.ok, true);
   assert.ok(result.plan.includes(`Browser profile: user (existing, at ${w.udd})`), result.plan.join('\n'));
   assert.ok(result.plan.includes('Take over my-chrome.service (its unit file is backed up first)'), result.plan.join('\n'));
@@ -140,9 +142,21 @@ test('a CDP install without the explicit mark upgrades through option B with its
   assert.equal(config.desktop.profile, 'user');
   assert.equal(Object.hasOwn(config, 'profiles'), false);
   await w.unchanged();
+  assert.equal(await exists(join(w.root, '.openclaw/clawser')), false);
   // A default profile the takeover can't use is refused with both ways forward.
   w.config.browser.defaultProfile = 'missing';
-  await assert.rejects(runClawser([...w.args, '--dry-run'], w.deps), /^Error: The CDP install has no usable default browser profile \(.+\)\. Rerun setup with --browser-profile <name>, or setup --cdp to keep the CDP viewer\.$/);
+  await assert.rejects(runClawser(plain, w.deps), /^Error: The CDP install has no usable default browser profile \(.+\)\. Rerun setup with --browser-profile <name>, or setup --cdp to keep the CDP viewer\.$/);
+});
+
+test("an explicit --state-dir does not inherit the CDP viewer's profile", async t => {
+  const w = await handWritten(t);
+  await unmarkedCdp(w);
+  const result = await runClawser([...w.args, '--dry-run'], w.deps);
+  assert.equal(result.ok, true);
+  assert.ok(result.plan.includes(`Browser profile: clawser (new and empty, at ${join(w.stateDir, 'browser/profile')})`), result.plan.join('\n'));
+  assert.equal(result.plan.some(line => line.startsWith('Take over ') || line.startsWith('Close ')), false, result.plan.join('\n'));
+  assert.equal(result.patch.browser.defaultProfile, 'clawser');
+  await w.unchanged();
 });
 
 const SAVED = ' Its cookies are saved and move over when you rerun setup.';
@@ -694,13 +708,15 @@ test('leftover cookie folders are removed when they are not needed', async t => 
 test('a Docker-era install found through an unmarked CDP install names the profile to keep', async t => {
   const w = await handWritten(t);
   await unmarkedCdp(w);
-  await fs.mkdir(w.stateDir, { mode: 0o700 });
-  await fs.writeFile(join(w.stateDir, 'setup.json'), JSON.stringify({ identity: 'clawser-setup-v1', uid: w.deps.uid, ownerId: randomUUID() }) + '\n', { mode: 0o600 });
+  // The default state folder holds the Docker-era receipt, so plain setup continues the CDP install there.
+  const state = join(w.root, '.openclaw/clawser');
+  await fs.mkdir(state, { mode: 0o700 });
+  await fs.writeFile(join(state, 'setup.json'), JSON.stringify({ identity: 'clawser-setup-v1', uid: w.deps.uid, ownerId: randomUUID() }) + '\n', { mode: 0o600 });
   w.calls.length = 0;
-  await assert.rejects(runClawser(w.args, w.deps), { message: 'This state folder holds a Docker-era install, which converts to a new browser profile only, and your CDP viewer uses browser profile user. Run setup --browser-profile user --state-dir <another folder> to keep its logins, or setup --cdp to keep the CDP viewer.' });
+  await assert.rejects(runClawser(['setup'], w.deps), { message: 'This state folder holds a Docker-era install, which converts to a new browser profile only, and your CDP viewer uses browser profile user. Run setup --browser-profile user --state-dir <another folder> to keep its logins, or setup --cdp to keep the CDP viewer.' });
   assert.deepEqual(w.mutations(), []);
   // Asked for by name, the plain Docker-era message still applies.
-  await assert.rejects(runClawser(w.takeover, w.deps), { message: 'This state folder holds a Docker-era install, which converts to a new browser profile only. Run setup without --browser-profile, or choose another --state-dir.' });
+  await assert.rejects(runClawser(['setup', '--browser-profile', 'user'], w.deps), { message: 'This state folder holds a Docker-era install, which converts to a new browser profile only. Run setup without --browser-profile, or choose another --state-dir.' });
   assert.deepEqual(w.mutations(), []);
 });
 
@@ -827,4 +843,60 @@ test('a leftover cookie export that cannot be read is removed, not resumed', asy
   assert.equal(w.calls.some(cookieCall('importCookies')), false);
   assert.equal(w.logs.includes(RESUME), false);
   assert.doesNotMatch(w.logs.join('\n') + JSON.stringify(result), /"name":/);
+});
+
+test('option B finds the profile of a Chrome that rewrote its command line', async t => {
+  const w = await handWritten(t);
+  // Chrome for Testing joins its exe path and every flag with spaces into one entry.
+  const flags = [`--user-data-dir=${w.udd}`, '--lang=fr', '--remote-debugging-port=9222', '--remote-debugging-address=127.0.0.1', '--window-size=1280,800'];
+  await fs.writeFile(join(w.root, 'proc/400/cmdline'), ['/opt/google/chrome/chrome', ...flags].join(' ') + '\0');
+  const result = await runClawser([...w.takeover, '--dry-run'], w.deps);
+  assert.ok(result.plan.includes(`Browser profile: user (existing, at ${w.udd})`), result.plan.join('\n'));
+  const plan = await w.plan();
+  assert.equal(plan.userDataDir, w.udd);
+  assert.deepEqual(plan.browser.existingArgs, flags);
+  const unit = plan.units[plan.locations.names.browser];
+  for (const want of [`"--user-data-dir=${w.udd}"`, '"--lang=fr"', '"--remote-debugging-port=9222"']) assert.ok(unit.includes(want), want);
+  assert.equal(unit.includes('--window-size=1280,800'), false);
+  // A title shorter than the original arguments leaves NUL padding behind it.
+  await fs.writeFile(join(w.root, 'proc/400/cmdline'), ['/opt/google/chrome/chrome', ...flags].join(' ') + '\0'.repeat(40));
+  assert.deepEqual((await w.plan()).browser.existingArgs, flags);
+  await w.unchanged();
+});
+
+test('option B refuses a rewritten command line it cannot split safely', async t => {
+  const refused = 'Chrome on port 9222 rewrote its command line, and its flags or profile path contain spaces; start Chrome with flags and a --user-data-dir path that contain no spaces, then rerun setup.';
+  for (const cmdline of ['/opt/google/chrome/chrome --user-data-dir=/home/me/my profile --remote-debugging-port=9222', '/opt/google/chrome/chrome --user-data-dir=/p --remote-debugging-port=9222 https://example.com']) {
+    const w = await handWritten(t);
+    await fs.writeFile(join(w.root, 'proc/400/cmdline'), cmdline + '\0');
+    await assert.rejects(runClawser([...w.takeover, '--yes'], w.deps), { message: refused });
+    await w.unchanged();
+  }
+});
+
+test('a Chrome started from a terminal scope is closed like a desktop session Chrome', async t => {
+  const w = await handWritten(t, { xvfb: null, openbox: null, deps: { freeDisplay: async () => 21 } });
+  const uid = w.deps.uid, apps = `/user.slice/user-${uid}.slice/user@${uid}.service/app.slice/`;
+  await fs.writeFile(join(w.root, 'proc/400/cgroup'), `0::${apps}vte-spawn-${randomUUID()}.scope\n`);
+  const result = await runClawser([...w.takeover, '--dry-run'], w.deps);
+  assert.ok(result.plan.includes('Close the browser running in your desktop session (pid 400)'), result.plan.join('\n'));
+  assert.equal(result.plan.some(line => line.startsWith('Take over ')), false);
+  assert.deepEqual((await w.plan()).stop, [{ kind: 'close-browser', pid: 400 }]);
+  // systemd never restarts a scope, whatever started it.
+  for (const leaf of ['tmux-spawn-5f2a9c.scope', 'run-r3b1c0d.scope']) assert.deepEqual(classifyOwner(apps + leaf, uid), { kind: 'session' }, leaf);
+  // A transient service is still a unit.
+  assert.equal(classifyOwner(apps + 'app-org.kde.konsole@a1b2.service', uid).kind, 'user-unit');
+  await w.unchanged();
+});
+
+test('option B warns when the profile folder is readable by other users', async t => {
+  const w = await handWritten(t);
+  const loose = `${w.udd} is readable by other users, and Clawser's browser keeps cookies protected only by file permissions; run: chmod 700 ${w.udd}`;
+  assert.equal((await w.plan()).warnings.includes(loose), false, 'a private folder needs no warning');
+  await fs.chmod(w.udd, 0o750);
+  const result = await runClawser([...w.takeover, '--dry-run'], w.deps);
+  assert.ok(result.plan.includes('Warning: ' + loose), result.plan.join('\n'));
+  assert.ok((await w.plan()).warnings.includes(loose));
+  assert.equal((await fs.stat(w.udd)).mode & 0o777, 0o750, 'setup never changes the folder');
+  await w.unchanged();
 });

@@ -52,7 +52,7 @@ test('help text says noVNC is the default and --cdp keeps the one-tab viewer', a
   const result = await runClawser(['help'], { log: message => logs.push(message), run: async () => assert.fail('help runs nothing') });
   assert.deepEqual(result, { ok: true, command: 'help' });
   const text = logs.join('\n');
-  assert.ok(text.includes('Usage: clawser <setup|doctor> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--cdp] [--no-migrate-cookies]'), text);
+  assert.ok(text.includes('Usage: clawser <setup|doctor> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--novnc | --cdp] [--no-migrate-cookies]'), text);
   assert.ok(text.includes('Default setup gives the agent its own browser on a private virtual screen that you view over noVNC. --cdp keeps the one-tab CDP viewer.'), text);
 });
 

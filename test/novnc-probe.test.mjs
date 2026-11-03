@@ -104,8 +104,8 @@ function openSocket(ctx, cookie, generation = 0, origin = ctx.origin) {
 }
 
 test('private LAN HTTP requires an explicit opt-in and canonical RFC1918 IPv4 literal', async (t) => {
-  assert.throws(() => new NoVncProbeGateway({ supervisor: new FakeSupervisor(), publicBaseUrl: 'http://10.0.0.214:0', allowLanHttp: true }), /origin|port/i);
-  const privateOrigins = ['http://10.0.0.214:19400', 'http://172.16.0.1:19400', 'http://172.31.255.254:19400', 'http://192.168.1.1:19400'];
+  assert.throws(() => new NoVncProbeGateway({ supervisor: new FakeSupervisor(), publicBaseUrl: 'http://10.20.30.40:0', allowLanHttp: true }), /origin|port/i);
+  const privateOrigins = ['http://10.20.30.40:19400', 'http://172.16.0.1:19400', 'http://172.31.255.254:19400', 'http://192.168.1.1:19400'];
   for (const publicBaseUrl of privateOrigins) {
     assert.throws(() => new NoVncProbeGateway({ supervisor: new FakeSupervisor(), publicBaseUrl }), /origin|HTTPS/i);
     assert.throws(() => new NoVncProbeGateway({ supervisor: new FakeSupervisor(), publicBaseUrl, allowLanHttp: 'true' }), /origin|HTTPS/i);
@@ -114,7 +114,7 @@ test('private LAN HTTP requires an explicit opt-in and canonical RFC1918 IPv4 li
     assert.equal(gateway.origin, publicBaseUrl);
   }
   for (const host of ['0.0.0.0', '8.8.8.8', '169.254.169.254', '100.64.0.1', '172.15.255.255', '172.32.0.1',
-    '192.169.0.1', 'lan.example', '10.0.0.214.nip.io', '[fd00::1]', '[::ffff:10.0.0.214]', '0x0a0000d6', '012.0.0.214', '10.214', '167772374']) {
+    '192.169.0.1', 'lan.example', '10.20.30.40.nip.io', '[fd00::1]', '[::ffff:10.20.30.40]', '0x0a141e28', '012.20.30.40', '10.1318440', '169090600']) {
     for (const allowLanHttp of [false, true]) {
       assert.throws(() => new NoVncProbeGateway({ supervisor: new FakeSupervisor(), publicBaseUrl: `http://${host}:19400`, allowLanHttp }), /origin|HTTPS/i, host);
     }
@@ -130,23 +130,23 @@ function mockListener(gateway) {
 }
 
 test('LAN listener requires the configured private address and port; other origins stay on loopback', async (t) => {
-  const gateway = new NoVncProbeGateway({ supervisor: new FakeSupervisor(), publicBaseUrl: 'http://10.0.0.214:19400', allowLanHttp: true });
+  const gateway = new NoVncProbeGateway({ supervisor: new FakeSupervisor(), publicBaseUrl: 'http://10.20.30.40:19400', allowLanHttp: true });
   t.after(() => gateway.close());
   const bindings = mockListener(gateway);
-  for (const host of ['127.0.0.1', '0.0.0.0', '10.0.0.215', '8.8.8.8', 'localhost', '[::1]']) {
+  for (const host of ['127.0.0.1', '0.0.0.0', '10.20.30.41', '8.8.8.8', 'localhost', '[::1]']) {
     await assert.rejects(gateway.start({ host }), /bind|listen|LAN/i, host);
   }
-  await assert.rejects(gateway.start({ host: '10.0.0.214', port: 19401 }), /bind|listen|LAN/i);
+  await assert.rejects(gateway.start({ host: '10.20.30.40', port: 19401 }), /bind|listen|LAN/i);
   assert.deepEqual(bindings, [], 'invalid configurations cannot call listen');
-  assert.equal(await gateway.start({ host: '10.0.0.214', port: 19400 }), 'http://10.0.0.214:19400');
-  assert.deepEqual(bindings, [{ host: '10.0.0.214', port: 19400 }]);
+  assert.equal(await gateway.start({ host: '10.20.30.40', port: 19400 }), 'http://10.20.30.40:19400');
+  assert.deepEqual(bindings, [{ host: '10.20.30.40', port: 19400 }]);
 
   for (const options of [{}, { publicBaseUrl: 'https://fixture.example' }, { publicBaseUrl: 'https://fixture.example', allowLanHttp: true },
     { publicBaseUrl: 'http://localhost:19400' }, { publicBaseUrl: 'http://[::1]:19400', allowLanHttp: true }]) {
     const local = new NoVncProbeGateway({ supervisor: new FakeSupervisor(), ...options });
     t.after(() => local.close());
     const localBindings = mockListener(local);
-    for (const host of ['10.0.0.214', '0.0.0.0', '8.8.8.8', 'localhost', '::1']) await assert.rejects(local.start({ host }), /bind|listen|LAN/i);
+    for (const host of ['10.20.30.40', '0.0.0.0', '8.8.8.8', 'localhost', '::1']) await assert.rejects(local.start({ host }), /bind|listen|LAN/i);
     assert.equal(await local.start(), 'http://127.0.0.1:19400');
     assert.deepEqual(localBindings, [{ host: '127.0.0.1', port: 19400 }]);
     assert.equal(local.origin, options.publicBaseUrl || 'http://127.0.0.1:19400');
@@ -155,7 +155,7 @@ test('LAN listener requires the configured private address and port; other origi
 
 test('only opted-in LAN HTTP omits Secure while retaining scoped authentication and the private VNC socket', async (t) => {
   for (const options of [
-    { publicBaseUrl: 'http://10.0.0.214:19400', allowLanHttp: true },
+    { publicBaseUrl: 'http://10.20.30.40:19400', allowLanHttp: true },
     { publicBaseUrl: 'https://fixture.example' },
     { publicBaseUrl: 'https://fixture.example', allowLanHttp: true },
     {},
@@ -164,7 +164,7 @@ test('only opted-in LAN HTTP omits Secure while retaining scoped authentication 
     const gateway = new NoVncProbeGateway({ supervisor, ...options });
     t.after(() => gateway.close());
     mockListener(gateway);
-    await gateway.start(options.allowLanHttp && options.publicBaseUrl.startsWith('http:') ? { host: '10.0.0.214' } : {});
+    await gateway.start(options.allowLanHttp && options.publicBaseUrl.startsWith('http:') ? { host: '10.20.30.40' } : {});
     const invite = await gateway.createProbe({ ttlSeconds: 60 });
     const session = gateway.sessions.get(invite.id);
     assert.equal(gateway.status(invite.id).transport.route, options.publicBaseUrl?.startsWith('http://10.') ? 'lan' : options.publicBaseUrl?.startsWith('https:') ? 'https' : 'loopback');
@@ -172,14 +172,14 @@ test('only opted-in LAN HTTP omits Secure while retaining scoped authentication 
     let headers;
     gateway.claim({ writeHead: (_status, value) => { headers = value; }, end() {} }, session, { token: new URL(invite.url).hash.slice('#invite='.length) });
     const cookie = headers['Set-Cookie'];
-    const isLan = options.publicBaseUrl === 'http://10.0.0.214:19400';
+    const isLan = options.publicBaseUrl === 'http://10.20.30.40:19400';
     assert.equal(/; Secure(?:;|$)/.test(cookie), !isLan);
     assert.match(cookie, /HttpOnly; (?:Secure; )?SameSite=Strict/);
     assert.ok(cookie.includes(`Path=/probe/novnc/${invite.id}/; Max-Age=`));
     assert.equal(session.mode, 'watch');
     assert.deepEqual(session.endpoint, { path: '/tmp/fixture.sock' });
     assert.equal(gateway.originAllowed({ headers: { origin: gateway.origin } }), true);
-    assert.equal(gateway.originAllowed({ headers: { origin: 'http://10.0.0.215:19400' } }), false);
+    assert.equal(gateway.originAllowed({ headers: { origin: 'http://10.20.30.41:19400' } }), false);
     assert.throws(() => gateway.authorize({ headers: { cookie: 'novnc_probe=wrong' } }, session), /session/i);
     await gateway.end(session, 'done');
     assert.equal(session.mode, 'ended');
@@ -187,11 +187,11 @@ test('only opted-in LAN HTTP omits Secure while retaining scoped authentication 
   }
 
   const supervisor = new FakeSupervisor();
-  supervisor.endpoint = { host: '10.0.0.214', port: 59080 };
-  const gateway = new NoVncProbeGateway({ supervisor, publicBaseUrl: 'http://10.0.0.214:19400', allowLanHttp: true });
+  supervisor.endpoint = { host: '10.20.30.40', port: 59080 };
+  const gateway = new NoVncProbeGateway({ supervisor, publicBaseUrl: 'http://10.20.30.40:19400', allowLanHttp: true });
   t.after(() => gateway.close());
   mockListener(gateway);
-  await gateway.start({ host: '10.0.0.214' });
+  await gateway.start({ host: '10.20.30.40' });
   await assert.rejects(gateway.createProbe(), (error) => /private VNC socket/.test(error.cause?.message));
 });
 

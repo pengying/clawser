@@ -27,6 +27,14 @@ test('chrome arguments replace only Clawser\'s flags and keep the rest in order'
   for (const f of CLAWSER_CHROME_FLAGS) assert.ok(out.some(a => a.split('=')[0] === f), f);
 });
 
+test("Clawser's flags go before a -- terminator in the existing args", () => {
+  const out = chromeArgs({ existing: ['--lang=fr', '--', 'https://example.com/a'], userDataDir: '/p', cdpPort: 9333 });
+  const end = out.indexOf('--');
+  assert.deepEqual(out.slice(end), ['--', 'https://example.com/a']);
+  assert.ok(out.indexOf('--user-data-dir=/p') < end);
+  for (const f of CLAWSER_CHROME_FLAGS) assert.ok(out.findIndex(a => a.split('=')[0] === f) < end, f);
+});
+
 test('chrome arguments refuse headless and a mismatched profile', () => {
   const o = { userDataDir: '/p', profileDirectory: 'Work', cdpPort: 9333 };
   assert.throws(() => chromeArgs({ ...o, existing: ['--headless=new'] }), /Refusing to take over a headless Chrome/);

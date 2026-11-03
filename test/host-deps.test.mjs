@@ -24,7 +24,7 @@ const helpers = {
   noSymlinks: async () => {},
 };
 
-async function world(t, { system = [], brew = [], os = debian, smoke = {} } = {}) {
+async function world(t, { system = [], brew = [], os = debian, smoke = {}, missingLibs = [] } = {}) {
   // A /tmp root keeps setup's socket paths under 107 bytes on macOS too.
   const root = await fs.realpath(await fs.mkdtemp('/tmp/clawser-host-deps-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -42,6 +42,8 @@ async function world(t, { system = [], brew = [], os = debian, smoke = {} } = {}
   const run = async (command, args = [], options = {}) => {
     calls.push({ command, args, options });
     const name = basename(command);
+    // The X library check prints the libraries ctypes could not load.
+    if (name === 'python3' && args[0] === '-c' && command.startsWith(root)) return args.slice(2).filter(soname => missingLibs.includes(soname)).join(' ');
     if (probes[name] && command.startsWith(root)) {
       if (name === 'Xvfb' && args[0] !== '-help') throw Object.assign(new Error(`Xvfb failed (1): Unrecognized option: ${args[0]}\nuse: X [:<display>] [option]`), { code: 1 });
       if (args[0] !== probes[name]) throw Object.assign(new Error(`${name} failed (1): unknown option ${args[0]}`), { code: 1 });
@@ -72,7 +74,7 @@ test('already installed binaries are recorded with path, sha256 and package vers
   const { record, warnings } = await w.resolve();
   assert.deepEqual(warnings, []);
   assert.deepEqual(Object.keys(record), ['binaries']);
-  for (const dep of HOST_DEPS) {
+  for (const dep of HOST_DEPS.filter(dep => !dep.library)) {
     const path = join(w.systemBin, dep.name);
     assert.deepEqual(record.binaries[dep.name], { path, sha256: digest(await fs.readFile(path)), source: 'system', version: dpkgVersions[packageFor[dep.name]] });
   }
@@ -127,6 +129,26 @@ test('a missing required binary fails with the distro command and runs no instal
   await assert.rejects(one.resolve(), /^Error: Missing Xvfb\. .*: sudo apt install xvfb openbox$/);
 });
 
+test('a missing X client library is a required dependency with its distro package', async t => {
+  const suse = 'ID="opensuse-tumbleweed"\nID_LIKE="opensuse suse"\n';
+  for (const [os, command] of [[debian, 'sudo apt install libxres1'], [fedora, 'sudo dnf install libXres'], ['ID=arch\n', 'sudo pacman -S libxres'],
+    [suse, 'sudo zypper install libXRes1'], ['ID=alpine\n', 'sudo apk add libxres']]) {
+    const w = await world(t, { system: all, os, missingLibs: ['libXRes.so.1'] });
+    await assert.rejects(w.resolve(), { message: 'Missing libXRes.so.1. Ask the owner to install them, then rerun setup: ' + command });
+    const [check, ...more] = w.calls.filter(call => call.args[0] === '-c');
+    assert.deepEqual(more, [], 'one library check');
+    assert.equal(check.command, join(w.systemBin, 'python3'));
+    assert.deepEqual(check.args.slice(2), ['libX11.so.6', 'libXRes.so.1', 'libXtst.so.6', 'libXi.so.6']);
+    assert.equal(w.smokes.length, 0);
+    assertNoSudo(w.calls);
+  }
+  // Every missing library is named at once, after any missing binary.
+  const both = await world(t, { system: ['x11vnc', 'openbox', 'python3'], missingLibs: ['libX11.so.6', 'libXi.so.6'] });
+  await assert.rejects(both.resolve(), { message: 'Missing Xvfb, libX11.so.6, libXi.so.6. Ask the owner to install them, then rerun setup: sudo apt install xvfb libx11-6 libxi6' });
+  const plan = await planHostDeps(undefined, (await world(t, { system: all })).d, helpers);
+  assert.deepEqual(Object.keys(plan.binaries), ['Xvfb', 'x11vnc', 'openbox', 'python3'], 'libraries are checked, never recorded');
+});
+
 test('partial availability: system x11vnc and python3, Homebrew Xvfb and a missing openbox only warns', async t => {
   const w = await world(t, { system: ['x11vnc', 'python3'], brew: ['xorg-server'], os: fedora });
   const plan = await planHostDeps(undefined, w.d, helpers);
@@ -150,13 +172,14 @@ test('a failed smoke test of a required binary records nothing; a failed window 
   assert.match(warnings.join('\n'), /openbox is unavailable.*failed the setup smoke test: exited \(1\): unable to find a valid menu file/);
 });
 
-test('an unchanged recorded set is reused without probes, installs or another smoke test', async t => {
+test('an unchanged recorded set is reused without binary probes, installs or another smoke test', async t => {
   const w = await world(t, { system: all });
   const { record } = await w.resolve();
   w.calls.length = 0; w.smokes.length = 0;
   const again = await w.resolve(record);
   assert.deepEqual(again.record, record);
-  assert.deepEqual(w.calls, []);
+  // The X libraries are not recorded, so only their check runs again.
+  assert.deepEqual(w.calls.map(call => [call.command, call.args[0]]), [[join(w.systemBin, 'python3'), '-c']]);
   assert.equal(w.smokes.length, 0);
 });
 

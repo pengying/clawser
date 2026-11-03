@@ -1,15 +1,35 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
-import { spawn, execFile } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { skip, startX } from './xvfb.mjs';
 
 const execute = promisify(execFile);
 const proof = new URL('../xproof.py', import.meta.url).pathname;
 const fixture = new URL('./input_fixture.py', import.meta.url).pathname;
 const clipboard = new URL('../clipboard.py', import.meta.url).pathname;
+const python = (() => { try { execFileSync('python3', ['--version'], { stdio: 'ignore' }); return false; } catch { return 'needs python3'; } })();
+
+test('xproof reports a missing X library without crashing at import', { skip: python }, async () => {
+  // A loader that can't find libXRes stands in for a host without it. Importing xproof must load nothing.
+  const script = [
+    'import ctypes,json,sys',
+    'def fake(name,*a,**k):',
+    "    if name=='libXRes.so.1':raise OSError(name+': cannot open shared object file')",
+    '    return object()',
+    'ctypes.CDLL=fake',
+    'sys.path.insert(0,sys.argv[1])',
+    'import xproof',
+    "print(json.dumps({'displayOk':xproof.display_ok()}))",
+    "sys.exit(xproof.main(['xproof','clients']))",
+  ].join('\n');
+  const failed = await execute('python3', ['-B', '-c', script, dirname(proof)], { env: { PATH: process.env.PATH } }).then(() => assert.fail('xproof exited 0'), error => error);
+  assert.equal(failed.code, 1, failed.stderr);
+  assert.equal(failed.stderr, 'missing X library libXRes.so.1\n');
+  assert.deepEqual(JSON.parse(failed.stdout), { displayOk: false });
+});
 
 test('an authorized client sees X clients with PIDs', { skip }, async () => {
   const x = await startX();
