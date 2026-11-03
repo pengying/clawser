@@ -94,8 +94,8 @@ first time the agent needs them.
 ### Option B: an existing browser profile
 
 `setup --browser-profile <name>` hands a browser profile that OpenClaw already
-has to Clawser. The profile must be attach-only, with a loopback CDP address,
-and its browser must be running. Setup finds that browser through its CDP port.
+has to Clawser. The profile must be attach-only, with the CDP address
+`http://127.0.0.1:<port>`, and its browser must be running. Setup finds that browser through its CDP port.
 It keeps the same profile folder and port, so the logins stay. It never copies,
 moves or recreates the profile folder.
 

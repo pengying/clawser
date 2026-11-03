@@ -49,10 +49,10 @@ export async function readHostReceipt(o, p, d, h) {
  * `cdpPort` defaults to the receipt's; planning a fresh install passes the chosen one. `convertingFrom` is `{ profile, containerName, imageId? }`.
  * Option B (`option: 'existing'`) points the default and the desktop at the named profile and never writes `browser.profiles`.
  */
-/** A profile reaches Clawser's browser on a loopback name for 127.0.0.1 at the recorded port. Chrome's DevTools does not listen on [::1]. */
+/** A profile reaches Clawser's browser only at http://127.0.0.1 on the recorded port, the origin the controller and the plugin compare against. */
 export function assertProfilePort(name, cdpUrl, cdpPort) {
   const url = new URL(cdpUrl);
-  if (!['127.0.0.1', 'localhost'].includes(url.hostname) || Number(url.port || 80) !== cdpPort) {
+  if (url.hostname !== '127.0.0.1' || Number(url.port || 80) !== cdpPort) {
     throw new Error(`Browser profile ${name} now points at ${cdpUrl}, not the browser Clawser runs on port ${cdpPort}; restore it, then rerun setup.`);
   }
 }

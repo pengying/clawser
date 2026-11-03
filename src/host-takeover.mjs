@@ -73,6 +73,8 @@ export async function discoverExisting(o, p, d, h, { expected } = {}) {
   catch (error) { throw new Error(`Browser profile ${name} can't be taken over: ${error.message}`); }
   const url = new URL(binding.cdpUrl), cdpUrl = binding.cdpUrl, cdpPort = Number(url.port || 80);
   if (url.hostname === '[::1]') throw new Error(`Browser profile ${name} points at [::1]; Clawser's browser listens on 127.0.0.1. Point it at http://127.0.0.1:${cdpPort}, then rerun setup.`);
+  // The controller and the plugin compare the origin as a string, so a localhost profile would fail activation after the takeover.
+  if (url.hostname === 'localhost') throw new Error(`Browser profile ${name} uses ${cdpUrl}; point it at http://127.0.0.1:${cdpPort}, then rerun setup.`);
 
   const listener = await listenerProcess(cdpPort, d);
   if (!listener) {
@@ -81,6 +83,7 @@ export async function discoverExisting(o, p, d, h, { expected } = {}) {
   }
   if (!['127.0.0.1', '::1'].includes(listener.address)) throw new Error(`The browser on port ${cdpPort} listens on ${listener.address}, which other machines can reach. Restart it listening on 127.0.0.1 only, then rerun setup.`);
   const info = await processInfo(listener.pid, d);
+  if (info.unsplit) throw new Error(`Chrome on port ${cdpPort} rewrote its command line, and its flags or profile path contain spaces; start Chrome with flags and a --user-data-dir path that contain no spaces, then rerun setup.`);
 
   // Chrome parses only the = form of these switches.
   const existingArgs = info.argv.slice(1);
