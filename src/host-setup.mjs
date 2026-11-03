@@ -188,6 +188,8 @@ export async function planHost(o, d, h) {
   // The real resolver already warns when openbox is missing; one warning is enough.
   if (!bins.openbox && !warnings.some(text => text.startsWith('openbox '))) warnings.push('openbox is unavailable, so ' + noWm);
   if (bins.openbox && !source) warnings.push('openbox has no rc.xml to start from; ' + noWm);
+  // Setup never tightens the person's own folder. A linked folder is judged by its target, as doctor does.
+  if (found && ((await d.fs.stat(found.userDataDir).catch(() => undefined))?.mode & 0o077)) warnings.push(`${found.userDataDir} is readable by other users, and Clawser's browser keeps cookies protected only by file permissions; run: chmod 700 ${found.userDataDir}`);
   const display = found ? found.display : v2 ? v2.display : await (d.freeDisplay ?? freeDisplay)(d);
   const cdpPort = found ? found.cdpPort : v2 ? v2.cdpPort : await firstFreeCdpPort(d);
   const port = v2 ? v2.port : o.port;

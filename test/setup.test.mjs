@@ -113,14 +113,17 @@ test('--browser-profile and an unmarked CDP install route to the takeover planne
   await fs.writeFile(receiptPath, JSON.stringify(unmarked) + '\n', { mode: 0o600 });
   const receipt = await fs.readFile(receiptPath, 'utf8'), config = structuredClone(h.config);
   h.calls.length = 0;
-  await assert.rejects(runClawser(h.args, h.deps), nobody);
+  // Plain setup, in the default state folder, continues the CDP install.
+  await assert.rejects(runClawser(['setup'], h.deps), nobody);
   assert.deepEqual(h.mutations(), []);
   assert.deepEqual(h.config, config);
   assert.equal(await fs.readFile(receiptPath, 'utf8'), receipt);
-  await assert.rejects(fs.stat(h.stateDir), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(join(dirname(cdp.stateDir), 'clawser')), { code: 'ENOENT' });
+  // A new --state-dir is a new install.
+  assert.equal((await runClawser([...h.args, '--dry-run'], h.deps)).ok, true);
   // An explicit CDP install stays out of the takeover path.
   await fs.writeFile(receiptPath, JSON.stringify({ ...unmarked, explicitCdp: true }) + '\n', { mode: 0o600 });
-  assert.equal((await runClawser([...h.args, '--dry-run'], h.deps)).ok, true);
+  assert.equal((await runClawser(['setup', '--dry-run'], h.deps)).ok, true);
 });
 
 test('dry-run checks readiness and plans without downloads, writes or config changes', async t => {

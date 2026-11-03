@@ -19,7 +19,7 @@ phone ──HTTPS──> Cloudflare tunnel ──> controller (127.0.0.1)
                   supervisor ──starts──> x11vnc (private socket)
                                             │
                                     virtual screen (Xvfb + openbox)
-                                                             │
+                                                          │
 agent ──browser tool──> Clawser gate ──CDP (127.0.0.1)──> Chrome on that screen
 ```
 

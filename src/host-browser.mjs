@@ -161,7 +161,8 @@ export function classifyOwner(cgroup, uid) {
   const path = String(cgroup).replace(/^0::/, '').trim();
   const unit = path.match(new RegExp('^/user\\.slice/user-' + uid + '\\.slice/user@' + uid + '\\.service/(?:app\\.slice/)?([^/]+\\.service)$'))?.[1];
   if (unit) return { kind: 'user-unit', unit };
-  if (/\/(?:session|app)-[^/]*\.scope$/.test(path)) return { kind: 'session' };
+  // systemd never restarts a scope: desktop sessions, apps, terminal tabs (vte-spawn, tmux-spawn) and systemd-run all land in one.
+  if (/\.scope$/.test(path)) return { kind: 'session' };
   return { kind: 'unknown', detail: path };
 }
 

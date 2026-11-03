@@ -298,7 +298,7 @@ export async function removeCookies(dirs, d, warnings) {
   }
 }
 
-/** Imports an export into Clawser's browser and returns the `cookieMigration` record. A failure is a warning, not an error. Removes the export once an import has run. */
+/** Imports an export into Clawser's browser and returns the `cookieMigration` record. A failure is a warning, not an error. Removes the export once an import succeeds. */
 export async function moveCookies(plan, exported, after, d) {
   const cookies = await cookieModule(d), cdpUrl = cdpUrlFor(plan.cdpPort), at = () => new Date(d.now()).toISOString();
   const failed = (error, kept) => {

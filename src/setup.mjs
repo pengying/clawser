@@ -313,7 +313,8 @@ async function selectHostOption(o, d) {
   const receipt = await readHostReceipt(o, hostLocations(o, d), d, setupHelpers);
   if (receipt.kind === 'v2') Object.assign(o, { option: receipt.saved.option, profile: receipt.saved.profile });
   else if (receipt.kind === 'v1' && (await configSection('plugins', d)).entries?.['browser-handoff']?.config?.desktop?.enabled === true) o.option = 'new';
-  else if (!await unmarkedCdpReceipt(d)) o.option = 'new';
+  // Only the default state folder continues a 0.6.x CDP install. A fresh --state-dir is a new install.
+  else if (o.specified.includes('--state-dir') || !await unmarkedCdpReceipt(d)) o.option = 'new';
   else {
     // The takeover serves the profile the CDP viewer was bound to.
     const browser = await configSection('browser', d);
@@ -381,7 +382,7 @@ export async function runClawser(argv, deps = {}) {
   }
   const o = options(argv, d);
   if (o.command === 'help') {
-    d.log('Usage: clawser <setup|doctor> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--cdp] [--no-migrate-cookies]\nDefault setup gives the agent its own browser on a private virtual screen that you view over noVNC. --cdp keeps the one-tab CDP viewer.');
+    d.log('Usage: clawser <setup|doctor> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--novnc | --cdp] [--no-migrate-cookies]\nDefault setup gives the agent its own browser on a private virtual screen that you view over noVNC. --cdp keeps the one-tab CDP viewer.');
     return { ok: true, command: 'help' };
   }
   let cdp = o.cdp;

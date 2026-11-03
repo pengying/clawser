@@ -76,8 +76,8 @@ the viewer origin.
   folder must be 0700. Doctor checks it.
 - **A kept cookie export is plaintext.** Option B moves keyring cookies through
   an export file in a `<stateDir>/cookies-*` folder. The file is 0600 inside a
-  0700 folder. Setup removes it once an import has run. A failed import keeps it
-  so a rerun can try again. Doctor reports it until then. Cookie values never
+  0700 folder. Setup removes it once an import succeeds. A failed import keeps
+  it so a rerun can try again. Doctor reports it until then. Cookie values never
   appear in logs or messages.
 
 Setup touches only three browser profiles: the one Clawser created, the one

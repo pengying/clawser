@@ -33,7 +33,7 @@ function binding(config, o, configured = false) {
     // Old mappings cannot expand the shareable set or block switching backends.
     return resolveHandoffBrowser({ config, pluginConfig: configured ? config.plugin : {}, profile: o.specified.includes('--browser-profile') ? o.profile : undefined });
   } catch (error) {
-    throw new Error('Existing browser CDP connection is incompatible: ' + error.message + '. Configure an existing attachOnly Chromium CDP connection and keep that browser open, then retry; use --novnc for a dedicated desktop.');
+    throw new Error('Existing browser CDP connection is incompatible: ' + error.message + '. Configure an existing attachOnly Chromium CDP connection and keep that browser open, then retry, or run setup without --cdp to give the agent its own browser.');
   }
 }
 

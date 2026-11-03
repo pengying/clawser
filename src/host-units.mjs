@@ -29,7 +29,9 @@ export function unitNames(stateDir) {
 export function chromeArgs({ existing = [], userDataDir, profileDirectory, cdpPort }) {
   const out = [];
   const seen = {};
-  for (const arg of existing) {
+  // Chrome reads every argument after -- as a URL, so Clawser's flags go before it.
+  const end = existing.indexOf('--'), urls = end === -1 ? [] : existing.slice(end);
+  for (const arg of end === -1 ? existing : existing.slice(0, end)) {
     const name = arg.split('=')[0];
     if (name === '--headless') throw new Error('Refusing to take over a headless Chrome; there is no window for the person to see.');
     if (CLAWSER_CHROME_FLAGS.includes(name)) continue;
@@ -43,7 +45,7 @@ export function chromeArgs({ existing = [], userDataDir, profileDirectory, cdpPo
   if (userDataDir !== undefined && !seen['--user-data-dir']) out.push(`--user-data-dir=${userDataDir}`);
   if (profileDirectory !== undefined && !seen['--profile-directory']) out.push(`--profile-directory=${profileDirectory}`);
   out.push('--ozone-platform=x11', '--password-store=basic', '--ignore-gpu-blocklist', '--window-size=1920,1080', '--window-position=0,0', '--start-maximized', '--remote-debugging-address=127.0.0.1', `--remote-debugging-port=${cdpPort}`, '--no-first-run', '--no-default-browser-check');
-  return out;
+  return [...out, ...urls];
 }
 
 export function renderUnits(i) {
