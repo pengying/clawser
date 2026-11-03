@@ -31,8 +31,9 @@ agent ──browser tool──> Clawser gate ──CDP (127.0.0.1)──> Chrome
   popups all work.
 - **Watch-only links** show what the agent is doing, without control.
 - **No Docker.** Clawser needs Linux x86_64, systemd user services, Xvfb,
-  x11vnc, python3, and Google Chrome or Chromium. openbox is recommended. Setup
-  installs none of them. It prints the install command for whatever is missing.
+  x11vnc, python3, the X client libraries libX11, libXRes, libXtst and libXi,
+  and Google Chrome or Chromium. openbox is recommended. Setup installs none of
+  them. It prints the install command for whatever is missing.
 - **Two ways to set up the browser.** Option A, the default, creates a new
   browser profile that starts with no logins. You sign in to sites through a
   handoff link the first time. Option B, `--browser-profile <name>`, takes over a
@@ -83,7 +84,9 @@ for requirements, options A and B, keyring cookies, undoing setup and recovery.
 ### Upgrade
 
 From 0.6.x, setup moves a CDP install to noVNC with the browser profile it
-already uses. To keep the CDP viewer, run `setup --cdp` in step 3 instead. A
+already uses. That profile must point at `127.0.0.1`, not `localhost`. Setup
+refuses a `localhost` profile before it stops anything, and says how to fix it.
+To keep the CDP viewer, run `setup --cdp` in step 3 instead. A
 Docker desktop install becomes option A. Setup prints the commands that remove
 its old Docker resources, and never runs them.
 

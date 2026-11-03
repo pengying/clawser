@@ -364,6 +364,11 @@ next setup run.
   setup. Doctor warns "run setup to switch to noVNC, or setup --cdp to keep the
   CDP viewer". Plain setup then runs option B with the browser profile the CDP
   viewer already uses. Run `setup --cdp` to keep the CDP viewer.
+- **A CDP profile on `localhost`.** Option B needs the profile to point at
+  `127.0.0.1`, because Clawser's controller compares the address as written.
+  Setup refuses a `localhost` profile before it stops anything. Change it with
+  `openclaw config set browser.profiles.<name>.cdpUrl http://127.0.0.1:<port>`,
+  then rerun setup.
 - **A Docker desktop install.** Links stop working after the upgrade, and doctor
   says to rerun setup. Setup converts it to option A, because the container's
   profile can't move to Chrome on the host. It prints the commands that remove
