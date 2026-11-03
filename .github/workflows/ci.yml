@@ -58,6 +58,9 @@ jobs:
         env:
           CLAWSER_BROWSER_DIAGNOSTICS_DIR: ${{ runner.temp }}/clawser-browser-diagnostics
         run: npm test
+      # The runner image ships Xvfb, and xproof needs libXRes alongside it.
+      - name: Install the X client libraries
+        run: sudo apt-get update && sudo apt-get install -y libxres1 libxtst6 libxi6
       - name: Desktop runtime tests
         run: npm run test:desktop
       - name: Verify distributable package
@@ -149,7 +152,7 @@ jobs:
           cache: npm
       - name: Install the host desktop packages
         run: |
-          sudo apt-get update && sudo apt-get install -y xvfb x11vnc openbox
+          sudo apt-get update && sudo apt-get install -y xvfb x11vnc openbox libxres1 libxtst6 libxi6
           sudo loginctl enable-linger "$USER"
       - name: Wait for the user service manager
         shell: bash

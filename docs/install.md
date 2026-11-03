@@ -15,6 +15,7 @@ The host needs:
 
 - systemd user services, `flock` and `tar`
 - Xvfb, x11vnc and python3
+- the X client libraries libX11, libXRes, libXtst and libXi
 - openbox, which is recommended but not required
 - Google Chrome, or a Chromium that isn't a snap
 - outbound HTTPS for the pinned cloudflared and noVNC downloads and the tunnel
@@ -25,13 +26,14 @@ machine's owner to run it, then rerun setup. These are the packages:
 
 | Package manager | Command |
 | --- | --- |
-| apt | `sudo apt install xvfb x11vnc openbox python3` |
-| dnf | `sudo dnf install xorg-x11-server-Xvfb x11vnc openbox python3` |
-| pacman | `sudo pacman -S xorg-server-xvfb x11vnc openbox python` |
-| zypper | `sudo zypper install xorg-x11-server-Xvfb x11vnc openbox python3` |
-| apk | `sudo apk add xvfb x11vnc openbox python3` |
+| apt | `sudo apt install xvfb x11vnc openbox python3 libx11-6 libxres1 libxtst6 libxi6` |
+| dnf | `sudo dnf install xorg-x11-server-Xvfb x11vnc openbox python3 libX11 libXres libXtst libXi` |
+| pacman | `sudo pacman -S xorg-server-xvfb x11vnc openbox python libx11 libxres libxtst libxi` |
+| zypper | `sudo zypper install xorg-x11-server-Xvfb x11vnc openbox python3 libX11-6 libXRes1 libXtst6 libXi6` |
+| apk | `sudo apk add xvfb x11vnc openbox python3 libx11 libxres libxtst libxi` |
 
-Setup prints only the packages that are missing. Without openbox, setup warns
+Most desktops already have the four X client libraries. Setup prints only the
+packages that are missing. Without openbox, setup warns
 and continues. Popups and dialogs then open in the top-left corner without
 stacking. Setup never installs a browser. It refuses a snap Chromium, because a
 snap can't use the hidden folder where Clawser keeps its files.

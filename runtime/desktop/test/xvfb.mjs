@@ -9,7 +9,9 @@ import { xauthorityEntry } from '../../../src/host-display.mjs';
 
 const execute = promisify(execFile);
 const has = bin => { try { execFileSync('which', [bin], { stdio: 'ignore' }); return true; } catch { return false; } };
-export const skip = has('Xvfb') && has('python3') ? false : 'needs Xvfb and python3';
+// xproof needs libXRes, which an Xvfb host can lack.
+const loads = soname => { try { execFileSync('python3', ['-c', 'import ctypes,sys;ctypes.CDLL(sys.argv[1])', soname], { stdio: 'ignore' }); return true; } catch { return false; } };
+export const skip = has('Xvfb') && has('python3') && loads('libXRes.so.1') ? false : 'needs Xvfb, python3 and libXRes';
 const proof = new URL('../xproof.py', import.meta.url).pathname;
 const exists = path => fs.access(path).then(() => true, () => false);
 export const serverArgs = auth => ['-auth', auth, '-nolisten', 'tcp', '-screen', '0', '640x480x24', '+extension', 'XTEST', '+extension', 'X-Resource'];

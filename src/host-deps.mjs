@@ -21,7 +21,15 @@ export const HOST_DEPS = Object.freeze([
   Object.freeze({ name: 'x11vnc', probe: '-version', required: true, }),
   Object.freeze({ name: 'openbox', probe: '--version', required: false }),
   Object.freeze({ name: 'python3', probe: '--version', required: true, packages: Object.freeze({ apt: 'python3', dnf: 'python3', pacman: 'python', zypper: 'python3', apk: 'python3' }) }),
+  // xproof loads these through ctypes. A host can have Xvfb and python3 without them, so python3 checks them; they are never recorded.
+  Object.freeze({ name: 'libX11.so.6', library: true, required: true, packages: Object.freeze({ apt: 'libx11-6', dnf: 'libX11', pacman: 'libx11', zypper: 'libX11-6', apk: 'libx11' }) }),
+  Object.freeze({ name: 'libXRes.so.1', library: true, required: true, packages: Object.freeze({ apt: 'libxres1', dnf: 'libXres', pacman: 'libxres', zypper: 'libXRes1', apk: 'libxres' }) }),
+  Object.freeze({ name: 'libXtst.so.6', library: true, required: true, packages: Object.freeze({ apt: 'libxtst6', dnf: 'libXtst', pacman: 'libxtst', zypper: 'libXtst6', apk: 'libxtst' }) }),
+  Object.freeze({ name: 'libXi.so.6', library: true, required: true, packages: Object.freeze({ apt: 'libxi6', dnf: 'libXi', pacman: 'libxi', zypper: 'libXi6', apk: 'libxi' }) }),
 ]);
+const BINARIES = HOST_DEPS.filter(dep => !dep.library), LIBRARIES = HOST_DEPS.filter(dep => dep.library);
+// ctypes raises OSError for a library the loader can't find. The check prints each one it can't load.
+const LIBRARY_CHECK = 'import ctypes,sys\nfor n in sys.argv[1:]:\n try:ctypes.CDLL(n)\n except OSError:print(n)';
 
 const rerun = '`openclaw clawser setup`';
 const packageName = (dep, manager) => dep.packages?.[manager] ?? dep.name;
@@ -70,7 +78,7 @@ async function existing(dep, plan, d, manager) {
 function validate(recorded) {
   const malformed = what => new Error('Recorded ' + what + ' in the setup receipt is malformed; restore setup.json, or delete its hostDeps entry and rerun ' + rerun);
   if (!object(recorded?.binaries)) throw malformed('host dependencies');
-  for (const dep of HOST_DEPS) {
+  for (const dep of BINARIES) {
     const entry = recorded.binaries[dep.name];
     if (entry !== undefined && (!object(entry) || !['system', 'brew'].includes(entry.source) || typeof entry.path !== 'string' || !isAbsolute(entry.path) ||
         !/^[a-f0-9]{64}$/.test(entry.sha256 ?? '') || typeof entry.version !== 'string')) throw malformed(dep.name);
@@ -91,18 +99,27 @@ async function distro(d) {
     : ' Ask the owner to install ' + names(deps) + ' with the system package manager, then rerun setup.' };
 }
 
+async function missingLibraries(python, d) {
+  let output;
+  try { output = await d.run(python.path, ['-c', LIBRARY_CHECK, ...LIBRARIES.map(dep => dep.name)], { timeoutMs: 10_000 }); }
+  catch (error) { throw new Error('python3 at ' + python.path + ' could not check the X client libraries: ' + reason(error)); }
+  const failed = new Set(String(output).split(/\s+/));
+  return LIBRARIES.filter(dep => failed.has(dep.name));
+}
+
 /** Read-only. A changed binary is re-resolved. Throws the distro install command when a required binary is missing; it never installs anything. */
 export async function planHostDeps(recorded, d, h) {
   if (recorded !== undefined) validate(recorded);
   const { manager, hint } = await distro(d);
   const plan = { binaries: {}, warnings: [] };
   const missing = [];
-  for (const dep of HOST_DEPS) {
+  for (const dep of BINARIES) {
     const entry = recorded?.binaries[dep.name];
     if (entry && await intact(entry, d, h).catch(() => false)) { plan.binaries[dep.name] = entry; continue; }
     const found = await existing(dep, plan, d, manager);
     if (found) plan.binaries[dep.name] = found; else missing.push(dep);
   }
+  if (plan.binaries.python3) missing.push(...await missingLibraries(plan.binaries.python3, d));
   const required = missing.filter(dep => dep.required);
   if (required.length) throw new Error('Missing ' + names(required) + '.' + hint(missing));
   for (const dep of missing) plan.warnings.push(unavailable(dep, hint([dep])));
@@ -126,7 +143,7 @@ export async function verifyHostDeps(recorded, d, h) {
   if (!object(recorded?.binaries)) throw new Error('Host dependencies are not recorded; rerun ' + rerun);
   validate(recorded);
   const warnings = [];
-  for (const dep of HOST_DEPS) {
+  for (const dep of BINARIES) {
     const entry = recorded.binaries[dep.name];
     if (entry === undefined) {
       if (dep.required) throw new Error(dep.name + ' is not recorded; rerun ' + rerun);
@@ -220,7 +237,7 @@ export async function smokeHostDeps(binaries, d, { timeoutMs = 15_000, settleMs 
   }
 }
 
-export const describeHostPlan = plan => HOST_DEPS.map(dep => {
+export const describeHostPlan = plan => BINARIES.map(dep => {
   const entry = plan.binaries[dep.name];
   if (entry) return dep.name + ': ' + entry.path + ' (' + entry.source + ' ' + entry.version + ')';
   return dep.name + ': unavailable';

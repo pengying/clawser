@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """Host supervisor for the display and browser, with one disposable x11vnc actor per viewer session."""
-import ctypes, functools, json, os, re, secrets, signal, socket, stat, subprocess, sys, threading, time, urllib.parse, urllib.request, uuid
+import functools, json, os, re, secrets, signal, socket, stat, subprocess, sys, threading, time, urllib.parse, urllib.request, uuid
 
 os.umask(0o077)
 HERE=os.path.dirname(os.path.abspath(__file__))
@@ -65,7 +65,6 @@ lifecycle_lock=threading.RLock()
 x_lock=threading.Lock()
 stopping=threading.Event()
 x_identity=[None]
-xproof.x.XConnectionNumber.argtypes=[ctypes.c_void_p];xproof.x.XConnectionNumber.restype=ctypes.c_int
 # A user's http_proxy must never receive loopback CDP requests.
 opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
