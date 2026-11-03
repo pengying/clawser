@@ -103,8 +103,9 @@ command, never an agent tool with general shell or administrative authority.
 Preserve unrelated OpenClaw configuration and require a matching original receipt
 before reusing user services, state or a browser profile. Flipping
 `desktop.enabled` must not adopt or delete them. Setup must never install
-packages, run `sudo`, or touch a browser profile other than its own or the one
-named with `--browser-profile`. Keep distinct
+packages or run `sudo`. It must touch only its own browser profile, the one
+named with `--browser-profile`, or, on an upgrade from the CDP viewer, the
+profile that viewer already used. Keep distinct
 browser connections for separate Gateways; there is no cross-process human-control
 coordination for a shared Chrome.
 

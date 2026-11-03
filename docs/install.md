@@ -80,8 +80,10 @@ Setup has two options. Both run the agent's browser on the virtual screen.
 
 ### Option A: a new browser profile
 
-This is the default. Plain `setup` creates a new, empty Chrome profile that
-belongs to Clawser. It adds an OpenClaw browser profile named `clawser` and
+This is the default. On a fresh install, plain `setup` creates a new, empty
+Chrome profile that belongs to Clawser. On a 0.6.x CDP install, plain `setup`
+takes over the CDP viewer's profile instead. See
+[Upgrading from 0.6.x](#upgrading-from-06x). It adds an OpenClaw browser profile named `clawser` and
 makes it the default. The previous default stays in OpenClaw's configuration.
 
 The new browser starts with no logins. Sign in to sites from a handoff link the
@@ -144,7 +146,7 @@ row.
 `setup --cdp` keeps the older viewer instead. It attaches to an existing,
 already running browser through OpenClaw's configured CDP connection, and
 shares one tab as screencast images. It never launches a browser. Dropdowns and
-colour fields get phone controls, but date pickers, file choosers, dialogs,
+color fields get phone controls, but date pickers, file choosers, dialogs,
 popups and browser menus don't reach the phone. See [CDP viewer
 setup](#cdp-viewer-setup).
 
@@ -155,6 +157,7 @@ setup](#cdp-viewer-setup).
 ```text
 Browser profile: clawser (new and empty, at <stateDir>/browser/profile)
 Browser profile: <name> (existing, at <profile folder>)
+Browser profile: <name> (existing, at <profile folder>, folder <profile-directory>)
 Display: :<number>
 Browser: <path to Chrome>
 Take over <unit> (its unit file is backed up first)
@@ -194,7 +197,7 @@ comes from the state directory. Setup and doctor print the exact names.
 
 | Service | What it runs |
 | --- | --- |
-| display | Xvfb, a 1920x1080 virtual screen with no network access |
+| display | Xvfb, a 1920x1080 virtual screen that listens on no network port |
 | wm | openbox, with a config file Clawser generates |
 | browser | the agent's Chrome on that screen |
 | supervisor | one short-lived x11vnc per viewer session, on a private socket |
@@ -226,8 +229,9 @@ openclaw clawser doctor --help
 | `--novnc` | Default | Use the private virtual screen |
 
 Use the same state directory for setup and doctor. Setup refuses a state
-directory whose socket paths would be longer than 107 bytes. On the first run, setup picks the first free CDP port from
-18820 to 18829 and records it. Setup refuses to start when another program
+directory whose socket paths would be longer than 107 bytes. For a new profile,
+the first setup picks the first free CDP port from 18820 to 18829 and records
+it. Option B keeps the profile's own port. Setup refuses to start when another program
 holds the CDP port or the controller port, and it names that program.
 
 The `--container-name`, `--cdp-port`, `--vnc-port` and `--no-default-profile`
@@ -376,20 +380,32 @@ is the folder holding the copy. Doctor prints the exact Clawser unit names.
    openclaw config set browser.defaultProfile <previousDefaultProfile>
    ```
 
+   If `previousDefaultProfile` is `null`, there was no default. Remove the
+   setting instead. OpenClaw's config patch deletes a key set to `null`:
+
+   ```sh
+   printf '%s\n' '{"browser":{"defaultProfile":null}}' | openclaw config patch --stdin
+   ```
+
 2. Stop and disable Clawser's five services:
 
    ```sh
    systemctl --user disable --now clawser-display-<hash>.service clawser-wm-<hash>.service clawser-browser-<hash>.service clawser-supervisor-<hash>.service clawser-desktop-<hash>.service
    ```
 
-3. If setup took over services, copy the backed-up unit files from
-   `<stateDir>/backups/<time>/` to `~/.config/systemd/user/`. Copy any
-   `<unit>.d` folder of drop-ins with them. Then start them again:
+3. If setup took over services, restart them. Setup only stopped and disabled
+   them. Their unit files are still in place. Re-enable only the units whose
+   `replaced[].wasEnabled` is `true`:
 
    ```sh
    systemctl --user daemon-reload
-   systemctl --user enable --now <each restored unit>
+   systemctl --user enable --now <each unit whose wasEnabled is true>
    ```
+
+   The `replaced[].backup` folder holds copies, in case an original was later
+   changed or removed. To restore one, copy it and any `<unit>.d` folder of
+   drop-ins into the receipt's `unitDir`, usually `~/.config/systemd/user`.
+   Then run `systemctl --user daemon-reload` again.
 
 4. Turn off the noVNC handoff. Either run
    `openclaw config set plugins.entries.browser-handoff.config.desktop.enabled false`,
@@ -400,7 +416,10 @@ and its logins in place.
 
 ## Disable or uninstall while keeping data
 
-Finish handoffs and pause automation, then disable the plugin:
+Finish handoffs and pause automation. On a noVNC install, first follow steps 1
+and 2 of [Undoing setup](#undoing-setup). That stops Clawser's five services
+before the plugin folder goes, so they can't restart against a deleted folder.
+Then disable and uninstall the plugin:
 
 ```sh
 openclaw plugins disable browser-handoff
@@ -408,8 +427,7 @@ openclaw plugins uninstall browser-handoff --dry-run
 openclaw plugins uninstall browser-handoff
 ```
 
-Uninstalling leaves Clawser's services, state directory and browser profile in
-place. To stop them, follow steps 1 and 2 of [Undoing setup](#undoing-setup).
+Uninstalling leaves Clawser's state directory and browser profile in place.
 CDP disable/uninstall does not own, stop or delete Chrome or its tabs/cookies.
 Keep private receipts and browser data for recovery. Select an intended
 OpenClaw default before unrelated browser work; disabling does not change it.

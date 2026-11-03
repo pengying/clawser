@@ -13,10 +13,13 @@ only the authenticated viewer, never the Gateway or browser debugging endpoint.
 ## How it works
 
 ```text
-phone ──HTTPS──> Cloudflare tunnel ──> controller (127.0.0.1) ──> supervisor ──> x11vnc (private socket)
-                                                                                      │
-                                                                      virtual screen (Xvfb + openbox)
-                                                                                      │
+phone ──HTTPS──> Cloudflare tunnel ──> controller (127.0.0.1)
+                                            │
+                                            ▼
+                  supervisor ──starts──> x11vnc (private socket)
+                                            │
+                                    virtual screen (Xvfb + openbox)
+                                                             │
 agent ──browser tool──> Clawser gate ──CDP (127.0.0.1)──> Chrome on that screen
 ```
 
@@ -36,7 +39,7 @@ agent ──browser tool──> Clawser gate ──CDP (127.0.0.1)──> Chrome
   browser profile OpenClaw already uses and keeps its logins. Setup closes that
   browser and restarts it on the virtual screen, so it needs `--yes`.
 - **The CDP viewer is still available.** `setup --cdp` shares one tab of an
-  existing browser instead. Dropdowns and colour fields get phone controls.
+  existing browser instead. Dropdowns and color fields get phone controls.
   Date pickers, file choosers, dialogs, popups and browser menus don't reach the
   phone.
 - **Upgrades need a setup run.** See [Upgrade](#upgrade).
@@ -68,7 +71,8 @@ contracts through OpenClaw. Use the supported native capability-acceptance flow
 for installs, updates and enabling; do not hand-write acknowledgement settings.
 
 The dry run prints exactly what setup will do and changes nothing. It shows
-which browser setup will close and which logins could be lost. A real run
+which browser setup will close and how many keyring-encrypted cookies it will
+move. With `--no-migrate-cookies`, it warns how many will be unreadable. A real run
 refuses to close a browser, take over services or move cookies without `--yes`.
 Add `--browser-profile <name>` for option B, or `--cdp` for the CDP viewer.
 
@@ -77,6 +81,11 @@ owner session to list tabs. See [installation and maintenance](docs/install.md)
 for requirements, options A and B, keyring cookies, undoing setup and recovery.
 
 ### Upgrade
+
+From 0.6.x, setup moves a CDP install to noVNC with the browser profile it
+already uses. To keep the CDP viewer, run `setup --cdp` in step 3 instead. A
+Docker desktop install becomes option A. Setup prints the commands that remove
+its old Docker resources, and never runs them.
 
 Finish any open handoffs, then:
 
@@ -90,11 +99,6 @@ Finish any open handoffs, then:
 3. Run `openclaw clawser setup --yes`.
 
 A `git:` install moves the plugin folder, so rerun setup after every upgrade.
-
-From 0.6.x, setup moves a CDP install to noVNC with the browser profile it
-already uses. Run `setup --cdp` instead to keep the CDP viewer. A Docker desktop
-install becomes option A. Setup prints the commands that remove its old Docker
-resources, and never runs them.
 
 The package is **`@pengying/clawser`**, the plugin ID is `browser-handoff` and the
 agent tool is `browser_handoff`.

@@ -80,8 +80,9 @@ the viewer origin.
   so a rerun can try again. Doctor reports it until then. Cookie values never
   appear in logs or messages.
 
-Setup never touches a browser profile other than the one Clawser created or the
-one named with `--browser-profile`. It never copies, moves or recreates a
+Setup touches only three browser profiles: the one Clawser created, the one
+named with `--browser-profile`, and, on an upgrade from the CDP viewer, the
+profile that viewer already used. It never copies, moves or recreates a
 profile folder. It closes a browser, takes over services it didn't write, or
 moves cookies only with `--yes`. Local access to the operator's account remains
 trusted and can bypass every control here.
@@ -112,9 +113,10 @@ Passive CDP field metadata does not collect field values. An explicit **Keyboard
 after tapping an opaque or out-of-process iframe grants manual keyboard authority
 to the focused frame, not verified field-level input. Capabilities are revoked on
 stale state, navigation or loss of control. Browser events are not atomic with
-site focus or navigation changes. In the CDP viewer, supported native HTML selects and classic RGB color fields
-have phone controls; full native OS dialogs and browser UI require noVNC. CDP
-device paste does not synchronize or copy the remote clipboard.
+site focus or navigation changes. In the CDP viewer, supported native HTML
+selects and classic RGB color fields have phone controls; full native OS
+dialogs and browser UI require noVNC. CDP device paste does not synchronize or
+copy the remote clipboard.
 
 CDP supports separate invitations for different tabs, one invite per same tab,
 and one human control session per Gateway. noVNC permits one active invitation
