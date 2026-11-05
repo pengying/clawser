@@ -243,6 +243,53 @@ test('production shutdown retires every dedicated-profile lease including pre-re
   assert.equal(f.clients[0].closed, true);
 });
 
+const disconnected = () => Object.assign(new Error('Production controller connection is closed'), { code: 'CONTROLLER_DISCONNECTED' });
+
+test('production shutdown retires leases over a new connection when the controller restarted first', async () => {
+  // Setup restarts the controller, then reloads the plugin; the old instance's connection is already closed.
+  const f = setup({ request: async (method, params, options, defaults, client) => {
+    if (method === 'revokeAll' && client === f.clients[0]) throw disconnected();
+    return defaults(method);
+  } });
+  await f.services[0].start();
+  await f.services[0].stop();
+  const revokes = f.requests.filter(r => r.method === 'revokeAll');
+  assert.equal(revokes.length, 2);
+  assert.equal(revokes[1].client, f.clients[1]);
+  assert.deepEqual(revokes[1].params, { reason: 'plugin_stop' });
+  assert.equal(f.clients[1].socketPath, '/tmp/browser-handoff/controller.sock');
+  assert.equal(f.clients.every(client => client.closed), true);
+});
+
+test('production shutdown still fails closed when retirement over a new connection is not verified', async () => {
+  const cases = [
+    ['the controller is still unreachable', () => { throw disconnected(); }, /connection is closed/],
+    ['the retry is unverified', (client, clients) => { if (client === clients[0]) throw disconnected(); return { allRetired: false, recoveryRequired: true }; }, /operator recovery is required/],
+  ];
+  for (const [name, revoke, error] of cases) {
+    const f = setup({ request: async (method, params, options, defaults, client) => method === 'revokeAll' ? revoke(client, f.clients) : defaults(method) });
+    await f.services[0].start();
+    await assert.rejects(f.services[0].stop(), error, name);
+    assert.equal(f.requests.filter(r => r.method === 'revokeAll').length, 2, name);
+    assert.equal(f.clients.every(client => client.closed), true, name);
+  }
+  const timedOut = setup({ request: async (method, params, options, defaults) => {
+    if (method === 'revokeAll') throw new Error('Controller request timed out; outcome may be uncertain');
+    return defaults(method);
+  } });
+  await timedOut.services[0].start();
+  await assert.rejects(timedOut.services[0].stop(), /timed out/);
+  assert.equal(timedOut.requests.filter(r => r.method === 'revokeAll').length, 1);
+  assert.equal(timedOut.clients.length, 1);
+  let connects = 0;
+  const unreachable = setup({
+    request: async (method, params, options, defaults) => { if (method === 'revokeAll') throw disconnected(); return defaults(method); },
+    connect: client => { if (++connects > 1) throw Object.assign(new Error('connect ENOENT'), { code: 'ENOENT' }); return client; },
+  });
+  await unreachable.services[0].start();
+  await assert.rejects(unreachable.services[0].stop(), /ENOENT/);
+});
+
 test('production leaves require explicit release receipt and fault all later admissions', async t => {
   const f = setup({ request: async (method, params, options, defaults) => method === 'automationLeave' ? { released: false } : defaults(method) });
   await f.services[0].start(); t.after(() => f.services[0].stop());

@@ -8,6 +8,8 @@ import { randomUUID } from 'node:crypto';
 const MAX_MESSAGE = 1024 * 1024;
 const validId = id => typeof id === 'string' && id.length > 0 && id.length <= 100;
 const failure = message => new Error(message);
+// The connection is gone and the controller may or may not have handled the request, so only idempotent callers retry on this code.
+const disconnect = message => Object.assign(new Error(message), { code: 'CONTROLLER_DISCONNECTED' });
 
 export class DesktopRpcClient {
   pending = new Map();
@@ -23,7 +25,7 @@ export class DesktopRpcClient {
   }
   fail(message) {
     this.closed = true;
-    for (const entry of this.pending.values()) entry.reject(failure(message));
+    for (const entry of this.pending.values()) entry.reject(disconnect(message));
     this.pending.clear();
   }
   receive(chunk) {
@@ -42,7 +44,7 @@ export class DesktopRpcClient {
     }
   }
   async request(method,params={}, {signal,timeoutMs=15_000}={}) {
-    if(this.closed)throw failure('Production controller connection is closed');
+    if(this.closed)throw disconnect('Production controller connection is closed');
     if(signal?.aborted)throw failure('Controller request aborted');
     if(typeof method!=='string'||method.length>100||!Number.isFinite(timeoutMs)||timeoutMs<1||timeoutMs>180_000)throw failure('Invalid controller request');
     if(this.pending.size>=128)throw failure('Too many controller requests');
@@ -55,7 +57,7 @@ export class DesktopRpcClient {
       timer.unref();
       this.pending.set(id,{resolve:value=>finish(resolve,value),reject:error=>finish(reject,error)});
       signal?.addEventListener('abort',abort,{once:true});
-      this.ready.then(()=>{if(this.pending.has(id)&&!this.closed)this.socket.write(line);else if(this.closed)this.pending.get(id)?.reject(failure('Production controller disconnected'));},()=>this.pending.get(id)?.reject(failure('Production controller disconnected')));
+      this.ready.then(()=>{if(this.pending.has(id)&&!this.closed)this.socket.write(line);else if(this.closed)this.pending.get(id)?.reject(disconnect('Production controller disconnected'));},()=>this.pending.get(id)?.reject(disconnect('Production controller disconnected')));
     });
   }
   close(){this.fail('Production controller connection is closed');this.socket.destroy();}
