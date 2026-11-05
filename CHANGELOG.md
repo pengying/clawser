@@ -11,6 +11,7 @@
 - Add doctor rows for the host install: `services`, `display`, `browser window`, `CDP origin`, `profile directory`, `linger` and `units current`. Option B installs also get `cookie store` and `cookie export` warnings.
 - The noVNC viewer's Copy and Paste buttons now work through a small built-in clipboard helper, so the clipboard needs no extra package.
 - Make handoffs work on hosts whose desktop session runs Wayland.
+- Tell agents to fill in what they already know and trigger codes themselves before asking the owner for anything. A code texted to the owner's phone is now asked for as a chat reply, and a handoff link is only for steps the owner must do in person, such as a CAPTCHA. Agents had been sending a takeover link to "complete phone verification" when they could enter the saved number, press Send code, and ask only for the code.
 
 ## 0.6.3
 
