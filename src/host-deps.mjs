@@ -1,7 +1,10 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import * as fs from 'node:fs/promises';
 import net from 'node:net';
+import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
+import { xauthorityEntry } from './host-display.mjs';
 
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -14,12 +17,21 @@ const managers = [
 
 // Xvfb has no version flag: -version prints usage and exits 1, so -help is its liveness probe.
 export const HOST_DEPS = Object.freeze([
-  Object.freeze({ name: 'Xvfb', probe: '-help', required: true, brew: 'xorg-server', packages: Object.freeze({ apt: 'xvfb', dnf: 'xorg-x11-server-Xvfb', pacman: 'xorg-server-xvfb', zypper: 'xorg-x11-server-Xvfb', apk: 'xvfb' }) }),
-  Object.freeze({ name: 'x11vnc', probe: '-version', required: true, brew: 'x11vnc' }),
+  Object.freeze({ name: 'Xvfb', probe: '-help', required: true, packages: Object.freeze({ apt: 'xvfb', dnf: 'xorg-x11-server-Xvfb', pacman: 'xorg-server-xvfb', zypper: 'xorg-x11-server-Xvfb', apk: 'xvfb' }) }),
+  Object.freeze({ name: 'x11vnc', probe: '-version', required: true, }),
   Object.freeze({ name: 'openbox', probe: '--version', required: false }),
+  Object.freeze({ name: 'python3', probe: '--version', required: true, packages: Object.freeze({ apt: 'python3', dnf: 'python3', pacman: 'python', zypper: 'python3', apk: 'python3' }) }),
+  // xproof loads these through ctypes. A host can have Xvfb and python3 without them, so python3 checks them; they are never recorded.
+  Object.freeze({ name: 'libX11.so.6', library: true, required: true, packages: Object.freeze({ apt: 'libx11-6', dnf: 'libX11', pacman: 'libx11', zypper: 'libX11-6', apk: 'libx11' }) }),
+  Object.freeze({ name: 'libXRes.so.1', library: true, required: true, packages: Object.freeze({ apt: 'libxres1', dnf: 'libXres', pacman: 'libxres', zypper: 'libXRes1', apk: 'libxres' }) }),
+  Object.freeze({ name: 'libXtst.so.6', library: true, required: true, packages: Object.freeze({ apt: 'libxtst6', dnf: 'libXtst', pacman: 'libxtst', zypper: 'libXtst6', apk: 'libxtst' }) }),
+  Object.freeze({ name: 'libXi.so.6', library: true, required: true, packages: Object.freeze({ apt: 'libxi6', dnf: 'libXi', pacman: 'libxi', zypper: 'libXi6', apk: 'libxi' }) }),
 ]);
+const BINARIES = HOST_DEPS.filter(dep => !dep.library), LIBRARIES = HOST_DEPS.filter(dep => dep.library);
+// ctypes raises OSError for a library the loader can't find. The check prints each one it can't load.
+const LIBRARY_CHECK = 'import ctypes,sys\nfor n in sys.argv[1:]:\n try:ctypes.CDLL(n)\n except OSError:print(n)';
 
-const rerun = '`clawser setup --novnc`';
+const rerun = '`openclaw clawser setup`';
 const packageName = (dep, manager) => dep.packages?.[manager] ?? dep.name;
 const names = deps => deps.map(dep => dep.name).join(', ');
 const reason = error => String(error?.message ?? error).trim();
@@ -63,28 +75,10 @@ async function existing(dep, plan, d, manager) {
   }
 }
 
-async function brewPath(d) {
-  for (const dir of searchPaths(d)) if (await executable(join(dir, 'brew'), d)) return join(dir, 'brew');
-}
-
-async function brewBinary(dep, brew, d) {
-  const prefix = String(await d.run(brew, ['--prefix', dep.brew])).trim();
-  if (!isAbsolute(prefix)) throw new Error('Homebrew returned an invalid prefix for ' + dep.brew);
-  return join(prefix, 'bin', dep.name);
-}
-
-// brew upgrade plus brew cleanup moves a binary to a new Cellar path, so follow the formula.
-async function upgradedBrew(dep, plan, d) {
-  const brew = await brewPath(d);
-  if (!brew || !dep.brew) return;
-  try { const path = await brewBinary(dep, brew, d); if (await executable(path, d)) return await probe(path, dep, d, { source: 'brew' }); }
-  catch (error) { plan.warnings.push('Ignored ' + reason(error)); }
-}
-
 function validate(recorded) {
   const malformed = what => new Error('Recorded ' + what + ' in the setup receipt is malformed; restore setup.json, or delete its hostDeps entry and rerun ' + rerun);
   if (!object(recorded?.binaries)) throw malformed('host dependencies');
-  for (const dep of HOST_DEPS) {
+  for (const dep of BINARIES) {
     const entry = recorded.binaries[dep.name];
     if (entry !== undefined && (!object(entry) || !['system', 'brew'].includes(entry.source) || typeof entry.path !== 'string' || !isAbsolute(entry.path) ||
         !/^[a-f0-9]{64}$/.test(entry.sha256 ?? '') || typeof entry.version !== 'string')) throw malformed(dep.name);
@@ -105,37 +99,36 @@ async function distro(d) {
     : ' Ask the owner to install ' + names(deps) + ' with the system package manager, then rerun setup.' };
 }
 
-/** Read-only. A changed binary is re-resolved. Throws the distro install command when a required binary is missing and Homebrew is unavailable. */
+async function missingLibraries(python, d) {
+  let output;
+  try { output = await d.run(python.path, ['-I', '-c', LIBRARY_CHECK, ...LIBRARIES.map(dep => dep.name)], { timeoutMs: 10_000 }); }
+  catch (error) { throw new Error('python3 at ' + python.path + ' could not check the X client libraries: ' + reason(error)); }
+  const failed = new Set(String(output).split(/\s+/));
+  return LIBRARIES.filter(dep => failed.has(dep.name));
+}
+
+/** Read-only. A changed binary is re-resolved. Throws the distro install command when a required binary is missing; it never installs anything. */
 export async function planHostDeps(recorded, d, h) {
   if (recorded !== undefined) validate(recorded);
   const { manager, hint } = await distro(d);
   const plan = { binaries: {}, warnings: [] };
   const missing = [];
-  for (const dep of HOST_DEPS) {
+  for (const dep of BINARIES) {
     const entry = recorded?.binaries[dep.name];
     if (entry && await intact(entry, d, h).catch(() => false)) { plan.binaries[dep.name] = entry; continue; }
-    const found = (entry?.source === 'brew' ? await upgradedBrew(dep, plan, d) : undefined) ?? await existing(dep, plan, d, manager);
+    const found = await existing(dep, plan, d, manager);
     if (found) plan.binaries[dep.name] = found; else missing.push(dep);
   }
-  if (!missing.length) return plan;
-  const brew = missing.some(dep => dep.brew) && await brewPath(d);
-  if (brew) plan.brew = { path: brew, deps: missing.filter(dep => dep.brew), hint: hint(missing) };
-  const rest = missing.filter(dep => !plan.brew?.deps.includes(dep));
-  const required = rest.filter(dep => dep.required);
-  if (required.length) throw new Error('Missing ' + names(required) + ', and Homebrew is not available to install ' + (required.length > 1 ? 'them' : 'it') + '.' + hint(rest));
-  for (const dep of rest) plan.warnings.push(unavailable(dep, hint([dep])));
+  if (plan.binaries.python3) missing.push(...await missingLibraries(plan.binaries.python3, d));
+  const required = missing.filter(dep => dep.required);
+  if (required.length) throw new Error('Missing ' + names(required) + '.' + hint(missing));
+  for (const dep of missing) plan.warnings.push(unavailable(dep, hint([dep])));
   return plan;
 }
 
-/** Writes only through brew install. A set that differs from `previous` must pass the smoke test before it is returned. */
+/** Installs nothing. A set that differs from `previous` must pass the smoke test before it is returned. */
 export async function installHostDeps(plan, d, { previous } = {}) {
   const binaries = { ...plan.binaries }, warnings = [];
-  if (plan.brew) {
-    const formulas = plan.brew.deps.map(dep => dep.brew);
-    try { await d.run(plan.brew.path, ['install', ...formulas], { timeoutMs: 45 * 60_000 }); }
-    catch (error) { throw new Error('brew install ' + formulas.join(' ') + ' failed: ' + reason(error) + '.' + plan.brew.hint); }
-    for (const dep of plan.brew.deps) binaries[dep.name] = await probe(await brewBinary(dep, plan.brew.path, d), dep, d, { source: 'brew' });
-  }
   const record = { binaries: ordered(binaries) };
   if (same(record, previous)) return { record, warnings };
   const failed = await (d.hostSmoke ?? smokeHostDeps)(record.binaries, d);
@@ -150,7 +143,7 @@ export async function verifyHostDeps(recorded, d, h) {
   if (!object(recorded?.binaries)) throw new Error('Host dependencies are not recorded; rerun ' + rerun);
   validate(recorded);
   const warnings = [];
-  for (const dep of HOST_DEPS) {
+  for (const dep of BINARIES) {
     const entry = recorded.binaries[dep.name];
     if (entry === undefined) {
       if (dep.required) throw new Error(dep.name + ' is not recorded; rerun ' + rerun);
@@ -185,14 +178,8 @@ function firstLine(stream, child, timeoutMs) {
   });
 }
 
-const freePort = () => new Promise((accept, reject) => {
-  const server = net.createServer();
-  server.once('error', reject);
-  server.listen({ host: '127.0.0.1', port: 0 }, () => { const { port } = server.address(); server.close(() => accept(port)); });
-});
-
-const rfbBanner = port => new Promise(accept => {
-  const socket = net.connect({ host: '127.0.0.1', port });
+const rfbBanner = path => new Promise(accept => {
+  const socket = net.connect({ path });
   let text = '';
   const done = value => { socket.destroy(); accept(value); };
   socket.setTimeout(1000, () => done(false));
@@ -200,27 +187,44 @@ const rfbBanner = port => new Promise(accept => {
   socket.on('data', bytes => { text += bytes; if (text.length >= 12) done(/^RFB \d{3}\.\d{3}\n/.test(text)); });
 });
 
-/** Starts the resolved set on a private display and stops it again. Returns failure messages by binary name. */
+function xproof(entry, packageDir, env, timeoutMs) {
+  return new Promise(accept => {
+    const child = spawn(entry.path, [join(packageDir, 'runtime/desktop/xproof.py'), 'clients'], { stdio: ['ignore', 'ignore', 'pipe'], env });
+    let stderr = '';
+    const timer = setTimeout(() => { child.kill('SIGKILL'); accept('did not finish within ' + timeoutMs + ' ms'); }, timeoutMs);
+    child.stderr.on('data', bytes => { stderr = (stderr + bytes).slice(-4000); });
+    child.once('error', error => { clearTimeout(timer); accept('could not start: ' + error.message); });
+    child.once('close', (code, signal) => { clearTimeout(timer); accept(code === 0 ? undefined : 'exited (' + (signal || code) + ')' + (stderr.trim() ? ': ' + stderr.trim().slice(-400) : '')); });
+  });
+}
+
+/** Mirrors the production desktop launch, then stops it. Returns failure messages by binary name. */
 export async function smokeHostDeps(binaries, d, { timeoutMs = 15_000, settleMs = 1500 } = {}) {
   const children = [], failed = {};
   const base = { ...d.env };
-  delete base.DISPLAY; delete base.WAYLAND_DISPLAY;
+  delete base.DISPLAY; delete base.WAYLAND_DISPLAY; delete base.XAUTHORITY;
+  const dir = await fs.mkdtemp(join(tmpdir(), 'clawser-smoke-'));
   try {
-    const xvfb = launch(children, binaries.Xvfb, ['-displayfd', '3', '-screen', '0', '1280x800x24', '-nolisten', 'tcp'], base, true);
-    let display;
-    try { display = ':' + await firstLine(xvfb.stdio[3], xvfb, timeoutMs); }
+    const cookie = randomBytes(16), serverAuth = join(dir, 'server.auth'), clientAuth = join(dir, 'client.auth'), socket = join(dir, 'vnc.sock');
+    // The server loads every cookie in -auth whatever the display number; clients match the number, so that file waits for -displayfd.
+    await fs.writeFile(serverAuth, xauthorityEntry(0, cookie), { mode: 0o600 });
+    const xvfb = launch(children, binaries.Xvfb, ['-displayfd', '3', '-screen', '0', '1280x800x24', '-nolisten', 'tcp', '-auth', serverAuth], base, true);
+    let number;
+    try { number = await firstLine(xvfb.stdio[3], xvfb, timeoutMs); }
     catch (error) { failed.Xvfb = error.message; return failed; }
-    const wm = binaries.openbox && launch(children, binaries.openbox, [], { ...base, DISPLAY: display });
+    const display = ':' + number, env = { ...base, DISPLAY: display, XAUTHORITY: clientAuth };
+    await fs.writeFile(clientAuth, xauthorityEntry(number, cookie), { mode: 0o600 });
+    const wm = binaries.openbox && launch(children, binaries.openbox, [], env);
     if (wm) await Promise.race([wm.exited, delay(settleMs)]);
-    const port = await freePort();
-    const vnc = launch(children, binaries.x11vnc, ['-display', display, '-localhost', '-noxrecord', '-rfbport', String(port), '-nopw', '-forever', '-shared'], { ...base, DISPLAY: display });
+    const vnc = launch(children, binaries.x11vnc, ['-display', display, '-noxrecord', '-unixsock', socket, '-rfbport', '0', '-no6', '-rfbportv6', '-1', '-nopw', '-forever', '-shared'], env);
     for (const deadline = Date.now() + timeoutMs; ;) {
       if (vnc.done) { failed.x11vnc = await vnc.exited; break; }
-      if (await rfbBanner(port)) break;
-      if (Date.now() > deadline) { failed.x11vnc = 'did not serve RFB on 127.0.0.1:' + port + ' within ' + timeoutMs + ' ms'; break; }
+      if (await rfbBanner(socket)) { await d.onSmokeVnc?.(vnc.pid); break; }
+      if (Date.now() > deadline) { failed.x11vnc = 'did not serve RFB on ' + socket + ' within ' + timeoutMs + ' ms'; break; }
       await delay(250);
     }
     if (xvfb.done) failed.Xvfb = await xvfb.exited;
+    else if (binaries.python3 && !failed.x11vnc) { const problem = await xproof(binaries.python3, d.packageDir, env, timeoutMs); if (problem) failed.python3 = problem; }
     if (wm?.done) failed.openbox = await wm.exited;
     return failed;
   } finally {
@@ -229,12 +233,12 @@ export async function smokeHostDeps(binaries, d, { timeoutMs = 15_000, settleMs 
       child.kill('SIGTERM');
       if (!await Promise.race([child.exited.then(() => true), delay(3000).then(() => false)])) { child.kill('SIGKILL'); await child.exited; }
     }
+    await fs.rm(dir, { recursive: true, force: true });
   }
 }
 
-export const describeHostPlan = plan => HOST_DEPS.map(dep => {
+export const describeHostPlan = plan => BINARIES.map(dep => {
   const entry = plan.binaries[dep.name];
   if (entry) return dep.name + ': ' + entry.path + ' (' + entry.source + ' ' + entry.version + ')';
-  if (plan.brew?.deps.includes(dep)) return dep.name + ': brew install ' + dep.brew;
   return dep.name + ': unavailable';
 });

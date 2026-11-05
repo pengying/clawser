@@ -15,12 +15,12 @@ unredacted session logs. There is no promised response time or bug bounty.
 ## Trust model
 
 Clawser lets a verified native OpenClaw owner delegate temporary browser viewing
-or control. Default CDP shares a selected tab in the configured existing host
-browser. Optional noVNC shares an entire dedicated Chromium profile: every tab,
-browser chrome, dialog and system clipboard during control may be exposed.
+or control. By default a link shares the agent's whole browser through noVNC.
+Whoever opens it sees every tab, the browser menus, dialogs and, during control,
+the browser's clipboard. The `--cdp` viewer shares one selected tab instead.
 A human can act with the authority of accounts signed into the shared browser.
-The OpenClaw connection is not automatically the operator’s everyday OS Chrome
-profile. Keep browsers for unrelated personal and family use separate.
+The agent's browser is not the operator's everyday browser. Keep browsers for
+unrelated personal and family use separate.
 
 Invitation URLs are bearer credentials with one-use redemption, one concurrent
 viewer and a fixed expiry. Watch-only invitations cannot promote to control.
@@ -51,24 +51,50 @@ configuration change does not turn an already performed website action back.
 The Cloudflare HTTPS tunnel serves the authenticated viewer only. Its public URL
 is not itself an authorization boundary; Cloudflare is part of the transport
 trust boundary. Never expose the Gateway, CDP, raw VNC or controller socket through
-the viewer origin. Keep CDP/VNC on loopback and controller sockets/state private
-to the host user.
+the viewer origin.
+
+## Host boundaries
+
+- **No container and no egress firewall.** The agent's Chrome runs on the host
+  as a user service, in Chrome's normal OS sandbox. Nothing restricts which
+  sites or networks it can reach.
+- **The VNC server and the virtual screen are private to the operator.** Each
+  viewer session gets its own x11vnc. It listens only on a Unix socket inside a
+  0700 folder, and never on a network port. The virtual screen accepts no
+  network connections. Programs need an X cookie, which only the operator can
+  read, to draw on it or read it.
+- **Other local accounts can reach the debugging port.** Chrome's debugging
+  port listens on 127.0.0.1, because OpenClaw connects to it over HTTP. Any
+  other account on the same machine can connect to it and control the agent's
+  browser. Blocking that needs root, so it is not fixed in this release. Use a
+  machine you don't share.
+- **A link shows every tab.** Whoever opens a noVNC link sees every tab in the
+  agent's browser, not just the one the agent was using.
+- **Cookies are protected by file permissions only.** Clawser's browser uses
+  Chrome's basic password store, so it starts signed in after a reboot with
+  nobody at the machine. Cookies are stored unencrypted on disk. The profile
+  folder must be 0700. Doctor checks it.
+- **A kept cookie export is plaintext.** Option B moves keyring cookies through
+  an export file in a `<stateDir>/cookies-*` folder. The file is 0600 inside a
+  0700 folder. Setup removes it once an import succeeds. A failed import keeps
+  it so a rerun can try again. Doctor reports it until then. Cookie values never
+  appear in logs or messages.
+
+Setup touches only three browser profiles: the one Clawser created, the one
+named with `--browser-profile`, and, on an upgrade from the CDP viewer, the
+profile that viewer already used. It never copies, moves or recreates a
+profile folder. It closes a browser, takes over services it didn't write, or
+moves cookies only with `--yes`.
+
+Local access to the operator's account remains trusted and can bypass every
+control here.
+
+The CDP viewer attaches only to an explicitly configured loopback Chromium CDP
+origin with `attachOnly=true`. It never launches Chrome, creates a Chrome
+user-data directory, copies cookies, guesses ports or substitutes another
+browser. It does not own the Chrome process and has no idle browser cleanup.
 
 ## Browser and handback boundaries
-
-Default setup attaches only to an explicitly configured loopback Chromium CDP
-origin with `attachOnly=true`. It never launches Chrome, creates a Chrome
-user-data directory, copies cookies, guesses ports or substitutes another browser.
-The host browser uses its normal OS sandbox; CDP mode adds no Docker isolation.
-It does not own the Chrome process and has no idle browser cleanup.
-
-The optional noVNC Docker runtime uses a dedicated profile volume, Chromium’s
-sandbox, restricted capabilities, a read-only root filesystem and network
-restrictions. It does not mount the host home directory or Docker socket into
-the browser container. Local Docker access and the OpenClaw host account remain
-trusted and capable of bypassing these controls. Switching `desktop.enabled`
-does not adopt or delete existing Docker resources; ownership receipts and source
-identity remain mandatory for desktop maintenance.
 
 Native trusted-tool policy restricts ordinary browser tools to verified owner
 invocations, `target="host"` and an allowed configured profile. Browser startup,
@@ -89,9 +115,10 @@ Passive CDP field metadata does not collect field values. An explicit **Keyboard
 after tapping an opaque or out-of-process iframe grants manual keyboard authority
 to the focused frame, not verified field-level input. Capabilities are revoked on
 stale state, navigation or loss of control. Browser events are not atomic with
-site focus or navigation changes. Supported native HTML selects and classic RGB
-color fields have phone controls; full native OS dialogs and browser UI require
-noVNC. CDP device paste does not synchronize or copy the remote OS clipboard.
+site focus or navigation changes. In the CDP viewer, supported native HTML
+selects and classic RGB color fields have phone controls; full native OS
+dialogs and browser UI require noVNC. CDP device paste does not synchronize or
+copy the remote clipboard.
 
 CDP supports separate invitations for different tabs, one invite per same tab,
 and one human control session per Gateway. noVNC permits one active invitation
@@ -110,20 +137,22 @@ challenge-acceptance guarantee.
 
 Security fixes target the latest tagged release. The validated platform is Linux
 x86_64 with Node.js >=24.16 <25 or >=26.1 and OpenClaw 2026.10.4+ with the native
-trusted-tool-policy SDK. Native fixtures cover 2026.10.4 and 2026.10.7. noVNC
-additionally requires local Docker, user systemd, `flock` and `tar`. Other host
-architectures and operating systems remain unverified.
+trusted-tool-policy SDK. Native fixtures cover 2026.10.4 and 2026.10.7. The
+noVNC default also requires systemd user services, `flock`, `tar`, Xvfb,
+x11vnc and python3. Other host architectures and operating systems remain
+unverified.
 
 Review and targeted tests cover authorization, runtime/controller ownership,
 invitation lifecycle, browser admission and handback. They are not penetration
 tests, independent certification or a guarantee that vulnerabilities do not
-remain. CI uses disposable browser fixtures and runtime adapters; ordinary CI
-does not run the complete Docker desktop or test every physical phone. Physical
-iOS Safari coverage is unverified. CDP renders screencast images rather than
-native video, without a latency or frame-rate guarantee.
+remain. CI uses disposable browser fixtures, and a separate job runs a real
+host setup with user services on a disposable runner. CI does not test every
+physical phone. Physical iOS Safari coverage is unverified. CDP renders
+screencast images rather than native video, without a latency or frame-rate
+guarantee.
 
-Setup pins cloudflared and verifies its SHA-256 checksum. Only `--novnc` also
-downloads pinned noVNC and builds the browser image. Managed CDP doctor is read-only
-and checks receipt ownership, executable/checksummed cloudflared, current browser
-binding, CDP, local viewer and public tunnel readiness. Checksums detect changes
-relative to the published file; they are not an independent publisher signature.
+Setup pins cloudflared and noVNC and verifies their SHA-256 checksums. The CDP
+viewer downloads only cloudflared. Setup records the path and SHA-256 of Xvfb,
+x11vnc, openbox and python3, and doctor rechecks them. Doctor is read-only.
+Checksums detect changes relative to the published file; they are not an
+independent publisher signature.

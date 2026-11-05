@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
-import { connect as connectTcp, isIPv4 } from 'node:net';
+import { connect as connectSocket, isIPv4 } from 'node:net';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, resolve, sep } from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -83,10 +83,9 @@ function rttSummary(samples) {
   return { sampleCount: samples.length, latest: samples.at(-1) ?? null, p50: percentile(0.5), p95: percentile(0.95) };
 }
 
-function defaultTcpConnect({ host, port, signal }) {
+function defaultUpstreamConnect({ path, signal }) {
   return new Promise((resolvePromise, reject) => {
-    const socket = connectTcp({ host, port });
-    socket.setNoDelay(true);
+    const socket = connectSocket({ path });
     const cleanup = () => signal?.removeEventListener('abort', abort);
     const abort = () => { socket.destroy(); cleanup(); reject(signal.reason || new Error('VNC connection cancelled')); };
     if (signal?.aborted) { abort(); return; }
@@ -99,21 +98,22 @@ function defaultTcpConnect({ host, port, signal }) {
 function validRegistration(registration) {
   const endpoint = registration?.endpoint;
   const credentials = registration?.credentials;
-  if (endpoint?.host !== '127.0.0.1' || !Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535)
-    throw new Error('Supervisor must register a fixed loopback VNC endpoint');
+  const path = endpoint?.path;
+  if (typeof endpoint !== 'object' || endpoint === null || 'host' in endpoint || 'port' in endpoint || typeof path !== 'string' || !isAbsolute(path) || /[\x00-\x1f\x7f]/.test(path) || Buffer.byteLength(path) > 107)
+    throw new Error('Supervisor must register a private VNC socket');
   if (typeof credentials?.watch !== 'string' || typeof credentials?.control !== 'string')
     throw new Error('Supervisor did not register both VNC credentials');
   const watch = Buffer.from(credentials.watch).subarray(0, 8);
   const control = Buffer.from(credentials.control).subarray(0, 8);
   if (watch.length !== 8 || control.length !== 8 || timingSafeEqual(watch, control))
     throw new Error('VNC credentials need distinct effective eight-byte values');
-  return { endpoint: { host: endpoint.host, port: endpoint.port }, credentials: { watch: credentials.watch, control: credentials.control } };
+  return { endpoint: { path }, credentials: { watch: credentials.watch, control: credentials.control } };
 }
 
 export class NoVncProbeGateway {
   sessions = new Map();
   creations = new Set();
-  constructor({ supervisor, publicBaseUrl, allowLanHttp = false, noVncAssetsDir, tcpConnect = defaultTcpConnect, now = Date.now, monotonicNow = () => performance.now(), promotionMs = 10_000, heartbeatMs = 10_000, upstreamConnectMs = 5_000, maxProbes = 8, prefix = PREFIX, completionDisposition, capabilities = {}, onEnded } = {}) {
+  constructor({ supervisor, publicBaseUrl, allowLanHttp = false, noVncAssetsDir, upstreamConnect = defaultUpstreamConnect, now = Date.now, monotonicNow = () => performance.now(), promotionMs = 10_000, heartbeatMs = 10_000, upstreamConnectMs = 5_000, maxProbes = 8, prefix = PREFIX, completionDisposition, capabilities = {}, onEnded } = {}) {
     for (const method of ['create', 'read', 'register', 'destroy', 'verifyExited']) {
       if (typeof supervisor?.[method] !== 'function') throw new Error(`Probe supervisor requires ${method}()`);
     }
@@ -131,7 +131,7 @@ export class NoVncProbeGateway {
     const origin = this.publicBaseUrl ? new URL(this.publicBaseUrl) : undefined;
     this.lanHttpOrigin = allowLanHttp === true && origin?.protocol === 'http:' && privateIpv4(origin.hostname) ? origin : undefined;
     this.noVncAssetsDir = noVncAssetsDir ? resolve(noVncAssetsDir) : undefined;
-    this.tcpConnect = tcpConnect;
+    this.upstreamConnect = upstreamConnect;
     this.now = now;
     this.monotonicNow = monotonicNow;
     this.promotionMs = promotionMs;
@@ -465,7 +465,7 @@ export class NoVncProbeGateway {
       } else if (session.mode !== 'watch') throw problem('Stream unavailable', 409);
       session.connecting = true;
       reserved = true;
-      const connectTask = Promise.resolve().then(() => this.tcpConnect({ ...session.endpoint, signal: controller.signal }));
+      const connectTask = Promise.resolve().then(() => this.upstreamConnect({ path: session.endpoint.path, signal: controller.signal }));
       connectTask.then((late) => { if (abandoned) late?.destroy?.(); }, () => {});
       let timer;
       try {

@@ -5,9 +5,10 @@ description: Use when an owner-authorized browser task needs manual CAPTCHA, pas
 
 # Browser Handoff
 
-Default CDP shares one tab of the existing browser. Optional noVNC shares a
-dedicated browser profile. Never launch, clone or switch browsers, copy cookies,
-enable noVNC, or use shell commands to bypass a missing connection or control gate.
+Default noVNC shares the agent's whole browser. The optional CDP viewer shares
+one tab of an existing browser. Never launch, clone or switch browsers, copy
+cookies, enable noVNC, or use shell commands to bypass a missing connection or
+control gate.
 
 ## Browser routing
 

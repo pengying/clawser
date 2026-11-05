@@ -11,7 +11,7 @@ function forwardedHeaders(headers, websocket = false) {
 }
 
 // The independently authenticated, human-only comparison service is opt-in.
-// This adapter has no create/admin endpoint, VNC credential or Docker authority.
+// This adapter has no create/admin endpoint, VNC credential or access to the private VNC socket.
 export class ComparisonProxy {
   requests = new Set();
   sockets = new Set();

@@ -8,20 +8,57 @@ OpenClaw 2026.10.4+ with its native trusted-tool-policy SDK. Native fixtures cov
 Run setup as the OpenClaw user, without `sudo`, with the same OpenClaw
 state/config environment used by the Gateway. Start the Gateway first.
 
-Default CDP setup needs Node, OpenClaw, an already-running compatible Chromium
-CDP connection and outbound HTTPS for pinned cloudflared and the tunnel. It does
-not require Docker, systemd, `flock`, `tar` or a noVNC download. The optional
-[noVNC desktop](#optional-novnc-desktop) has additional requirements.
+## Requirements
+
+The default setup gives the agent its own browser on a private virtual screen.
+The host needs:
+
+- systemd user services, `flock` and `tar`
+- Xvfb, x11vnc and python3
+- the X client libraries libX11, libXRes, libXtst and libXi
+- openbox, which is recommended but not required
+- Google Chrome, or a Chromium that isn't a snap
+- outbound HTTPS for the pinned cloudflared and noVNC downloads and the tunnel
+
+Clawser needs no Docker and no root. Setup installs nothing. When something is
+missing, it stops and prints the install command for your distribution. Ask the
+machine's owner to run it, then rerun setup. These are the packages:
+
+| Package manager | Command |
+| --- | --- |
+| apt | `sudo apt install xvfb x11vnc openbox python3 libx11-6 libxres1 libxtst6 libxi6` |
+| dnf | `sudo dnf install xorg-x11-server-Xvfb x11vnc openbox python3 libX11 libXres libXtst libXi` |
+| pacman | `sudo pacman -S xorg-server-xvfb x11vnc openbox python libx11 libxres libxtst libxi` |
+| zypper | `sudo zypper install xorg-x11-server-Xvfb x11vnc openbox python3 libX11-6 libXRes1 libXtst6 libXi6` |
+| apk | `sudo apk add xvfb x11vnc openbox python3 libx11 libxres libxtst libxi` |
+
+Most desktops already have the four X client libraries. Setup prints only the
+packages that are missing. Without openbox, setup warns
+and continues. Popups and dialogs then open in the top-left corner without
+stacking. Setup never installs a browser. It refuses a snap Chromium, because a
+snap can't use the hidden folder where Clawser keeps its files.
+
+The `--cdp` viewer needs only Node, OpenClaw, an already running Chromium with
+a loopback CDP connection, and outbound HTTPS. See
+[the CDP viewer](#the-cdp-viewer).
+
+### For agents installing Clawser
+
+1. Run `openclaw clawser setup --dry-run` first.
+2. If it prints an install command, give it to the owner verbatim and wait.
+   Never run `sudo` or a system package manager yourself.
+3. Rerun setup after the owner confirms the install.
+4. Never install a browser.
 
 ## Tagged Git installation
 
-This guide describes v0.6.3. Tagged Git installation is the recommended
+This guide describes v0.7.0. Tagged Git installation is the recommended
 distribution path.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.6.3 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.7.0 --force --accept-capabilities
 openclaw clawser setup --dry-run
-openclaw clawser setup
+openclaw clawser setup --yes
 openclaw clawser doctor
 ```
 
@@ -33,15 +70,384 @@ native command with `--accept-capabilities`; never hand-write acknowledgement
 settings to make a contract warning disappear. Review the installation output
 and follow its activation guidance.
 
+OpenClaw puts each Git tag in its own folder. Clawser's user services point at
+that folder, so rerun setup after every upgrade. See [Upgrade](#upgrade).
+
 Check the [ClawHub package page](https://clawhub.ai/pengying/plugins/clawser)
-for approved registry versions. Older releases use the noVNC default and do not
-provide this guide’s CDP-first setup.
+for approved registry versions. ClawHub may lag GitHub.
 
-## Existing browser connection
+## Choose the agent's browser
 
-Default setup reuses OpenClaw's configured default browser connection. This is
-not automatically the Chrome profile used for everyday OS browsing. Configure
-an existing Chromium connection with an explicit loopback HTTP CDP origin and
+Setup has two options. Both run the agent's browser on the virtual screen.
+
+### Option A: a new browser profile
+
+This is the default. On a fresh install, plain `setup` creates a new, empty
+Chrome profile that belongs to Clawser. On a 0.6.x CDP install, plain `setup`
+takes over the CDP viewer's profile instead. See
+[Upgrading from 0.6.x](#upgrading-from-06x). It adds an OpenClaw browser profile named `clawser` and
+makes it the default. The previous default stays in OpenClaw's configuration.
+
+The new browser starts with no logins. Sign in to sites from a handoff link the
+first time the agent needs them.
+
+### Option B: an existing browser profile
+
+`setup --browser-profile <name>` hands a browser profile that OpenClaw already
+has to Clawser. The profile must be attach-only, with the CDP address
+`http://127.0.0.1:<port>`, and its browser must be running. Setup finds that browser through its CDP port.
+It keeps the same profile folder and port, so the logins stay. It never copies,
+moves or recreates the profile folder.
+
+How setup moves that browser onto the virtual screen depends on what runs it:
+
+- **Started from a desktop session.** Setup closes it gracefully and starts
+  Clawser's browser service on the same profile.
+- **Run by user services Clawser didn't write.** Setup backs up their unit files,
+  then stops and disables them. It writes its own services with the same display
+  number, profile folder and port.
+- **Run by something setup doesn't recognize.** Setup stops with instructions and
+  never kills it.
+
+Setup refuses a headless browser, and a browser started without an absolute
+`--user-data-dir`. A rerun refuses a browser whose profile folder changed since
+setup. If nothing is listening on the profile's port, start that browser, then
+rerun setup.
+
+### Keyring cookies
+
+Chrome on a Linux desktop often encrypts cookies with the desktop keyring.
+Clawser's browser keeps cookies in a plain store protected by file permissions,
+because nobody is at the machine to unlock a keyring after a reboot. It can't
+read keyring cookies.
+
+When option B finds keyring cookies, setup moves them by default. It exports
+them over CDP before it stops the browser, then imports them into Clawser's
+browser. After a move, sign in to Google once in a handoff link, and re-save any
+saved site passwords. Use `--no-migrate-cookies` to skip the move. Setup then
+warns how many cookies will be unreadable.
+
+If setup can't read the cookies, it stops before closing anything:
+
+```text
+Could not read cookies from the running browser (<reason>). Nothing was stopped; rerun setup, or use --no-migrate-cookies.
+```
+
+If the import fails, setup finishes and prints:
+
+```text
+Warning: Moving cookies failed (<reason>); rerun setup to try again, or sign in again to sites that ask.
+```
+
+The export then stays in a private folder under the state directory. A rerun
+imports it and removes it. Until then, doctor reports it in the `cookie export`
+row.
+
+### The CDP viewer
+
+`setup --cdp` keeps the older viewer instead. It attaches to an existing,
+already running browser through OpenClaw's configured CDP connection, and
+shares one tab as screencast images. It never launches a browser. Dropdowns and
+color fields get phone controls, but date pickers, file choosers, dialogs,
+popups and browser menus don't reach the phone. See [CDP viewer
+setup](#cdp-viewer-setup).
+
+## Dry run and `--yes`
+
+`setup --dry-run` prints the plan and changes nothing. The plan uses these lines:
+
+```text
+Browser profile: clawser (new and empty, at <stateDir>/browser/profile)
+Browser profile: <name> (existing, at <profile folder>)
+Browser profile: <name> (existing, at <profile folder>, folder <profile-directory>)
+Display: :<number>
+Browser: <path to Chrome>
+Take over <unit> (its unit file is backed up first)
+Stop <unit> again (Clawser replaced it)
+Close the browser running in your desktop session (pid <pid>)
+Move <count> keyring-encrypted cookies into the new browser
+Move the cookies an earlier setup run saved into the new browser
+Write <unit or file>
+Start <unit>
+Restart <unit>
+Default browser profile: <previous> → <profile>
+Default browser profile: <profile> (unchanged)
+Warning: <message>
+No files, downloads, services, or configuration were changed.
+```
+
+Only the lines that apply appear. An upgrade from a Docker desktop also prints
+`Stop the Docker-era controller <unit>`. It then prints `Run yourself afterwards:`
+before each command that removes the old container, network, volume and image.
+Setup never runs those commands.
+
+A real run needs `--yes` before it closes the agent's browser, takes over
+services it didn't write, or moves cookies. Without `--yes`, it prints the plan,
+then:
+
+```text
+This closes the agent's browser. Rerun with --yes to go ahead.
+```
+
+It changes nothing and exits with an error. There are no prompts.
+
+## Services and linger
+
+Setup writes five systemd user services, named `clawser-<role>-<hash>.service`.
+The roles are `display`, `wm`, `browser`, `supervisor` and `desktop`. The hash
+comes from the state directory. Setup and doctor print the exact names.
+
+| Service | What it runs |
+| --- | --- |
+| display | Xvfb, a 1920x1080 virtual screen that listens on no network port |
+| wm | openbox, with a config file Clawser generates |
+| browser | the agent's Chrome on that screen |
+| supervisor | one short-lived x11vnc per viewer session, on a private socket |
+| desktop | the controller and the phone viewer |
+
+The `wm` service is left out when openbox is unavailable. User services stop
+when you log out unless lingering is on. When it's off, setup and doctor say:
+
+```text
+Linger is off, so these services stop when you log out. Run: loginctl enable-linger
+```
+
+## Setup options
+
+```sh
+openclaw clawser setup --help
+openclaw clawser doctor --help
+```
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `--dry-run` | Off | Print the plan without changing files, downloads, services or configuration |
+| `--yes` | Off | Allow setup to close or take over the agent's browser and move cookies |
+| `--browser-profile NAME` | `clawser`, a new profile | Option B: hand an existing OpenClaw browser profile to Clawser |
+| `--no-migrate-cookies` | Off | Don't move keyring cookies into the agent's browser |
+| `--state-dir PATH` | `${OPENCLAW_STATE_DIR:-~/.openclaw}/clawser` | Private state, receipts, profile and downloads |
+| `--port PORT` | `19420` | Loopback controller and viewer port |
+| `--cdp` | Off | Use the one-tab CDP viewer on an existing browser |
+| `--novnc` | Default | Use the private virtual screen |
+
+Use the same state directory for setup and doctor. Setup refuses a state
+directory whose socket paths would be longer than 107 bytes. For a new profile,
+the first setup picks the first free CDP port from 18820 to 18829 and records
+it. Option B keeps the profile's own port. Setup refuses to start when another program
+holds the CDP port or the controller port, and it names that program.
+
+The `--container-name`, `--cdp-port`, `--vnc-port` and `--no-default-profile`
+flags were removed in 0.7.0.
+
+## Activation and doctor
+
+Setup waits for a new matching active Gateway generation and local viewer readiness.
+OpenClaw may briefly report `awaiting-commit` while a hot reload publishes its
+configuration; browser tools remain unavailable during that transition. A successful
+reload command alone does not prove activation. `doctor` reports the activation
+phase, selected browser identity and public transport state. `active` with public
+transport `warming` means the local service is ready while Cloudflare finishes
+starting; creating a link waits for public readiness. A terminal activation failure
+requires correcting the reported problem and reloading the plugin.
+
+Follow setup's printed activation/reload instructions, then run:
+
+```sh
+openclaw plugins reload browser-handoff --wait
+openclaw clawser doctor
+```
+
+Doctor is read-only. On a noVNC install it prints one row per check:
+
+| Row | Checks |
+| --- | --- |
+| `platform`, `node`, `source paths`, `tar`, `flock`, `systemd user`, `openclaw` | Host prerequisites |
+| `installation` | Clawser owns this state directory |
+| `ownership` | The state directory and unit folder haven't moved |
+| `configuration` | OpenClaw's browser and plugin settings match setup |
+| `pinned assets` | cloudflared and noVNC still match their checksums |
+| `host dependencies` | Xvfb, x11vnc, openbox and python3 are unchanged since setup |
+| `window manager` | A warning when openbox is unavailable |
+| `services` | Every Clawser service is active |
+| `display` | The virtual screen is up |
+| `browser window` | Chrome has a window on that screen |
+| `CDP origin` | The browser profile still points at Clawser's browser |
+| `profile directory` | The profile folder exists and only you can read it |
+| `linger` | Lingering is on |
+| `units current` | The unit files match what setup would write now |
+| `controller health` | The controller is ready |
+| `Gateway activation` | OpenClaw is running this setup |
+| `cookie store` | Option B only: a warning when keyring cookies remain |
+| `cookie export` | Option B only: a warning when a saved cookie export is waiting |
+
+After the rows, doctor prints each unit name, the state directory and the
+display. A `units current` failure that says "the plugin moved" means an
+upgrade installed Clawser in a new folder. Rerun setup. A `CDP origin` failure
+says to restore the profile, then rerun setup.
+
+Before browser work, ask the verified owner session to call `browser_handoff`
+with `action=tabs`; confirm the returned profile and expected task tab.
+
+Every ordinary browser call runs on the host with the returned profile. A call
+that omits `target` is routed to the host; any other target is refused.
+Use the raw target ID from the tab list, never an OpenClaw display label like
+`t1`. Startup/profile-management actions and sandbox, node, user-profile,
+endpoint or MCP routing escapes are unavailable. Missing native APIs or current
+configuration drift fail closed.
+
+If plugin CLI registration is unavailable before activation, locate its directory
+with `openclaw plugins inspect browser-handoff` and use the installed entry point:
+
+```sh
+node /absolute/path/to/installed-plugin/bin/clawser.mjs setup --dry-run
+node /absolute/path/to/installed-plugin/bin/clawser.mjs setup --yes
+node /absolute/path/to/installed-plugin/bin/clawser.mjs doctor
+```
+
+Replace the example path with the inspected installation location. This does not
+replace the native capability-acceptance step. Developer installation is in
+[CONTRIBUTING.md](../CONTRIBUTING.md).
+
+## Release archive alternative
+
+Once published, download `pengying-clawser-0.7.0.tgz` and `SHA256SUMS` from the
+[v0.7.0 release](https://github.com/pengying/clawser/releases/tag/v0.7.0) into the
+same directory:
+
+```sh
+sha256sum --check SHA256SUMS
+openclaw plugins install ./pengying-clawser-0.7.0.tgz --force --accept-capabilities
+openclaw clawser setup --dry-run
+openclaw clawser setup --yes
+openclaw clawser doctor
+```
+
+The archive contains plugin/runtime source and viewer assets, not your browser
+profile, a prebuilt browser or downloaded cloudflared/noVNC. Obtain the archive
+and checksums from the intended release. Checksums verify against that published
+file; they are not an independent publisher signature.
+
+## Upgrade
+
+1. Finish handoffs and pause browser work.
+2. Install the new release:
+
+   ```sh
+   openclaw plugins install git:github.com/pengying/clawser@v0.7.0 --force --accept-capabilities
+   ```
+
+3. Check the plan:
+
+   ```sh
+   openclaw clawser setup --dry-run
+   ```
+
+4. Run setup:
+
+   ```sh
+   openclaw clawser setup --yes
+   ```
+
+5. Run `openclaw clawser doctor` and the owner-session tabs check before
+   resuming browser work.
+
+A `git:` install moves the plugin folder, so rerun setup after every upgrade.
+The rerun points the services at the new folder. It restarts only the supervisor
+and controller, never the display or the browser.
+
+### Upgrading from 0.6.x
+
+OpenClaw runs no plugin steps at install time, so the switch happens on the
+next setup run.
+
+- **A CDP install.** Links keep working through the CDP viewer until you rerun
+  setup. Doctor warns "run setup to switch to noVNC, or setup --cdp to keep the
+  CDP viewer". Plain setup then runs option B with the browser profile the CDP
+  viewer already uses. Run `setup --cdp` to keep the CDP viewer.
+- **A CDP profile on `localhost`.** Option B needs the profile to point at
+  `127.0.0.1`, because Clawser's controller compares the address as written.
+  Setup refuses a `localhost` profile before it stops anything. Change it with
+  `openclaw config set browser.profiles.<name>.cdpUrl http://127.0.0.1:<port>`,
+  then rerun setup.
+- **A CDP install that replaced an older desktop.** CDP setup switched that
+  desktop off but kept the `socketPath` and `profile` fields that name it.
+  Setup won't take over a desktop it didn't create, so it stops and prints the
+  `openclaw config unset` command for each field. Run them only if that
+  desktop is no longer used, then rerun setup.
+- **A Docker desktop install.** Links stop working after the upgrade, and doctor
+  says to rerun setup. Setup converts it to option A, because the container's
+  profile can't move to Chrome on the host. It prints the commands that remove
+  the old container, network, volume and image, and never runs them.
+
+## Undoing setup
+
+There is no restore command. Setup keeps a receipt at `<stateDir>/setup.json`.
+Its `previousDefaultProfile` field holds the OpenClaw default before setup. Each
+entry in its `replaced` list names a unit setup took over, and its `backup` field
+is the folder holding the copy. Doctor prints the exact Clawser unit names.
+
+1. Set the previous default profile back:
+
+   ```sh
+   openclaw config set browser.defaultProfile <previousDefaultProfile>
+   ```
+
+   If `previousDefaultProfile` is `null`, there was no default. Remove the
+   setting instead. OpenClaw's config patch deletes a key set to `null`:
+
+   ```sh
+   printf '%s\n' '{"browser":{"defaultProfile":null}}' | openclaw config patch --stdin
+   ```
+
+2. Stop and disable Clawser's five services:
+
+   ```sh
+   systemctl --user disable --now clawser-display-<hash>.service clawser-wm-<hash>.service clawser-browser-<hash>.service clawser-supervisor-<hash>.service clawser-desktop-<hash>.service
+   ```
+
+3. If setup took over services, restart them. Setup only stopped and disabled
+   them. Their unit files are still in place. Re-enable only the units whose
+   `replaced[].wasEnabled` is `true`:
+
+   ```sh
+   systemctl --user daemon-reload
+   systemctl --user enable --now <each unit whose wasEnabled is true>
+   ```
+
+   The `replaced[].backup` folder holds copies, in case an original was later
+   changed or removed. To restore one, copy it and any `<unit>.d` folder of
+   drop-ins into the receipt's `unitDir`, usually `~/.config/systemd/user`.
+   Then run `systemctl --user daemon-reload` again.
+
+4. Turn off the noVNC handoff. Either run
+   `openclaw config set plugins.entries.browser-handoff.config.desktop.enabled false`,
+   or run `openclaw clawser setup --cdp`.
+
+Then reload the plugin and run doctor. Undoing setup leaves the profile folder
+and its logins in place.
+
+## Disable or uninstall while keeping data
+
+Finish handoffs and pause automation. On a noVNC install, first follow steps 1
+and 2 of [Undoing setup](#undoing-setup). That stops Clawser's five services
+before the plugin folder goes, so they can't restart against a deleted folder.
+Then disable and uninstall the plugin:
+
+```sh
+openclaw plugins disable browser-handoff
+openclaw plugins uninstall browser-handoff --dry-run
+openclaw plugins uninstall browser-handoff
+```
+
+Uninstalling leaves Clawser's state directory and browser profile in place.
+CDP disable/uninstall does not own, stop or delete Chrome or its tabs/cookies.
+Keep private receipts and browser data for recovery. Select an intended
+OpenClaw default before unrelated browser work; disabling does not change it.
+
+## CDP viewer setup
+
+The CDP viewer reuses an existing configured browser connection. Configure an
+existing Chromium connection with an explicit loopback HTTP CDP origin and
 `attachOnly=true`, then keep that browser running. For example, this **host
 browser configuration** describes a connection that must already exist:
 
@@ -68,264 +474,33 @@ Setup verifies the Chromium `/json/version` endpoint. It never launches Chrome,
 creates a Chrome user-data directory, copies cookies, guesses ports or falls
 back to another browser. Missing or incompatible connections fail with guidance.
 
-To select another existing connection and make it the OpenClaw default:
-
 ```sh
-openclaw clawser setup --browser-profile existing --dry-run
-openclaw clawser setup --browser-profile existing
+openclaw clawser setup --cdp --dry-run
+openclaw clawser setup --cdp
 openclaw clawser doctor
 ```
 
-This selects an OpenClaw connection; it does not create a browser profile on disk.
-Setup replaces Clawser's share mappings with that one selected connection,
-disables desktop/Funnel mode, configures the authenticated Cloudflare viewer and
-preserves unrelated settings. It downloads cloudflared 2026.10.4 with a pinned
-SHA-256 checksum, then reloads the plugin. It does not own the Chrome process.
+Add `--browser-profile NAME` to select another existing connection and make it
+the OpenClaw default. This selects an OpenClaw connection; it does not create a
+browser profile on disk. Setup replaces Clawser's share mappings with that one
+selected connection, disables the noVNC handoff, configures the authenticated
+Cloudflare viewer and preserves unrelated settings. It downloads cloudflared
+2026.10.4 with a pinned SHA-256 checksum, then reloads the plugin. It does not
+own the Chrome process.
 
-The default private setup directory is
-`${OPENCLAW_STATE_DIR:-~/.openclaw}/clawser-cdp`, containing its ownership receipt
-(`setup.json`) and verified `bin/cloudflared`. Runtime tunnel state is kept under
-OpenClaw's private `browser-handoff` state. Keep receipts private and intact.
-Do not repurpose an old desktop state directory for CDP setup.
+The CDP state directory is `${OPENCLAW_STATE_DIR:-~/.openclaw}/clawser-cdp`,
+containing its ownership receipt (`setup.json`) and verified `bin/cloudflared`.
+Its viewer port defaults to the existing plugin port, otherwise `18796`. Runtime
+tunnel state is kept under OpenClaw's private `browser-handoff` state. Keep
+receipts private and intact.
 
-## Activation and doctor
-
-Setup waits for a new matching active Gateway generation and local viewer readiness.
-OpenClaw may briefly report `awaiting-commit` while a hot reload publishes its
-configuration; browser tools remain unavailable during that transition. A successful
-reload command alone does not prove activation. `doctor` reports the activation
-phase, selected browser identity and public transport state. `active` with public
-transport `warming` means the local service is ready while Cloudflare finishes
-starting; creating a link waits for public readiness. A terminal activation failure
-requires correcting the reported problem and reloading the plugin.
-
-Follow setup's printed activation/reload instructions, then run:
-
-```sh
-openclaw plugins reload browser-handoff --wait
-openclaw clawser doctor
-```
-
-Managed CDP doctor is read-only. It checks prerequisites, receipt ownership,
-pinned cloudflared SHA-256 and executable permissions, the current profile/CDP
-binding, Chromium reachability, local viewer CSS and the public tunnel receipt
-and CSS endpoint. It reports the selected profile and CDP origin. A healthy
-browser alone does not prove the current plugin generation has reconnected.
-Before browser work, ask the verified owner session to call `browser_handoff`
-with `action=tabs`; confirm the returned profile and expected task tab.
-
-Every ordinary browser call runs on the host with the returned profile. A call
-that omits `target` is routed to the host; any other target is refused.
-Use the raw target ID from the tab list, never an OpenClaw display label like
-`t1`. Startup/profile-management actions and sandbox, node, user-profile,
-endpoint or MCP routing escapes are unavailable. Missing native APIs or current
-configuration drift fail closed.
-
-If plugin CLI registration is unavailable before activation, locate its directory
-with `openclaw plugins inspect browser-handoff` and use the installed entry point:
-
-```sh
-node /absolute/path/to/installed-plugin/bin/clawser.mjs setup --dry-run
-node /absolute/path/to/installed-plugin/bin/clawser.mjs setup
-node /absolute/path/to/installed-plugin/bin/clawser.mjs doctor
-```
-
-Replace the example path with the inspected installation location. This does not
-replace the native capability-acceptance step. Developer installation is in
-[CONTRIBUTING.md](../CONTRIBUTING.md).
-
-## Release archive alternative
-
-Once published, download `pengying-clawser-0.6.3.tgz` and `SHA256SUMS` from the
-[v0.6.3 release](https://github.com/pengying/clawser/releases/tag/v0.6.3) into the
-same directory:
-
-```sh
-sha256sum --check SHA256SUMS
-openclaw plugins install ./pengying-clawser-0.6.3.tgz --force --accept-capabilities
-openclaw clawser setup
-openclaw clawser doctor
-```
-
-The archive contains plugin/runtime source and viewer assets, not your browser
-profile, a prebuilt browser or downloaded cloudflared/noVNC. Obtain the archive
-and checksums from the intended release. Checksums verify against that published
-file; they are not an independent publisher signature.
-
-## Setup options
-
-```sh
-openclaw clawser setup --help
-openclaw clawser doctor --help
-```
-
-| Option | CDP default | Purpose |
-| --- | --- | --- |
-| `--dry-run` | Off | Validate and show the plan without changing files, downloads, services or configuration |
-| `--state-dir PATH` | `${OPENCLAW_STATE_DIR:-~/.openclaw}/clawser-cdp` | Private CDP receipt and verified download |
-| `--browser-profile NAME` | Existing OpenClaw default | Select an existing connection; setup also makes it default |
-| `--port PORT` | Existing plugin port, otherwise `18796` | Loopback viewer listener |
-| `--novnc` | Off | Explicitly provision or maintain the owned Docker desktop |
-
-Use the same custom state directory for setup and doctor. A first setup rejects
-a busy viewer port. A repeat run permits the busy port only with a completed
-matching receipt, verified binary, current matching configuration and healthy
-local viewer. A public tunnel outage does not prevent that local repeat-run
-check; doctor still reports public readiness failure. Do not delete receipts or
+Doctor follows the active backend. With the noVNC handoff off, it runs the CDP
+checks: prerequisites, receipt ownership, pinned cloudflared, the current
+profile and CDP binding, Chromium reachability, the local viewer, and the
+public tunnel. A first setup rejects a busy viewer port. A repeat run permits
+the busy port only with a completed matching receipt, verified binary, current
+matching configuration and healthy local viewer. Do not delete receipts or
 adopt an unrelated listener to bypass a conflict.
-
-## Optional noVNC desktop
-
-Use this when the task needs full browser UI, automatic popup switching, native
-OS dialogs or remote system clipboard access. It shares the entire dedicated
-profile, including every tab and dialog; it does not move the current tab or
-cookies from another browser. Group/private authorization does not choose the
-backend.
-
-The host additionally needs local Docker at `unix:///var/run/docker.sock`, a
-working user systemd session, `flock`, `tar`, and outbound access for Docker/Debian
-builds and noVNC. Remote Docker contexts are unsupported. The browser runtime
-has a 3 GiB memory limit and 512 MiB shared memory; allow space for the image build.
-Install the plugin from the [release archive](#release-archive-alternative). Its
-controller service runs from the installed directory, which a Git tag changes on
-every upgrade.
-
-```sh
-openclaw clawser setup --novnc --dry-run
-openclaw clawser setup --novnc
-openclaw clawser doctor --novnc
-```
-
-This path downloads checksum-pinned cloudflared 2026.10.4 and noVNC 1.7.0, builds
-the sandboxed Chromium image, installs a private user controller service and
-merges its dedicated `handoff` browser connection. The first image build can take
-several minutes. The container is created lazily on the first browser/handoff
-operation. Setup normally makes `handoff` the default; `--no-default-profile`
-keeps the previous default, and the task must select the returned desktop profile
-explicitly. noVNC never automatically falls back to CDP.
-
-| noVNC option | Default | Purpose |
-| --- | --- | --- |
-| `--state-dir PATH` | `${OPENCLAW_STATE_DIR:-~/.openclaw}/clawser` | Desktop ownership, controller configuration and downloads |
-| `--browser-profile NAME` | `handoff` | Owned dedicated OpenClaw browser connection |
-| `--port PORT` | `19410` | Loopback controller/viewer listener |
-| `--cdp-port PORT` | `18812` | Loopback Chromium endpoint |
-| `--vnc-port PORT` | `59092` | Loopback VNC endpoint |
-| `--container-name NAME` | `openclaw-handoff-desktop` | Owned Docker container identity |
-| `--no-default-profile` | Off | Preserve the current OpenClaw default |
-
-`--cdp-port`, `--vnc-port`, `--container-name` and `--no-default-profile` require
-`--novnc`. Doctor detects enabled desktop mode, but explicit `--novnc` is useful
-when inspecting the original desktop while CDP is enabled. Repeat custom options.
-
-Desktop state includes `setup.json`, `controller.json`, `bin/`, `vendor/` and
-controller socket/ledger/runtime state under `state/`. Its user unit is
-`clawser-desktop-<state-directory-hash>.service`; its profile volume is normally
-`openclaw-handoff-desktop-profile`. Preserve both state and volume. Do not point
-a new receipt at an existing container or delete receipts to evade ownership.
-Done, expiry and controller stop keep the browser/profile. Restarting the
-controller does not renew or restore invitations.
-
-### For agents installing Clawser
-
-This applies once the host display backend is enabled. Today's Docker desktop
-needs no host display packages.
-
-1. Run `openclaw clawser setup --novnc --dry-run` first.
-2. If it prints an install command, give it to the owner verbatim and wait.
-   Never run `sudo` or a system package manager yourself.
-3. Rerun setup after the owner confirms the install.
-4. Never install a browser.
-
-## Switching backends
-
-Finish handoffs and pause browser work before switching. There is no transfer of
-tabs, cookies, logins, dialogs or unfinished forms between browsers.
-
-To switch from an owned desktop to CDP, first select an eligible existing
-OpenClaw connection with `setup --browser-profile NAME`. Use the separate CDP
-state directory. CDP setup sets `desktop.enabled=false` while preserving its
-stored desktop identity. This bit change does not stop, adopt or delete Docker
-resources or volumes. Stop an unused owned desktop separately after verifying
-its identity, if desired.
-
-To return to that desktop, run `setup --novnc --dry-run`, then `setup --novnc`
-using its **original installation path, receipt/state directory, profile, ports,
-container name and default-profile choice**. For an untouched default instance:
-
-```sh
-openclaw clawser setup --novnc --state-dir "$HOME/.openclaw/clawser" --dry-run
-openclaw clawser setup --novnc --state-dir "$HOME/.openclaw/clawser"
-openclaw clawser doctor --novnc --state-dir "$HOME/.openclaw/clawser"
-```
-
-Substitute the original state path if `OPENCLAW_STATE_DIR` or options differed.
-Only a matching original owned desktop can be reused. Changing package source or
-installation path can break receipt identity; there is no automatic cross-source
-ownership migration. For a manually managed older noVNC deployment, retain its
-original operator configuration and desktop identity and explicitly enable its
-original `desktop.enabled` setting; a new setup receipt cannot adopt it. Reload,
-run the applicable diagnostics and check the owner-session tabs before resuming.
-
-## Upgrade
-
-1. Finish handoffs and pause browser work. Record the release, installation
-   source/path, state/config environment, setup options and browser connection.
-   Back up private configuration/state; back up a noVNC profile with a consistent
-   Docker-volume procedure. Existing CDP browser data remains operator-owned.
-2. Disable the plugin before replacing files. For noVNC also stop its exact
-   controller unit:
-
-   ```sh
-   openclaw plugins disable browser-handoff
-   systemctl --user stop 'clawser-desktop-<state-directory-hash>.service'
-   ```
-
-   The systemd command is only for noVNC; substitute the reported unit.
-3. Install the new release from the same kind of source. A Git upgrade can use
-   `openclaw plugins install git:github.com/pengying/clawser@v0.6.3 --force
-   --accept-capabilities --no-enable`. OpenClaw places each Git tag in its own
-   directory, and CDP setup and doctor accept the move. noVNC's controller
-   service runs from the installed directory, so install and upgrade noVNC from
-   the [release archive](#release-archive-alternative), which always uses the
-   same directory. While disabled, run the installed standalone setup entry
-   point with `--dry-run`, then setup, retaining the mode and original
-   state/options. noVNC requires `--novnc`; plain setup chooses CDP.
-4. Follow activation guidance and use `--accept-capabilities` if enabling through
-   a native enable command. Reload, run doctor and complete the owner-session
-   tabs check before resuming browser work.
-
-Preserve the original state/profile on conflicts. Do not repeatedly force
-replacement or delete ownership evidence. Restore a known release when
-appropriate. Rollback does not undo website actions or browser profile changes;
-check state-format compatibility first.
-
-## Disable or uninstall while keeping data
-
-Finish handoffs and pause automation, then disable the plugin:
-
-```sh
-openclaw plugins disable browser-handoff
-openclaw plugins uninstall browser-handoff --dry-run
-openclaw plugins uninstall browser-handoff
-```
-
-CDP disable/uninstall does not own, stop or delete Chrome or its tabs/cookies.
-Keep private receipts and operator browser data for recovery. Select an intended
-OpenClaw default before unrelated browser work; disabling does not change it.
-
-For noVNC, also disable and stop the exact controller unit:
-
-```sh
-systemctl --user disable --now 'clawser-desktop-<state-directory-hash>.service'
-```
-
-The browser container may remain running. To stop it, first verify its exact
-identity against the private runtime receipt. For a matching default container,
-`docker stop --time 8 openclaw-handoff-desktop` keeps the profile volume. Skip this
-if no browser was started. Keep the private state, disabled unit and profile
-volume; plugin uninstall does not remove those resources. Avoid volume pruning.
-Reuse requires the original matching installation identity and options.
 
 ## Owner-requested groups
 
@@ -409,15 +584,25 @@ own setup receipt and is not an adoption tool for manual installations.
 
 ## Recovery and troubleshooting
 
-- **Connection unavailable:** keep the configured browser running and verify its
-  actual attach-only loopback connection. Do not guess ports or launch/copy a
-  replacement browser to bypass setup.
+- **Missing package:** setup prints the install command for your distribution.
+  Ask the owner to run it, then rerun setup. Never run `sudo` from the agent.
+- **A service is down:** doctor names it. Inspect it with
+  `journalctl --user -u <unit>`.
+- **The plugin moved:** an upgrade installed Clawser in a new folder. Rerun setup.
+- **Chrome was upgraded while it ran:** a package upgrade replaces Chrome's
+  files under the running browser, and its CDP connection can stop answering.
+  Clawser's supervisor notices within about 10 seconds and stops the browser.
+  Its service then restarts it on the new version. It waits until no handoff is
+  in progress, so a person in control never loses the browser.
+- **Connection unavailable (CDP viewer):** keep the configured browser running
+  and verify its actual attach-only loopback connection. Do not guess ports or
+  launch/copy a replacement browser to bypass setup.
 - **Command missing:** inspect the plugin and use its installed standalone CLI
   until native CLI registration is active.
-- **Docker/systemd prerequisite failure:** these apply only to noVNC. Fix the
-  OpenClaw user's access/session; do not run setup as root.
+- **systemd prerequisite failure:** fix the OpenClaw user's session. Do not run
+  setup as root.
 - **Port, configuration or ownership conflict:** compare options and receipts.
-  Preserve resources and choose a separate identity for a new installation.
+  Preserve resources and choose a separate state directory for a new installation.
 - **Tunnel not ready:** check DNS/outbound HTTPS. First-link startup allows up to
   90 seconds. Never expose CDP/VNC or the Gateway as a replacement endpoint.
 - **Recovery required or uncertain input:** keep automation paused. Inspect the
@@ -433,11 +618,11 @@ See [SECURITY.md](../SECURITY.md) for vulnerability reporting.
 
 ## Operator reconciliation after a failed control handback
 
-This offline helper is for the owned noVNC desktop, not CDP handoffs.
+This offline helper is for the noVNC handoff, not CDP handoffs.
 If a control handoff reports `recovery_required`, keep browser automation paused.
 An operator can reconcile one failed lease when the supervisor has already
 retired its viewer and retained a valid input-fence receipt. This preserves the
-browser container, tabs and profile; it does not restart the browser or recreate
+browser, tabs and profile; it does not restart the browser or recreate
 an invitation.
 
 1. Stop the exact controller service reported for that installation. Keep its

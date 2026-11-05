@@ -81,7 +81,7 @@ export class DesktopController {
   createGeneration=0;
   writes=Promise.resolve();
   runtimeQueue=Promise.resolve();
-  constructor({stateDir,profile,runtime,transport,port=19410,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,observe=observeDesktop,activateTarget=activateDesktopTarget,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
+  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,observe=observeDesktop,activateTarget=activateDesktopTarget,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
     if(!stateDir||!profile||!runtime||!transport)throw new Error('Desktop controller requires stateDir, profile, runtime and transport');
     if(!Number.isInteger(supervisorHeartbeatMs)||supervisorHeartbeatMs<1||supervisorHeartbeatMs>5000)throw new Error('Invalid supervisor heartbeat interval');
     Object.assign(this,{stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,supervisorHeartbeatMs});
@@ -141,8 +141,7 @@ export class DesktopController {
       await this.runtime.ensure();
       const deadline=Date.now()+60_000;
       let status;
-      do{status=await this.runtime.status();if(status.ready===true)break;if(status.tainted||Date.now()>=deadline)throw new Error('Dedicated browser is unavailable');await new Promise(resolve=>setTimeout(resolve,100));}while(true);
-      if(status.browserSandbox!==true||status.authenticatedInternetReady!==true)throw new Error('Dedicated browser sandbox and authenticated Internet readiness must be verified');
+      do{status=await this.runtime.status();if(status.ready===true&&status.browserReady===true)break;if(status.tainted||Date.now()>=deadline)throw new Error('Dedicated browser is not ready');await new Promise(resolve=>setTimeout(resolve,100));}while(true);
       return{ready:true,profile:this.profile,cdpUrl:this.runtime.cdpUrl,browserGeneration:status.browserGeneration||status.displayGeneration,displayGeneration:status.displayGeneration,recoveryRequired:false};
     });
   }
@@ -187,7 +186,7 @@ export class DesktopController {
       return{ownedId:probeId};
     }catch(error){await this.retire(probeId).catch(()=>{});throw new Error('Dedicated viewer could not start');}
   }
-  registration(id){const actor=this.actors.get(id);if(!actor)throw new Error('Viewer is unavailable');return{endpoint:{host:actor.host,port:actor.port},credentials:actor.role==='control'?{watch:randomBytes(32).toString('base64url'),control:actor.password}:{watch:actor.password,control:randomBytes(32).toString('base64url')}};}
+  registration(id){const actor=this.actors.get(id);if(!actor)throw new Error('Viewer is unavailable');return{endpoint:{path:actor.socketPath},credentials:actor.role==='control'?{watch:randomBytes(32).toString('base64url'),control:actor.password}:{watch:actor.password,control:randomBytes(32).toString('base64url')}};}
   async cancelPromotion(id){const row=this.ledger.leases[id];if(!row||row.mayBeWritable===true)return;row.acquisitionCancelled=true;row.reason ||= this.gateway.sessions.get(id)?.reason;this.gate.release(id);await this.persist();}
   async promote({ownedId,probeId}){
     const row=this.ledger.leases[ownedId];

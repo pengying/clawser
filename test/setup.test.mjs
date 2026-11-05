@@ -1,97 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import { createHash } from 'node:crypto';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { runClawser, ARTIFACTS } from '../src/setup.mjs';
-import { activationFixture } from './setup-activation-fixture.mjs';
+import { runClawser, ARTIFACTS, setupHelpers } from '../src/setup.mjs';
+import { hostLocations } from '../src/host-setup.mjs';
+import { unitNames } from '../src/host-units.mjs';
+import { digest, hostWorld, isPatch, systemctl } from './host-fixture.mjs';
 
-const execute = promisify(execFile);
-const digest = bytes => createHash('sha256').update(bytes).digest('hex');
-const imageId = `sha256:${'a'.repeat(64)}`;
-function merge(base, patch) {
-  for (const [key, value] of Object.entries(patch)) {
-    if (value && typeof value === 'object' && !Array.isArray(value)) merge(base[key] ??= {}, value);
-    else base[key] = structuredClone(value);
-  }
-  return base;
-}
+const harness = (t, config = {}) => hostWorld(t, { config, stateName: 'private state', packageName: 'package "quoted" % $value', deps: { execPath: '/node "quoted" % $PATH' } });
+const enabled = calls => systemctl(calls, 'enable');
+const personal = () => ({ browser: { defaultProfile: 'personal', profiles: { personal: { attachOnly: true, cdpUrl: 'http://127.0.0.1:9333' } } } });
+const containerName = 'openclaw-handoff-desktop', imageId = 'sha256:' + 'a'.repeat(64);
+const leftovers = [`docker rm -f ${containerName}`, `docker network rm ${containerName}-net`, `docker volume rm ${containerName}-profile`, `docker image rm ${imageId}`];
 
-async function harness(t, config = {}) {
-  const root = await fs.mkdtemp(join(tmpdir(), 'clawser-setup-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const stateDir = join(root, 'private state');
-  const packageDir = join(root, 'package "quoted" % $value');
-  for (const name of ['bin', 'runtime/desktop']) await fs.mkdir(join(packageDir, name), { recursive: true });
-  for (const name of ['index.mjs', 'bin/desktop-controller.mjs', 'runtime/desktop/Dockerfile', 'runtime/desktop/chromium-seccomp.json']) await fs.writeFile(join(packageDir, name), 'fixture');
-  const archiveRoot = join(root, 'archive');
-  await fs.mkdir(join(archiveRoot, 'noVNC-1.7.0/core'), { recursive: true });
-  await fs.writeFile(join(archiveRoot, 'noVNC-1.7.0/core/rfb.js'), 'export default class RFB {}');
-  const archivePath = join(root, 'novnc.tgz');
-  await execute('tar', ['-czf', archivePath, '-C', archiveRoot, 'noVNC-1.7.0']);
-  const binary = Buffer.from('verified cloudflared fixture');
-  const archive = await fs.readFile(archivePath);
-  const artifacts = {
-    cloudflared: { ...ARTIFACTS.cloudflared, sha256: digest(binary) },
-    noVnc: { ...ARTIFACTS.noVnc, sha256: digest(archive) },
-  };
-  const calls = [], logs = [];
-  let serviceActive = false, servicePath = '', failChecksum = false, busyPorts = [], dockerResources = {};
-  const deps = {
-    fs, artifacts, packageDir, env: { XDG_CONFIG_HOME: join(root, 'config') }, homeDir: root,
-    platform: 'linux', arch: 'x64', nodeVersion: '24.18.0', execPath: '/node "quoted" % $PATH',
-    log: message => logs.push(message), isPortFree: async port => !busyPorts.includes(port),
-    controllerHealth: async () => ({ ready: true, profile: 'handoff', cdpUrl: 'http://127.0.0.1:18812', recoveryRequired: false }),
-    fetch: async url => {
-      calls.push({ command: 'fetch', args: [url] });
-      if (activation.diagnostic?.backend === 'cdp' && /^http:\/\/127\.0\.0\.1:\d+\/assets\/style\.css$/.test(url)) return new Response('body {}', { headers: { 'content-type': 'text/css' } });
-      return new Response(failChecksum ? 'corrupt' : url === artifacts.cloudflared.url ? binary : archive);
-    },
-    run: async (command, args, options = {}) => {
-      calls.push({ command, args, input: options.input, timeoutMs: options.timeoutMs });
-      if (command === 'tar' && args.includes('-xzf')) return (await execute(command, args)).stdout;
-      if (command === 'tar' && args.includes('-tzf')) return (await execute(command, args)).stdout;
-      if (command === 'openclaw') {
-        if (args[0] === '--version') return 'OpenClaw 2026.10.4';
-        if (args[0] === 'config' && args[1] === 'get') return JSON.stringify(config[args[2]] ?? {});
-        if (args[0] === 'config' && args[1] === 'patch') { if (!args.includes('--dry-run')) merge(config, JSON.parse(options.input)); return ''; }
-        if (args[0] === 'plugins' && args[1] === 'reload') {
-          if (config.plugins.entries['browser-handoff'].config.desktop.enabled) assert.equal(serviceActive, true);
-          await activation.publish(); return '';
-        }
-      }
-      if (command === 'docker') {
-        const rest = args.filter(arg => !arg.startsWith('--host='));
-        if (rest[0] === 'inspect' || ['network', 'volume'].includes(rest[0])) {
-          const key = rest.at(-1);
-          if (dockerResources[key]) return JSON.stringify([dockerResources[key]]);
-          throw new Error('No such object');
-        }
-        if (rest[0] === 'image') return imageId;
-        if (rest[0] === 'build') return imageId;
-        return '27.0.0';
-      }
-      if (command === 'systemctl') {
-        if (args.includes('show')) return `LoadState=${servicePath ? 'loaded' : 'not-found'}\nFragmentPath=${servicePath}\nActiveState=${serviceActive ? 'active' : 'inactive'}\n`;
-        if (args.includes('enable')) { serviceActive = true; servicePath = join(root, 'config/systemd/user', args.at(-1)); }
-        return '';
-      }
-      return '';
-    },
-  };
-  const activation = activationFixture(config, deps);
-  return {
-    root, stateDir, packageDir, config, deps, calls, logs, activation,
-    args: ['setup', '--novnc', '--state-dir', stateDir],
-    corrupt: () => { failChecksum = true; },
-    busy: ports => { busyPorts = ports; },
-    resource: (name, value) => { dockerResources[name] = value; },
-    unmanagedService: () => { servicePath = '/unmanaged/existing.service'; },
-  };
+// A finished Docker-era install: v1 receipt, controller config and unit, pinned assets, and its desktop config.
+async function seedDockerEra(h) {
+  const p = hostLocations({ stateDir: h.stateDir }, h.deps), servicePath = join(h.unitDir, h.names.controller);
+  for (const dir of [h.stateDir, p.state, p.runtime, dirname(p.binary), join(p.assets, 'core'), h.unitDir]) await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  await fs.writeFile(p.binary, 'verified cloudflared fixture', { mode: 0o700 });
+  await fs.writeFile(join(p.assets, 'core/rfb.js'), 'export default class RFB {}', { mode: 0o600 });
+  const oldConfig = JSON.stringify({ stateDir: p.state, profile: 'handoff', port: 19410, runtime: { name: containerName, image: imageId } }) + '\n';
+  const oldUnit = '# Managed by Clawser\n[Unit]\nAfter=network-online.target docker.service\n';
+  await fs.writeFile(p.config, oldConfig, { mode: 0o600 });
+  await fs.writeFile(servicePath, oldUnit, { mode: 0o600 });
+  const v1 = { identity: 'clawser-setup-v1', uid: h.deps.uid, ownerId: randomUUID(), imageId, serviceUnit: h.names.controller,
+    options: { stateDir: h.stateDir, profile: 'handoff', port: 19410, cdpPort: 18812, vncPort: 59092, containerName, defaultProfile: true, packageDir: h.packageDir, execPath: h.deps.execPath, servicePath },
+    configDigest: digest(oldConfig), serviceDigest: digest(oldUnit), assetsDigest: await setupHelpers.treeDigest(p.assets, h.deps) };
+  await fs.writeFile(p.marker, JSON.stringify(v1, null, 2) + '\n', { mode: 0o600 });
+  h.config.browser = { defaultProfile: 'handoff', profiles: { handoff: { cdpUrl: 'http://127.0.0.1:18812', driver: 'openclaw', engine: 'chromium', attachOnly: true } } };
+  h.config.plugins = { entries: { 'browser-handoff': { enabled: true, config: { desktop: { enabled: true, socketPath: p.socket, profile: 'handoff' }, cloudflare: { enabled: false } } } } };
+  h.units.set(h.names.controller, 'active');
+  return { v1, servicePath };
 }
 
 test('pins verified upstream downloads', () => {
@@ -104,12 +45,13 @@ test('noVNC setup waits for Gateway activation and doctor does not mistake contr
   const h = await harness(t);
   await runClawser(h.args, h.deps);
   h.activation.diagnostic = { ...h.activation.diagnostic, phase: 'awaiting-commit' };
-  const doctor = await runClawser(['doctor', '--novnc', '--state-dir', h.stateDir], h.deps);
+  const doctor = await runClawser(['doctor', '--state-dir', h.stateDir], h.deps);
   assert.equal(doctor.ok, false);
   assert.equal(doctor.pending, true);
+  assert.equal(doctor.backend, 'novnc');
   assert.equal(doctor.activation.phase, 'awaiting-commit');
-  assert.equal(doctor.profile, 'handoff');
-  assert.equal(doctor.cdpUrl, 'http://127.0.0.1:18812');
+  assert.equal(doctor.display, 20);
+  assert.ok(doctor.units.includes(h.names.browser));
   let time = 0;
   h.deps.now = () => time;
   h.deps.sleep = async ms => { time += ms; };
@@ -119,25 +61,23 @@ test('noVNC setup waits for Gateway activation and doctor does not mistake contr
   assert.equal(h.logs.some(line => line.startsWith('Clawser is configured')), false);
 });
 
-test('desktop to CDP to explicit noVNC reuses the original desktop receipt, socket and browser identity', async t => {
-  const h = await harness(t, { browser: { defaultProfile: 'personal', profiles: { personal: { attachOnly: true, cdpUrl: 'http://127.0.0.1:9333' } } } });
-  const desktopArgs = [...h.args, '--no-default-profile'];
-  const first = await runClawser(desktopArgs, h.deps);
+test('host noVNC to CDP and back reuses the original receipt, socket and browser profile', async t => {
+  const h = await harness(t, personal());
+  await runClawser(h.args, h.deps);
   const original = await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8');
   const desktop = structuredClone(h.config.plugins.entries['browser-handoff'].config.desktop);
-  const profile = structuredClone(h.config.browser.profiles.handoff);
-  const fetch = h.deps.fetch;
-  h.deps.fetch = (url, options) => url === 'http://127.0.0.1:9333/json/version' ? Response.json({ Browser: 'Chrome/149', webSocketDebuggerUrl: 'ws://127.0.0.1:9333/devtools/browser/test' }) : fetch(url, options);
-  assert.equal((await runClawser(['setup'], h.deps)).backend, 'cdp');
+  const profile = structuredClone(h.config.browser.profiles.clawser);
+  assert.equal((await runClawser(['setup', '--cdp'], h.deps)).backend, 'cdp');
   assert.equal(h.config.plugins.entries['browser-handoff'].config.desktop.enabled, false);
   assert.equal(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8'), original);
   h.calls.length = 0;
+  // The host receipt outranks the CDP receipt. This is a rerun, not a takeover.
   const result = await runClawser(['setup', '--novnc', '--state-dir', h.stateDir], h.deps);
-  assert.equal(result.servicePath, first.servicePath);
+  assert.equal(result.backend, 'novnc');
   assert.deepEqual(h.config.plugins.entries['browser-handoff'].config.desktop, desktop);
-  assert.deepEqual(h.config.browser.profiles.handoff, profile);
+  assert.deepEqual(h.config.browser.profiles.clawser, profile);
   assert.equal(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8'), original);
-  assert.equal(h.calls.some(call => call.command === 'fetch' || call.args.includes('build') || call.args.includes('enable')), false);
+  assert.deepEqual(h.mutations().filter(call => !isPatch(call) && call.args[1] !== 'reload' && !String(call.args[1]).endsWith('/setup.lock')), []);
   assert.equal((await runClawser(['doctor', '--state-dir', h.stateDir], h.deps)).ok, true);
 });
 
@@ -146,7 +86,10 @@ test('first noVNC setup can replace inert CDP desktop disable config but cannot 
     const h = await harness(t, { plugins: { entries: { 'browser-handoff': { config: { desktop } } } } });
     if (Object.keys(desktop).length === 1) assert.equal((await runClawser(h.args, h.deps)).ok, true);
     else {
-      await assert.rejects(runClawser(h.args, h.deps), /unowned/);
+      // A desktop switched off by an older setup keeps the fields that name it. The refusal says how to clear them.
+      const field = Object.keys(desktop).find(key => key !== 'enabled');
+      await assert.rejects(runClawser(h.args, h.deps), { message: 'Existing browser-handoff desktop config is unowned or conflicts with Clawser. If that desktop is no longer used, '
+        + `run: openclaw config unset plugins.entries.browser-handoff.config.desktop.${field}, then rerun setup.` });
       await assert.rejects(fs.stat(h.stateDir), { code: 'ENOENT' });
     }
   }
@@ -161,46 +104,149 @@ test('owned desktop reenable rejects a non-boolean enable flag even when identit
   await assert.rejects(runClawser(h.args, h.deps), /conflicts/);
 });
 
-test('a first CDP installation can switch to its first explicit noVNC installation', async t => {
-  const h = await harness(t, { browser: { defaultProfile: 'personal', profiles: { personal: { attachOnly: true, cdpUrl: 'http://127.0.0.1:9333' } } } });
-  const fetch = h.deps.fetch;
-  h.deps.fetch = (url, options) => url === 'http://127.0.0.1:9333/json/version' ? Response.json({ Browser: 'Chrome/149', webSocketDebuggerUrl: 'ws://127.0.0.1:9333/devtools/browser/test' }) : fetch(url, options);
-  const cdp = await runClawser(['setup'], h.deps);
-  const receipt = await fs.readFile(join(cdp.stateDir, 'setup.json'), 'utf8');
+test('--browser-profile and an unmarked CDP install route to the takeover planner', async t => {
+  const h = await harness(t, personal());
+  const nobody = /^Error: Nothing is listening on http:\/\/127\.0\.0\.1:9333\. Start that browser, then rerun setup\.$/;
+  await assert.rejects(runClawser([...h.args, '--browser-profile', 'personal'], h.deps), nobody);
+  const cdp = await runClawser(['setup', '--cdp'], h.deps);
+  const receiptPath = join(cdp.stateDir, 'setup.json');
+  // A CDP install from before the explicit mark existed.
+  const { explicitCdp, ...unmarked } = JSON.parse(await fs.readFile(receiptPath, 'utf8'));
+  assert.equal(explicitCdp, true);
+  await fs.writeFile(receiptPath, JSON.stringify(unmarked) + '\n', { mode: 0o600 });
+  const receipt = await fs.readFile(receiptPath, 'utf8'), config = structuredClone(h.config);
+  h.calls.length = 0;
+  // Plain setup, in the default state folder, continues the CDP install.
+  await assert.rejects(runClawser(['setup'], h.deps), nobody);
+  assert.deepEqual(h.mutations(), []);
+  assert.deepEqual(h.config, config);
+  assert.equal(await fs.readFile(receiptPath, 'utf8'), receipt);
+  await assert.rejects(fs.stat(join(dirname(cdp.stateDir), 'clawser')), { code: 'ENOENT' });
+  // A new --state-dir is a new install.
+  assert.equal((await runClawser([...h.args, '--dry-run'], h.deps)).ok, true);
+  // An explicit CDP install stays out of the takeover path.
+  await fs.writeFile(receiptPath, JSON.stringify({ ...unmarked, explicitCdp: true }) + '\n', { mode: 0o600 });
+  assert.equal((await runClawser(['setup', '--dry-run'], h.deps)).ok, true);
+});
+
+test('dry-run checks readiness and plans without downloads, writes or config changes', async t => {
+  const h = await harness(t, { browser: { defaultProfile: 'handoff' } });
+  const result = await runClawser([...h.args, '--dry-run'], h.deps);
+  assert.deepEqual(Object.keys(result).sort(), ['command', 'dryRun', 'ok', 'patch', 'plan', 'stateDir', 'units']);
+  assert.equal(result.dryRun, true);
+  assert.deepEqual(result.units, [h.names.display, h.names.windowManager, h.names.browser, h.names.supervisor, h.names.controller]);
+  assert.ok(result.plan.includes('Display: :20'));
+  assert.ok(result.plan.includes('Default browser profile: handoff → clawser'));
+  assert.equal(result.patch.browser.defaultProfile, 'clawser');
+  assert.deepEqual(h.logs, [...result.plan, 'No files, downloads, services, or configuration were changed.']);
+  await assert.rejects(fs.lstat(h.stateDir), { code: 'ENOENT' });
+  assert.deepEqual(h.mutations(), []);
+  assert.deepEqual(h.config, { browser: { defaultProfile: 'handoff' } });
+});
+
+test('removed Docker flags explain they are gone', async t => {
+  const h = await harness(t);
+  for (const flag of ['--cdp-port', '--vnc-port', '--container-name', '--no-default-profile']) {
+    await assert.rejects(runClawser([...h.args, flag, ...flag === '--no-default-profile' ? [] : ['1']], h.deps), error => {
+      assert.match(error.message, /was removed in 0\.7\.0 along with the Docker desktop/);
+      assert.ok(error.message.startsWith(flag + ' '), error.message);
+      return true;
+    });
+  }
+  assert.equal(h.calls.length, 0);
+});
+
+test('--novnc is accepted and --novnc with --cdp is refused', async t => {
+  const h = await harness(t);
+  h.deps.env.OPENCLAW_STATE_DIR = join(h.root, 'openclaw-state');
+  const stateDir = join(h.root, 'openclaw-state/clawser');
+  const result = await runClawser(['setup', '--novnc', '--dry-run'], h.deps);
+  assert.equal(result.ok, true);
+  assert.equal(result.stateDir, stateDir);
+  assert.ok(result.units.includes(unitNames(stateDir).browser));
+  h.calls.length = 0;
+  for (const args of [['setup', '--novnc', '--cdp'], ['setup', '--cdp', '--novnc'], ['doctor', '--novnc', '--cdp']]) {
+    await assert.rejects(runClawser(args, h.deps), error => error.message === '--novnc and --cdp cannot be used together');
+  }
+  assert.equal(h.calls.length, 0);
+});
+
+test('a disruptive rerun without --yes prints the plan and changes nothing', async t => {
+  const h = await harness(t);
+  await runClawser(h.args, h.deps);
+  h.deps.findBrowserBinary = async () => ({ path: '/opt/google/chrome/chrome', brand: 'chrome' });
+  h.calls.length = 0; h.logs.length = 0;
+  const refused = await runClawser(h.args, h.deps);
+  assert.deepEqual(Object.keys(refused).sort(), ['command', 'ok', 'plan']);
+  assert.equal(refused.ok, false);
+  assert.ok(refused.plan.includes('Restart ' + h.names.browser), refused.plan.join('\n'));
+  assert.equal(h.logs.at(-1), "This closes the agent's browser. Rerun with --yes to go ahead.");
+  assert.deepEqual(h.mutations(), []);
+  assert.doesNotMatch(await h.unit(h.names.browser), /\/opt\/google/);
+  const applied = await runClawser([...h.args, '--yes'], h.deps);
+  assert.equal(applied.ok, true);
+  assert.deepEqual(systemctl(h.calls, 'restart'), [h.names.browser]);
+  assert.match(await h.unit(h.names.browser), /\/opt\/google\/chrome\/chrome/);
+  assert.deepEqual((await h.receipt()).browser, { path: '/opt/google/chrome/chrome', existingArgs: [], env: [] });
+});
+
+test('setup prints that the agent browser starts with no logins', async t => {
+  const h = await harness(t);
+  const result = await runClawser(h.args, h.deps);
+  assert.deepEqual(Object.keys(result).sort(), ['activation', 'backend', 'command', 'display', 'dryRun', 'ok', 'stateDir', 'units', 'warnings']);
+  assert.deepEqual(result.warnings, []);
+  const text = h.logs.join('\n');
+  assert.match(text, /starts with no logins/);
+  assert.ok(h.logs.includes('Clawser is configured.'));
+  assert.ok(h.logs.includes('State: ' + h.stateDir));
+  assert.ok(h.logs.includes('Display: :20'));
+  for (const name of result.units) assert.ok(text.includes(name), name);
+});
+
+test('a Docker-era install converts through runClawser and prints its leftovers', async t => {
+  const h = await harness(t);
+  const { v1, servicePath } = await seedDockerEra(h);
+  const dry = await runClawser([...h.args, '--dry-run'], h.deps);
+  for (const command of leftovers) assert.ok(dry.plan.includes('Run yourself afterwards: ' + command), command);
+  assert.deepEqual(h.mutations(), []);
+  h.logs.length = 0;
   const result = await runClawser(h.args, h.deps);
   assert.equal(result.ok, true);
-  assert.equal(h.config.browser.defaultProfile, 'handoff');
-  assert.equal(h.config.browser.profiles.personal.cdpUrl, 'http://127.0.0.1:9333');
-  assert.equal(h.config.plugins.entries['browser-handoff'].config.desktop.enabled, true);
-  assert.equal(await fs.readFile(join(cdp.stateDir, 'setup.json'), 'utf8'), receipt);
+  assert.deepEqual(result.dockerLeftovers, leftovers);
+  const text = h.logs.join('\n');
+  for (const command of leftovers) assert.ok(text.includes(command), command);
+  assert.equal(h.calls.some(call => call.command === 'docker'), false);
+  assert.deepEqual(systemctl(h.calls, 'stop'), [h.names.controller]);
+  const saved = await h.receipt();
+  assert.equal(saved.identity, 'clawser-setup-v2');
+  assert.equal(saved.ownerId, v1.ownerId);
+  assert.equal(h.config.plugins.entries['browser-handoff'].config.desktop.profile, 'clawser');
+  assert.doesNotMatch(await fs.readFile(servicePath, 'utf8'), /docker/);
 });
 
-test('dry-run checks readiness and plans without downloads, writes, builds or config changes', async t => {
+test('a Docker-era install that followed a CDP install converts instead of taking over', async t => {
   const h = await harness(t);
+  await seedDockerEra(h);
+  const cdpDir = join(h.root, 'openclaw-state/clawser-cdp');
+  h.deps.env.OPENCLAW_STATE_DIR = join(h.root, 'openclaw-state');
+  await fs.mkdir(cdpDir, { recursive: true, mode: 0o700 });
+  await fs.writeFile(join(cdpDir, 'setup.json'), JSON.stringify({ identity: 'clawser-cdp-setup-v1', uid: h.deps.uid, ownerId: randomUUID(), stateDir: cdpDir, binaryDigest: h.artifacts.cloudflared.sha256 }) + '\n', { mode: 0o600 });
   const result = await runClawser([...h.args, '--dry-run'], h.deps);
-  assert.equal(result.dryRun, true);
-  await assert.rejects(fs.lstat(h.stateDir), { code: 'ENOENT' });
-  assert.equal(h.calls.some(c => c.command === 'fetch' || c.args.includes('build') || c.args.includes('patch') || c.args.includes('enable')), false);
-  assert.deepEqual(h.config, {});
+  assert.equal(result.ok, true);
+  assert.ok(result.plan.includes('Stop the Docker-era controller ' + h.names.controller), result.plan.join('\n'));
+  for (const command of leftovers) assert.ok(result.plan.includes('Run yourself afterwards: ' + command), command);
+  assert.equal(result.patch.plugins.entries['browser-handoff'].config.desktop.profile, 'clawser');
+  assert.deepEqual(h.mutations(), []);
 });
 
-test('coercible container names keep string-hint Docker resource identities', async t => {
+test('doctor on a Docker-era receipt says to rerun setup', async t => {
   const h = await harness(t);
-  const hints = [];
-  const containerName = {
-    startsWith() { return false; },
-    [Symbol.toPrimitive](hint) { hints.push(hint); return hint === 'string' ? 'desktop' : 'different'; },
-  };
-  const result = await runClawser([...h.args, '--container-name', containerName, '--dry-run'], h.deps);
-  assert.equal(result.dryRun, true);
-  const inspections = h.calls.filter(call => call.command === 'docker' && call.args.includes('inspect'));
-  assert.equal(inspections[0].args.at(-1), containerName);
-  assert.deepEqual(inspections.slice(1).map(call => call.args.slice(-3)), [
-    ['network', 'inspect', 'desktop-net'], ['volume', 'inspect', 'desktop-profile'],
-  ]);
-  assert.ok(hints.length >= 4);
-  assert.ok(hints.every(hint => hint === 'string'));
-  await assert.rejects(fs.lstat(h.stateDir), { code: 'ENOENT' });
+  await seedDockerEra(h);
+  const result = await runClawser(['doctor', '--state-dir', h.stateDir], h.deps);
+  assert.equal(result.ok, false);
+  assert.equal(result.backend, 'novnc');
+  assert.equal(result.checks.find(row => row.name === 'installation').message, 'This is a Docker desktop install from an older Clawser; rerun openclaw clawser setup');
+  assert.deepEqual(h.mutations(), []);
 });
 
 test('binds every nested OpenClaw command to the trusted current host entrypoint', async t => {
@@ -224,10 +270,10 @@ test('binds every nested OpenClaw command to the trusted current host entrypoint
   for (const section of ['browser', 'plugins', 'tools']) assert.ok(bound.some(call => call.args[1] === 'config' && call.args[2] === 'get' && call.args[3] === section));
   const patches = bound.filter(call => call.args[1] === 'config' && call.args[2] === 'patch');
   assert.equal(patches.length, 2);
-  assert.ok(patches.every(call => JSON.parse(call.options.input).browser.profiles.handoff));
+  assert.ok(patches.every(call => JSON.parse(call.options.input).browser.profiles.clawser));
   assert.ok(bound.some(call => call.args[1] === 'plugins' && call.args[2] === 'reload' && call.options.timeoutMs > 0 && call.options.timeoutMs <= 180_000));
   assert.equal(invocations.some(call => ['/bin/sh', 'sh', 'bash'].includes(call.executable)), false);
-  assert.ok(invocations.some(call => call.executable === 'docker' && call.args.includes('build') && call.options.timeoutMs === 45 * 60_000));
+  assert.ok(invocations.some(call => call.executable === 'systemctl' && call.args[1] === 'enable'));
 });
 
 test('rejects invalid trusted OpenClaw invocations before executing commands', async t => {
@@ -254,7 +300,8 @@ test('different execution captures preserve the trusted stable installation in r
   for (const capture of captures) {
     await fs.mkdir(join(capture, 'src'), { recursive: true });
     await fs.mkdir(join(capture, 'runtime/desktop'), { recursive: true });
-    for (const relative of ['src/setup.mjs', 'src/setup-activation.mjs', 'src/browser-activation.mjs', 'src/browser-policy.mjs', 'src/browser-config.mjs', 'src/authorization.mjs', 'openclaw.plugin.json', 'src/desktop-rpc.mjs', 'runtime/desktop/index.mjs']) await fs.copyFile(new URL(`../${relative}`, import.meta.url), join(capture, relative));
+    for (const relative of ['src/setup.mjs', 'src/setup-activation.mjs', 'src/host-units.mjs', 'src/browser-activation.mjs', 'src/browser-policy.mjs', 'src/browser-config.mjs', 'src/authorization.mjs', 'openclaw.plugin.json', 'src/desktop-rpc.mjs', 'runtime/desktop/index.mjs',
+      'src/host-setup.mjs', 'src/host-takeover.mjs', 'src/host-browser.mjs', 'src/host-deps.mjs', 'src/host-display.mjs', 'src/host-doctor.mjs']) await fs.copyFile(new URL(`../${relative}`, import.meta.url), join(capture, relative));
   }
   const firstModule = await import(pathToFileURL(join(captures[0], 'src/setup.mjs')).href);
   const secondModule = await import(pathToFileURL(join(captures[1], 'src/setup.mjs')).href);
@@ -265,17 +312,19 @@ test('different execution captures preserve the trusted stable installation in r
     run: (command, args, options) => command === '/trusted/node' ? run('openclaw', args.slice(1), options) : run(command, args, options),
   };
   const first = await firstModule.runClawser(h.args, dependencies);
-  const receipt = JSON.parse(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8'));
-  assert.equal(receipt.options.packageDir, stableRoot);
-  const service = await fs.readFile(first.servicePath, 'utf8');
+  assert.equal(first.ok, true);
+  const receipt = await h.receipt();
+  assert.equal(receipt.packageDir, stableRoot);
+  const service = await h.unit(h.names.controller), supervisor = await h.unit(h.names.supervisor);
   assert.ok(service.includes(`${stableRoot}/bin/desktop-controller.mjs`));
-  assert.equal(captures.some(capture => service.includes(capture)), false);
+  assert.ok(supervisor.includes(`${stableRoot}/runtime/desktop/supervisor.py`));
+  for (const name of first.units) { const text = await h.unit(name); assert.equal(captures.some(capture => text.includes(capture)), false, name); }
   dependencies.packageDir = stableRoot;
   h.calls.length = 0;
   assert.equal((await secondModule.runClawser(h.args, dependencies)).ok, true);
-  assert.equal((await secondModule.runClawser(['doctor', '--novnc', '--state-dir', h.stateDir], dependencies)).ok, true);
-  assert.equal(h.calls.some(call => call.command === 'fetch' || call.args.includes('build') || call.args.includes('restart')), false);
-  assert.equal(await fs.readFile(first.servicePath, 'utf8'), service);
+  assert.equal((await secondModule.runClawser(['doctor', '--state-dir', h.stateDir], dependencies)).ok, true);
+  assert.equal(h.calls.some(call => call.command === 'fetch' || call.args.includes('restart') || call.args.includes('enable')), false);
+  assert.equal(await h.unit(h.names.controller), service);
 });
 
 test('rejects invalid trusted package roots and requires one for plugin CLI execution', async t => {
@@ -295,7 +344,7 @@ test('a trusted package root cannot adopt an existing unowned state directory', 
   await fs.mkdir(h.stateDir, { mode: 0o700 });
   await assert.rejects(runClawser([...h.args, '--dry-run'], { ...h.deps, packageDir: `${h.packageDir}/.` }), /exists without Clawser ownership/i);
   await assert.rejects(fs.lstat(join(h.stateDir, 'setup.json')), { code: 'ENOENT' });
-  assert.equal(h.calls.some(call => call.command === 'fetch' || call.args.includes('patch') || call.args.includes('build')), false);
+  assert.deepEqual(h.mutations(), []);
 });
 
 function unsetSectionMessage(name) {
@@ -318,9 +367,9 @@ for (const dryRun of [true, false]) {
     if (dryRun) {
       await assert.rejects(fs.lstat(h.stateDir), { code: 'ENOENT' });
       assert.deepEqual(h.config, {});
-      assert.equal(h.calls.some(call => call.command === 'fetch' || call.args.includes('patch') || call.args.includes('build')), false);
+      assert.deepEqual(h.mutations(), []);
     } else {
-      assert.equal(h.config.browser.profiles.handoff.cdpUrl, 'http://127.0.0.1:18812');
+      assert.equal(h.config.browser.profiles.clawser.cdpUrl, 'http://127.0.0.1:18820');
       assert.deepEqual(h.config.tools.alsoAllow, ['browser_handoff']);
     }
   });
@@ -352,13 +401,15 @@ test('unrelated or malformed config error envelopes remain failures before mutat
     });
   }
   await assert.rejects(fs.lstat(h.stateDir), { code: 'ENOENT' });
-  assert.equal(h.calls.some(call => call.command === 'fetch' || call.args.includes('patch') || call.args.includes('build')), false);
+  assert.deepEqual(h.mutations(), []);
 });
 
-test('checksum failure cannot build, install a service, or configure OpenClaw', async t => {
-  const h = await harness(t); h.corrupt();
+test('checksum failure cannot install a service or configure OpenClaw', async t => {
+  const h = await harness(t); h.corrupt = true;
   await assert.rejects(runClawser(h.args, h.deps), /checksum/i);
-  assert.equal(h.calls.some(c => c.args.includes('build') || c.args.includes('enable') || (c.args.includes('patch') && !c.args.includes('--dry-run'))), false);
+  assert.deepEqual(enabled(h.calls), []);
+  assert.equal(h.calls.some(isPatch), false);
+  await assert.rejects(fs.lstat(h.unitDir), { code: 'ENOENT' });
   assert.deepEqual(h.config, {});
 });
 
@@ -370,102 +421,93 @@ test('setup preserves other profiles, plugin configuration and allowlists', asyn
   });
   const result = await runClawser(h.args, h.deps);
   assert.equal(result.ok, true);
-  assert.equal(h.calls.find(call => call.command === 'docker' && call.args.includes('build')).timeoutMs, 45 * 60_000);
   assert.equal(h.config.browser.profiles.personal.cdpUrl, 'http://127.0.0.1:9222');
   assert.deepEqual(h.config.tools, { allow: ['read', 'browser', 'browser_handoff'], deny: ['dangerous'] });
   assert.deepEqual(h.config.plugins.allow, ['other', 'browser-handoff']);
   assert.equal(h.config.plugins.entries.other.enabled, true);
   assert.equal(h.config.plugins.entries['browser-handoff'].config.funnel.enabled, false);
   assert.equal(h.config.plugins.entries['browser-handoff'].config.profiles.old, 'http://127.0.0.1:9222');
-  assert.equal(h.config.browser.defaultProfile, 'handoff');
-  const patchIndex = h.calls.findIndex(c => c.args.includes('patch') && !c.args.includes('--dry-run'));
+  assert.equal(h.config.browser.defaultProfile, 'clawser');
+  assert.equal((await h.receipt()).previousDefaultProfile, 'personal');
+  const patchIndex = h.calls.findIndex(isPatch);
   const enableIndex = h.calls.findIndex(c => c.command === 'systemctl' && c.args.includes('enable'));
   const reloadIndex = h.calls.findIndex(c => c.args.includes('reload'));
   assert.ok(enableIndex < patchIndex && patchIndex < reloadIndex);
   const controller = JSON.parse(await fs.readFile(join(h.stateDir, 'controller.json'), 'utf8'));
-  assert.equal(controller.runtime.image, imageId);
+  assert.equal(controller.runtime.cdpUrl, 'http://127.0.0.1:18820');
   assert.equal(controller.transport.startupTimeoutMs, 90_000);
-  for (const path of [h.stateDir, join(h.stateDir, 'setup.json'), join(h.stateDir, 'controller.json')]) assert.equal((await fs.lstat(path)).mode & 0o077, 0);
-  const service = await fs.readFile(result.servicePath, 'utf8');
+  for (const path of [h.stateDir, join(h.stateDir, 'setup.json'), join(h.stateDir, 'controller.json'), join(h.stateDir, 'xauthority'), join(h.stateDir, 'browser/profile')]) assert.equal((await fs.lstat(path)).mode & 0o077, 0, path);
+  const service = await h.unit(h.names.controller);
   assert.match(service, /ExecStart="\/node \\"quoted\\" %% \$\$PATH"/);
+  assert.match(service, /"[^"]*package \\"quoted\\" %% \$\$value\/bin\/desktop-controller\.mjs"/);
   assert.equal(service.includes('/bin/sh'), false);
   assert.match(service, /^KillMode=mixed$/m, 'initial stop signals must preserve the controller’s child authority lock');
   assert.match(service, /TimeoutStopSec=180\n/);
 });
 
-test('repeated owned setup preserves profile and skips downloads, image rebuild and controller restart', async t => {
-  const h = await harness(t);
-  const first = await runClawser(h.args, h.deps);
-  const marker = await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8');
-  await fs.writeFile(join(h.stateDir, 'profile-sentinel'), 'cookies stay');
-  h.calls.length = 0;
-  const second = await runClawser(h.args, h.deps);
-  assert.equal(first.serviceUnit, second.serviceUnit);
-  assert.equal(await fs.readFile(join(h.stateDir, 'profile-sentinel'), 'utf8'), 'cookies stay');
-  assert.equal(await fs.readFile(join(h.stateDir, 'setup.json'), 'utf8'), marker);
-  assert.equal(h.calls.some(c => c.command === 'fetch' || c.args.includes('build') || c.args.includes('restart')), false);
-});
-
-for (const kind of ['state path', 'profile', 'desktop config', 'service', 'port', 'container', 'volume']) {
+for (const kind of ['state path', 'profile', 'desktop config', 'service', 'port']) {
   test(`refuses an unowned ${kind} before mutating`, async t => {
     const h = await harness(t);
     if (kind === 'state path') await fs.mkdir(h.stateDir, { mode: 0o700 });
-    if (kind === 'profile') h.config.browser = { profiles: { handoff: { cdpUrl: 'http://127.0.0.1:18812' } } };
-    if (kind === 'desktop config') h.config.plugins = { entries: { 'browser-handoff': { config: { desktop: { enabled: true, socketPath: '/someone/else.sock', profile: 'handoff' } } } } };
-    if (kind === 'service') h.unmanagedService();
-    if (kind === 'port') h.busy([19410]);
-    if (kind === 'container') h.resource('openclaw-handoff-desktop', { Id: 'unmanaged', Config: { Labels: {} } });
-    if (kind === 'volume') h.resource('openclaw-handoff-desktop-profile', { Labels: {} });
+    if (kind === 'profile') h.config.browser = { profiles: { clawser: { cdpUrl: 'http://127.0.0.1:18820' } } };
+    if (kind === 'desktop config') h.config.plugins = { entries: { 'browser-handoff': { config: { desktop: { enabled: true, socketPath: '/someone/else.sock', profile: 'clawser' } } } } };
+    if (kind === 'service') { h.units.set(h.names.display, 'active'); h.fragments[h.names.display] = '/unmanaged/existing.service'; }
+    if (kind === 'port') h.busy([19420]);
     await assert.rejects(runClawser(h.args, h.deps), /unowned|unmanaged|conflict|in use|exists/i);
-    assert.equal(h.calls.some(c => c.command === 'fetch' || c.args.includes('build') || c.args.includes('enable') || (c.args.includes('patch') && !c.args.includes('--dry-run'))), false);
+    assert.deepEqual(h.mutations(), []);
   });
 }
 
 test('refuses changed owned controller config and changed setup arguments', async t => {
   const h = await harness(t);
   await runClawser(h.args, h.deps);
-  await assert.rejects(runClawser([...h.args, '--port', '19411'], h.deps), /conflict|differs/i);
+  await assert.rejects(runClawser([...h.args, '--port', '19411'], h.deps), /conflict/i);
   await fs.writeFile(join(h.stateDir, 'controller.json'), '{}', { mode: 0o600 });
-  await assert.rejects(runClawser(h.args, h.deps), /changed|conflict/i);
+  await assert.rejects(runClawser(h.args, h.deps), /changed outside Clawser/);
 });
 
 test('doctor reports missing setup without changing the machine', async t => {
   const h = await harness(t);
   const result = await runClawser(['doctor', '--novnc', '--state-dir', h.stateDir], h.deps);
   assert.equal(result.ok, false);
-  assert.ok(result.checks.some(c => c.name === 'installation' && !c.ok));
+  assert.equal(result.checks.find(c => c.name === 'installation').message, 'No owned Clawser setup found; run openclaw clawser setup');
   await assert.rejects(fs.lstat(h.stateDir), { code: 'ENOENT' });
-  assert.equal(h.calls.some(c => c.command === 'fetch' || c.args.includes('patch') || c.args.includes('enable')), false);
+  assert.deepEqual(h.mutations(), []);
 });
 
 test('doctor validates an owned installation without downloads or mutations', async t => {
   const h = await harness(t);
   await runClawser(h.args, h.deps);
   h.calls.length = 0;
-  const result = await runClawser(['doctor', '--novnc', '--state-dir', h.stateDir], h.deps);
-  assert.equal(result.ok, true);
-  assert.equal(h.calls.some(c => c.command === 'fetch' || c.args.includes('patch') || c.args.includes('enable')), false);
+  const result = await runClawser(['doctor', '--state-dir', h.stateDir], h.deps);
+  assert.equal(result.ok, true, JSON.stringify(result.checks));
+  assert.deepEqual(Object.keys(result).sort(), ['activation', 'backend', 'checks', 'command', 'display', 'ok', 'pending', 'stateDir', 'units']);
+  assert.deepEqual(result.checks.map(row => row.name).slice(-14), ['installation', 'ownership', 'configuration', 'pinned assets', 'host dependencies', 'services', 'display', 'browser window',
+    'CDP origin', 'profile directory', 'linger', 'units current', 'controller health', 'Gateway activation']);
+  assert.deepEqual(h.mutations(), []);
+  assert.equal(h.calls.some(call => call.command === 'fetch'), false);
 });
 
-test('doctor uses saved custom setup options when only a state directory is supplied', async t => {
+test('doctor checks a custom-port install from its state directory alone', async t => {
   const h = await harness(t);
-  const originalHealth = h.deps.controllerHealth;
-  h.deps.controllerHealth = async () => ({ ...await originalHealth(), profile: 'dedicated', cdpUrl: 'http://127.0.0.1:28812' });
-  await runClawser([...h.args, '--browser-profile', 'dedicated', '--port', '29410', '--cdp-port', '28812', '--vnc-port', '59093', '--container-name', 'isolated-desktop', '--no-default-profile'], h.deps);
-  const result = await runClawser(['doctor', '--novnc', '--state-dir', h.stateDir], h.deps);
-  assert.equal(result.ok, true);
-  assert.ok(h.logs.at(-1).includes('isolated-desktop'));
+  await runClawser([...h.args, '--port', '29410'], h.deps);
+  assert.equal((await h.receipt()).port, 29410);
+  assert.equal(JSON.parse(await fs.readFile(join(h.stateDir, 'controller.json'), 'utf8')).port, 29410);
+  h.logs.length = 0;
+  const result = await runClawser(['doctor', '--state-dir', h.stateDir], h.deps);
+  assert.equal(result.ok, true, JSON.stringify(result.checks));
+  assert.ok(h.logs.includes('State: ' + h.stateDir));
+  assert.ok(h.logs.includes('Display: :20'));
 });
 
 test('setup inherits owned custom settings when rerun with only its state directory', async t => {
   const h = await harness(t);
-  h.deps.controllerHealth = async () => ({ ready: true, profile: 'custom', cdpUrl: 'http://127.0.0.1:28812', recoveryRequired: false });
-  await runClawser([...h.args, '--browser-profile', 'custom', '--port', '29410', '--cdp-port', '28812', '--vnc-port', '59093', '--container-name', 'custom-desktop', '--no-default-profile'], h.deps);
+  await runClawser([...h.args, '--port', '29410'], h.deps);
   h.calls.length = 0;
   const result = await runClawser(h.args, h.deps);
   assert.equal(result.ok, true);
-  assert.equal(h.config.browser.profiles.custom.cdpUrl, 'http://127.0.0.1:28812');
-  assert.equal(h.calls.some(c => c.command === 'fetch' || c.args.includes('build') || c.args.includes('restart')), false);
+  assert.equal(JSON.parse(await fs.readFile(join(h.stateDir, 'controller.json'), 'utf8')).port, 29410);
+  assert.equal(h.calls.some(c => c.command === 'fetch' || c.args.includes('restart') || c.args.includes('enable')), false);
 });
 
 test('doctor fails when the installed desktop configuration was removed', async t => {
@@ -495,10 +537,10 @@ test('an interrupted reload can be retried without replacing the owned browser p
     return run(command, args, options);
   };
   await assert.rejects(runClawser(h.args, h.deps), /Gateway unavailable/);
-  const profile = structuredClone(h.config.browser.profiles.handoff);
+  const profile = structuredClone(h.config.browser.profiles.clawser);
   h.deps.run = run;
   await runClawser(h.args, h.deps);
-  assert.deepEqual(h.config.browser.profiles.handoff, profile);
+  assert.deepEqual(h.config.browser.profiles.clawser, profile);
 });
 
 test('retries only final reload across a Gateway restart without repeating setup mutations', async t => {
@@ -519,9 +561,9 @@ test('retries only final reload across a Gateway restart without repeating setup
   assert.deepEqual(sleeps, [1000, 2000]);
   assert.deepEqual(reloads.map(options => options.timeoutMs), [180_000, 179_000, 177_000]);
   assert.equal(h.logs.filter(message => message.includes('Waiting for OpenClaw')).length, 1);
-  assert.equal(h.calls.filter(call => call.command === 'docker' && call.args.includes('build')).length, 1);
-  assert.equal(h.calls.filter(call => call.command === 'openclaw' && call.args.includes('patch') && !call.args.includes('--dry-run')).length, 1);
-  assert.deepEqual(Object.keys(h.config.browser.profiles), ['handoff']);
+  assert.equal(enabled(h.calls).length, 5);
+  assert.equal(h.calls.filter(isPatch).length, 1);
+  assert.deepEqual(Object.keys(h.config.browser.profiles), ['clawser']);
   assert.deepEqual(h.config.tools.alsoAllow, ['browser_handoff']);
 });
 
@@ -568,36 +610,19 @@ test('transient final reload failures exhaust a bounded shared deadline', async 
   assert.ok(time <= 180_000);
   assert.ok(timeouts.every((value, index) => value > 0 && value <= 180_000 && (index === 0 || value < timeouts[index - 1])));
   assert.equal(h.logs.filter(message => message.includes('Waiting for OpenClaw')).length, 1);
-  assert.equal(h.calls.filter(call => call.command === 'docker' && call.args.includes('build')).length, 1);
-  assert.equal(h.calls.filter(call => call.command === 'openclaw' && call.args.includes('patch') && !call.args.includes('--dry-run')).length, 1);
+  assert.equal(enabled(h.calls).length, 5);
+  assert.equal(h.calls.filter(isPatch).length, 1);
 });
 
-test('owned runtime ports and the persistent Docker profile survive repeated setup', async t => {
-  const h = await harness(t);
-  await runClawser(h.args, h.deps);
-  const name = 'openclaw-handoff-desktop', ownerId = 'runtime-owner', network = `${name}-net`, volume = `${name}-profile`;
-  const label = { 'openclaw.browser-handoff.desktop': ownerId };
-  const ports = { '9223/tcp': [{ HostIp: '127.0.0.1', HostPort: '18812' }], '5900/tcp': [{ HostIp: '127.0.0.1', HostPort: '59092' }] };
-  await fs.writeFile(join(h.stateDir, 'state/runtime/ownership.json'), JSON.stringify({ name, ownerId, containerId: 'owned-container', network, networkId: 'owned-network', volume, cdpPort: 18812, vncPort: 59092 }), { mode: 0o600 });
-  h.resource(name, { Id: 'owned-container', Name: `/${name}`, State: { Running: true }, Config: { Labels: label }, HostConfig: { PortBindings: ports, NetworkMode: network }, NetworkSettings: { Ports: ports, Networks: { [network]: { NetworkID: 'owned-network' } } }, Mounts: [{ Type: 'volume', Name: volume, Destination: '/profile', RW: true }] });
-  h.resource(network, { Id: 'owned-network', Labels: label });
-  h.resource(volume, { Name: volume, Labels: label });
-  h.busy([19410, 18812, 59092]);
-  h.calls.length = 0;
-  await runClawser(h.args, h.deps);
-  assert.equal(h.calls.some(call => call.command === 'docker' && call.args.some(arg => ['stop', 'rm', 'create', 'start'].includes(arg))), false);
-  assert.equal((await fs.lstat(join(h.stateDir, 'state/runtime/ownership.json'))).mode & 0o077, 0);
-});
-
-test('rereads allowlists after a long Docker build before merging configuration', async t => {
+test('rereads allowlists after starting services before merging configuration', async t => {
   const h = await harness(t, { tools: { alsoAllow: ['read'] }, plugins: { allow: ['existing'] } });
   const run = h.deps.run;
   h.deps.run = (command, args, options) => {
-    if (command === 'docker' && args.includes('build')) { h.config.tools.alsoAllow.push('new-during-build'); h.config.plugins.allow.push('another-plugin'); }
+    if (command === 'systemctl' && args[1] === 'enable' && args.at(-1) === h.names.controller) { h.config.tools.alsoAllow.push('new-during-start'); h.config.plugins.allow.push('another-plugin'); }
     return run(command, args, options);
   };
   await runClawser(h.args, h.deps);
-  assert.deepEqual(h.config.tools.alsoAllow, ['read', 'new-during-build', 'browser_handoff']);
+  assert.deepEqual(h.config.tools.alsoAllow, ['read', 'new-during-start', 'browser_handoff']);
   assert.deepEqual(h.config.plugins.allow, ['existing', 'another-plugin', 'browser-handoff']);
 });
 
@@ -607,23 +632,15 @@ test('an old OpenClaw version fails before downloads or setup writes', async t =
   h.deps.run = (command, args, options) => command === 'openclaw' && args[0] === '--version' ? 'OpenClaw 2026.9.28' : run(command, args, options);
   await assert.rejects(runClawser(h.args, h.deps), /2026\.10\.4/);
   await assert.rejects(fs.lstat(h.stateDir), { code: 'ENOENT' });
-  assert.equal(h.calls.some(c => c.command === 'fetch' || c.args.includes('patch')), false);
-});
-
-test('no-default-profile preserves the current default and state env selects default state path', async t => {
-  const h = await harness(t, { browser: { defaultProfile: 'personal' } });
-  h.deps.env.OPENCLAW_STATE_DIR = join(h.root, 'openclaw-state');
-  const result = await runClawser(['setup', '--novnc', '--no-default-profile'], h.deps);
-  assert.equal(result.stateDir, join(h.root, 'openclaw-state/clawser'));
-  assert.equal(h.config.browser.defaultProfile, 'personal');
+  assert.deepEqual(h.mutations(), []);
 });
 
 test('unsupported platforms, versions and invalid flags fail before mutation', async t => {
   const h = await harness(t);
-  for (const args of [['--port', '19410junk'], ['--cdp-port', '19410'], ['--browser-profile', '../escape'], ['--profile', 'host-profile'], ['--unknown']]) {
-    await assert.rejects(runClawser([...h.args, ...args], h.deps), /invalid|unknown|differ/i);
+  for (const args of [['--port', '19410junk'], ['--cdp-port', '19410'], ['--browser-profile', '../escape'], ['--profile', 'host-profile'], ['--unknown'], ['--yes', '--yes']]) {
+    await assert.rejects(runClawser([...h.args, ...args], h.deps), /invalid|unknown|removed/i);
   }
-  await assert.rejects(runClawser(h.args, { ...h.deps, arch: 'arm64' }), /x86_64/);
+  await assert.rejects(runClawser(h.args, { ...h.deps, arch: 'arm64' }), /^Error: platform: Clawser setup requires Linux x86_64 with systemd user services$/);
   await assert.rejects(runClawser(h.args, { ...h.deps, nodeVersion: '20.0.0' }), /Node 24\.16/);
   assert.equal(h.calls.length, 0);
 });
@@ -645,4 +662,15 @@ test('accepts the supported Node release boundaries and later majors', async t =
     assert.equal(result.dryRun, true, nodeVersion);
   }
   await assert.rejects(fs.lstat(h.stateDir), { code: 'ENOENT' });
+});
+
+test('setup checks host prerequisites and never asks for docker', async t => {
+  const h = await harness(t);
+  await runClawser([...h.args, '--dry-run'], h.deps);
+  const external = h.calls.filter(call => call.command !== 'fs' && call.command !== 'fetch').map(call => [call.command, ...call.args.slice(0, 2)].join(' '));
+  for (const want of ['tar --version', '/usr/bin/flock --version', 'systemctl --user show-environment', 'openclaw --version']) assert.ok(external.includes(want), want);
+  await fs.rm(join(h.packageDir, 'runtime/desktop/xproof.py'));
+  h.calls.length = 0;
+  await assert.rejects(runClawser(h.args, h.deps), /source paths: Installed package is missing runtime\/desktop\/xproof\.py/);
+  assert.equal(h.calls.length, 0);
 });

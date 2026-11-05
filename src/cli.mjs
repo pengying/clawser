@@ -12,29 +12,25 @@ export function registerClawserCli(api, dependencies = {}) {
     const root = program.command('clawser').description(clawserCliDescriptor.description);
     for (const name of ['setup', 'doctor']) {
       const command = root.command(name).description(name === 'setup'
-        ? 'Configure handoff using the existing default browser CDP connection'
+        ? 'Give the agent its own browser on a private virtual screen (noVNC); --cdp keeps the CDP viewer'
         : 'Check the configured browser backend without changing it');
       command
-        .option('--novnc', 'Use the dedicated Docker desktop instead of existing-browser CDP')
         .option('--state-dir <path>', 'Private Clawser state directory')
-        .option('--browser-profile <name>', 'Existing OpenClaw browser connection (dedicated profile with --novnc)')
+        .option('--browser-profile <name>', 'Existing OpenClaw browser profile to hand off')
         .option('--port <port>', 'Loopback viewer/controller port')
-        .option('--cdp-port <port>', 'Loopback Chromium debugging port')
-        .option('--vnc-port <port>', 'Loopback VNC port')
-        .option('--container-name <name>', 'Dedicated Docker container name');
+        .option('--cdp', 'Use the one-tab CDP viewer on an existing browser')
+        .option('--novnc', 'Use the private virtual screen (the default)');
       if (name === 'setup') command
         .option('--dry-run', 'Show the setup plan without making changes')
-        .option('--no-default-profile', 'Keep the current default browser profile');
+        .option('--yes', "Go ahead when setup has to close the agent's browser")
+        .option('--no-migrate-cookies', 'Do not copy logins into the agent browser');
       command.action(async options => {
         const argv = [name];
-        for (const [key, flag] of [
-          ['stateDir', '--state-dir'], ['browserProfile', '--browser-profile'],
-          ['port', '--port'], ['cdpPort', '--cdp-port'],
-          ['vncPort', '--vnc-port'], ['containerName', '--container-name'],
-        ]) if (options[key] !== undefined) argv.push(flag, String(options[key]));
-        if (options.novnc) argv.push('--novnc');
-        if (options.dryRun) argv.push('--dry-run');
-        if (options.defaultProfile === false) argv.push('--no-default-profile');
+        for (const [key, flag] of [['stateDir', '--state-dir'], ['browserProfile', '--browser-profile'], ['port', '--port']]) {
+          if (options[key] !== undefined) argv.push(flag, String(options[key]));
+        }
+        for (const [key, flag] of [['cdp', '--cdp'], ['novnc', '--novnc'], ['dryRun', '--dry-run'], ['yes', '--yes']]) if (options[key]) argv.push(flag);
+        if (options.migrateCookies === false) argv.push('--no-migrate-cookies');
         try {
           if (typeof api.rootDir !== 'string' || !api.rootDir) {
             throw new Error('OpenClaw did not provide the stable installed plugin directory; reinstall Clawser or use its standalone CLI');

@@ -19,12 +19,13 @@ for (const required of [
   'src/cli.mjs', 'src/setup.mjs', 'src/desktop-plugin.mjs',
   'src/browser-config.mjs', 'src/browser-policy.mjs', 'src/browser-activation.mjs',
   'src/cdp-setup.mjs', 'src/setup-activation.mjs', 'src/frame-keyboard.mjs', 'src/host-deps.mjs',
+  'src/host-setup.mjs', 'src/host-units.mjs', 'src/host-browser.mjs', 'src/host-display.mjs',
+  'src/host-takeover.mjs', 'src/host-doctor.mjs', 'src/cookie-migration.mjs',
   'bin/clawser.mjs', 'bin/desktop-controller.mjs',
   'public/probe.html', 'public/probe.js', 'public/probe.css',
-  'skills/browser-handoff/SKILL.md', 'runtime/desktop/Dockerfile',
+  'skills/browser-handoff/SKILL.md',
   'runtime/desktop/index.mjs', 'runtime/desktop/supervisor.py',
-  'runtime/desktop/x11-proof.cpp', 'runtime/desktop/entrypoint.sh',
-  'runtime/desktop/chromium-seccomp.json', 'runtime/desktop/MOBY-LICENSE',
+  'runtime/desktop/xproof.py', 'runtime/desktop/openbox_config.py', 'runtime/desktop/clipboard.py',
 ]) assert.ok(files.has(required), `Release archive is missing ${required}`);
 assert.equal(pkg.main, './index.mjs');
 assert.equal(pkg.bin?.clawser, './bin/clawser.mjs');
@@ -33,6 +34,7 @@ assert.ok(manifest.contracts.tools.includes('browser_handoff'));
 assert.ok(manifest.cliCommands.some(command => command.name === 'clawser' && command.hasSubcommands));
 assert.equal(archive.version, pkg.version);
 for (const path of files) {
+  assert.doesNotMatch(path, /(?:^|\/)(?:Dockerfile|\.dockerignore|entrypoint\.sh|chromium-seccomp\.json|MOBY-LICENSE)$/, `Docker desktop file in archive: ${path}`);
   assert.doesNotMatch(path, /(?:^|\/)(?:node_modules|\.git|\.env|\.openclaw|\.codex|test-artifacts)(?:\/|$)/, `Private or generated path in archive: ${path}`);
   assert.doesNotMatch(path, /(?:^|\/)(?:transport|setup|ownership|desktop-controller)\.json$/, `Local state in archive: ${path}`);
   const contents = await readFile(join(root, path), 'utf8');

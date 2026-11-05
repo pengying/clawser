@@ -1,11 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { resolveHandoffBrowser } from './browser-config.mjs';
+import { browserEndpoint } from './cdp.mjs';
 import { activationSummary, captureSetupActivation, inspectSetupActivation, logSetupActivation, requireActiveActivation, waitForSetupActivation } from './setup-activation.mjs';
 
 const identity = 'clawser-cdp-setup-v1';
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+// An install without the mark predates the noVNC default. Plain setup takes it over.
+const UPGRADE = 'run setup to switch to noVNC, or setup --cdp to keep the CDP viewer';
 
 async function syncPath(path, d) {
   const file = await d.fs.open(path, 'r');
@@ -30,20 +33,13 @@ function binding(config, o, configured = false) {
     // Old mappings cannot expand the shareable set or block switching backends.
     return resolveHandoffBrowser({ config, pluginConfig: configured ? config.plugin : {}, profile: o.specified.includes('--browser-profile') ? o.profile : undefined });
   } catch (error) {
-    throw new Error('Existing browser CDP connection is incompatible: ' + error.message + '. Configure an existing attachOnly Chromium CDP connection and keep that browser open, then retry; use --novnc for a dedicated desktop.');
+    throw new Error('Existing browser CDP connection is incompatible: ' + error.message + '. Configure an existing attachOnly Chromium CDP connection and keep that browser open, then retry, or run setup without --cdp to give the agent its own browser.');
   }
 }
 
 async function browserReady(connection, d) {
   try {
-    const response = await d.fetch(connection.cdpUrl + '/json/version', { redirect: 'error', signal: AbortSignal.timeout(5000) });
-    if (!response.ok) throw new Error('HTTP ' + response.status);
-    const value = await response.json();
-    const socket = new URL(value.webSocketDebuggerUrl);
-    const origin = new URL(connection.cdpUrl);
-    if (!/^(?:HeadlessChrome|Chrome|Chromium)\//.test(value.Browser) || socket.protocol !== 'ws:' ||
-        !['localhost', '127.0.0.1', '[::1]'].includes(socket.hostname) || socket.port !== origin.port ||
-        socket.username || socket.password || socket.search || socket.hash || !/^\/devtools\/browser\/[^/]+$/.test(socket.pathname)) throw new Error('Invalid Chromium browser endpoint');
+    await browserEndpoint(connection.cdpUrl, d);
   } catch {
     throw new Error('Existing browser CDP endpoint is unavailable or incompatible. Keep the configured browser open with its existing loopback CDP connection and retry; setup never launches a browser.');
   }
@@ -165,9 +161,10 @@ export async function runCdpSetup(o, d, h) {
       }
     }
     if (saved) await check('pinned cloudflared', () => binary(p, saved, d, h, true));
+    if (saved && saved.explicitCdp !== true) checks.push({ name: 'upgrade', ok: true, warning: true, message: UPGRADE });
     if (connection) d.log('Browser connection: ' + connection.profile + '\nCDP: ' + connection.cdpUrl);
     logSetupActivation(activation, d);
-    for (const row of checks) d.log((row.ok ? 'OK ' : 'FAIL ') + row.name + (row.message ? ': ' + row.message : ''));
+    for (const row of checks) d.log((row.warning ? 'WARN ' : row.ok ? 'OK ' : 'FAIL ') + row.name + (row.message ? ': ' + row.message : ''));
     return { ok: checks.every(row => row.ok), pending: checks.some(row => row.pending), command: o.command, backend: 'cdp', checks, stateDir: o.stateDir, activation: activationSummary(activation), ...(connection ? { profile: connection.profile, cdpUrl: connection.cdpUrl } : {}) };
   }
   const failed = checks.filter(row => !row.ok);
@@ -193,7 +190,7 @@ export async function runCdpSetup(o, d, h) {
     await h.noSymlinks(o.stateDir, d);
     await d.fs.mkdir(o.stateDir, { mode: 0o700 });
     await h.privatePath(o.stateDir, 'directory', d);
-    saved = { identity, uid: d.uid, ownerId: randomUUID(), stateDir: o.stateDir, pendingBinaryDigest: d.artifacts.cloudflared.sha256 };
+    saved = { identity, uid: d.uid, ownerId: randomUUID(), stateDir: o.stateDir, pendingBinaryDigest: d.artifacts.cloudflared.sha256, ...o.explicitCdp ? { explicitCdp: true } : {} };
     const file = await d.fs.open(p.marker, 'wx', 0o600);
     try { await file.writeFile(JSON.stringify(saved) + '\n'); await file.sync(); }
     finally { await file.close(); }
@@ -224,6 +221,11 @@ export async function runCdpSetup(o, d, h) {
       await syncPath(dirname(p.binary), d);
       saved.binaryDigest = d.artifacts.cloudflared.sha256;
       delete saved.pendingBinaryDigest;
+      await h.atomicPrivate(p.marker, JSON.stringify(saved) + '\n', d);
+      await syncPath(o.stateDir, d);
+    }
+    if (o.explicitCdp && saved.explicitCdp !== true) {
+      saved.explicitCdp = true;
       await h.atomicPrivate(p.marker, JSON.stringify(saved) + '\n', d);
       await syncPath(o.stateDir, d);
     }

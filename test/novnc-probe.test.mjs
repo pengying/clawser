@@ -7,7 +7,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { connect as connectRaw } from 'node:net';
+import { connect as connectRaw, createServer as createNetServer } from 'node:net';
 import { Duplex } from 'node:stream';
 import { WebSocket } from 'ws';
 import { CdpConnection } from '../src/cdp.mjs';
@@ -28,7 +28,7 @@ class FakeSupervisor {
   instances = new Map();
   verify = true;
   destroyError = false;
-  endpoint = { host: '127.0.0.1', port: 59080 };
+  endpoint = { path: '/tmp/fixture.sock' };
   credentials = { watch: 'watch123', control: 'admin456' };
   async create({ probeId, expiresAt }) {
     this.calls.push(['create', probeId, expiresAt]);
@@ -66,9 +66,9 @@ async function setup(t, options = {}) {
     heartbeatMs: options.heartbeatMs,
     upstreamConnectMs: options.upstreamConnectMs,
     maxProbes: options.maxProbes,
-    tcpConnect: options.tcpConnect || (async () => {
+    ...(options.defaultUpstream ? {} : { upstreamConnect: options.upstreamConnect || (async () => {
       const socket = new MemoryVncSocket(); sockets.push(socket); return socket;
-    }),
+    }) }),
   });
   await gateway.start({ port: 0 });
   t.after(() => gateway.close());
@@ -104,8 +104,8 @@ function openSocket(ctx, cookie, generation = 0, origin = ctx.origin) {
 }
 
 test('private LAN HTTP requires an explicit opt-in and canonical RFC1918 IPv4 literal', async (t) => {
-  assert.throws(() => new NoVncProbeGateway({ supervisor: new FakeSupervisor(), publicBaseUrl: 'http://10.0.0.214:0', allowLanHttp: true }), /origin|port/i);
-  const privateOrigins = ['http://10.0.0.214:19400', 'http://172.16.0.1:19400', 'http://172.31.255.254:19400', 'http://192.168.1.1:19400'];
+  assert.throws(() => new NoVncProbeGateway({ supervisor: new FakeSupervisor(), publicBaseUrl: 'http://10.20.30.40:0', allowLanHttp: true }), /origin|port/i);
+  const privateOrigins = ['http://10.20.30.40:19400', 'http://172.16.0.1:19400', 'http://172.31.255.254:19400', 'http://192.168.1.1:19400'];
   for (const publicBaseUrl of privateOrigins) {
     assert.throws(() => new NoVncProbeGateway({ supervisor: new FakeSupervisor(), publicBaseUrl }), /origin|HTTPS/i);
     assert.throws(() => new NoVncProbeGateway({ supervisor: new FakeSupervisor(), publicBaseUrl, allowLanHttp: 'true' }), /origin|HTTPS/i);
@@ -114,7 +114,7 @@ test('private LAN HTTP requires an explicit opt-in and canonical RFC1918 IPv4 li
     assert.equal(gateway.origin, publicBaseUrl);
   }
   for (const host of ['0.0.0.0', '8.8.8.8', '169.254.169.254', '100.64.0.1', '172.15.255.255', '172.32.0.1',
-    '192.169.0.1', 'lan.example', '10.0.0.214.nip.io', '[fd00::1]', '[::ffff:10.0.0.214]', '0x0a0000d6', '012.0.0.214', '10.214', '167772374']) {
+    '192.169.0.1', 'lan.example', '10.20.30.40.nip.io', '[fd00::1]', '[::ffff:10.20.30.40]', '0x0a141e28', '012.20.30.40', '10.1318440', '169090600']) {
     for (const allowLanHttp of [false, true]) {
       assert.throws(() => new NoVncProbeGateway({ supervisor: new FakeSupervisor(), publicBaseUrl: `http://${host}:19400`, allowLanHttp }), /origin|HTTPS/i, host);
     }
@@ -130,32 +130,32 @@ function mockListener(gateway) {
 }
 
 test('LAN listener requires the configured private address and port; other origins stay on loopback', async (t) => {
-  const gateway = new NoVncProbeGateway({ supervisor: new FakeSupervisor(), publicBaseUrl: 'http://10.0.0.214:19400', allowLanHttp: true });
+  const gateway = new NoVncProbeGateway({ supervisor: new FakeSupervisor(), publicBaseUrl: 'http://10.20.30.40:19400', allowLanHttp: true });
   t.after(() => gateway.close());
   const bindings = mockListener(gateway);
-  for (const host of ['127.0.0.1', '0.0.0.0', '10.0.0.215', '8.8.8.8', 'localhost', '[::1]']) {
+  for (const host of ['127.0.0.1', '0.0.0.0', '10.20.30.41', '8.8.8.8', 'localhost', '[::1]']) {
     await assert.rejects(gateway.start({ host }), /bind|listen|LAN/i, host);
   }
-  await assert.rejects(gateway.start({ host: '10.0.0.214', port: 19401 }), /bind|listen|LAN/i);
+  await assert.rejects(gateway.start({ host: '10.20.30.40', port: 19401 }), /bind|listen|LAN/i);
   assert.deepEqual(bindings, [], 'invalid configurations cannot call listen');
-  assert.equal(await gateway.start({ host: '10.0.0.214', port: 19400 }), 'http://10.0.0.214:19400');
-  assert.deepEqual(bindings, [{ host: '10.0.0.214', port: 19400 }]);
+  assert.equal(await gateway.start({ host: '10.20.30.40', port: 19400 }), 'http://10.20.30.40:19400');
+  assert.deepEqual(bindings, [{ host: '10.20.30.40', port: 19400 }]);
 
   for (const options of [{}, { publicBaseUrl: 'https://fixture.example' }, { publicBaseUrl: 'https://fixture.example', allowLanHttp: true },
     { publicBaseUrl: 'http://localhost:19400' }, { publicBaseUrl: 'http://[::1]:19400', allowLanHttp: true }]) {
     const local = new NoVncProbeGateway({ supervisor: new FakeSupervisor(), ...options });
     t.after(() => local.close());
     const localBindings = mockListener(local);
-    for (const host of ['10.0.0.214', '0.0.0.0', '8.8.8.8', 'localhost', '::1']) await assert.rejects(local.start({ host }), /bind|listen|LAN/i);
+    for (const host of ['10.20.30.40', '0.0.0.0', '8.8.8.8', 'localhost', '::1']) await assert.rejects(local.start({ host }), /bind|listen|LAN/i);
     assert.equal(await local.start(), 'http://127.0.0.1:19400');
     assert.deepEqual(localBindings, [{ host: '127.0.0.1', port: 19400 }]);
     assert.equal(local.origin, options.publicBaseUrl || 'http://127.0.0.1:19400');
   }
 });
 
-test('only opted-in LAN HTTP omits Secure while retaining scoped authentication and loopback VNC', async (t) => {
+test('only opted-in LAN HTTP omits Secure while retaining scoped authentication and the private VNC socket', async (t) => {
   for (const options of [
-    { publicBaseUrl: 'http://10.0.0.214:19400', allowLanHttp: true },
+    { publicBaseUrl: 'http://10.20.30.40:19400', allowLanHttp: true },
     { publicBaseUrl: 'https://fixture.example' },
     { publicBaseUrl: 'https://fixture.example', allowLanHttp: true },
     {},
@@ -164,7 +164,7 @@ test('only opted-in LAN HTTP omits Secure while retaining scoped authentication 
     const gateway = new NoVncProbeGateway({ supervisor, ...options });
     t.after(() => gateway.close());
     mockListener(gateway);
-    await gateway.start(options.allowLanHttp && options.publicBaseUrl.startsWith('http:') ? { host: '10.0.0.214' } : {});
+    await gateway.start(options.allowLanHttp && options.publicBaseUrl.startsWith('http:') ? { host: '10.20.30.40' } : {});
     const invite = await gateway.createProbe({ ttlSeconds: 60 });
     const session = gateway.sessions.get(invite.id);
     assert.equal(gateway.status(invite.id).transport.route, options.publicBaseUrl?.startsWith('http://10.') ? 'lan' : options.publicBaseUrl?.startsWith('https:') ? 'https' : 'loopback');
@@ -172,14 +172,14 @@ test('only opted-in LAN HTTP omits Secure while retaining scoped authentication 
     let headers;
     gateway.claim({ writeHead: (_status, value) => { headers = value; }, end() {} }, session, { token: new URL(invite.url).hash.slice('#invite='.length) });
     const cookie = headers['Set-Cookie'];
-    const isLan = options.publicBaseUrl === 'http://10.0.0.214:19400';
+    const isLan = options.publicBaseUrl === 'http://10.20.30.40:19400';
     assert.equal(/; Secure(?:;|$)/.test(cookie), !isLan);
     assert.match(cookie, /HttpOnly; (?:Secure; )?SameSite=Strict/);
     assert.ok(cookie.includes(`Path=/probe/novnc/${invite.id}/; Max-Age=`));
     assert.equal(session.mode, 'watch');
-    assert.deepEqual(session.endpoint, { host: '127.0.0.1', port: 59080 });
+    assert.deepEqual(session.endpoint, { path: '/tmp/fixture.sock' });
     assert.equal(gateway.originAllowed({ headers: { origin: gateway.origin } }), true);
-    assert.equal(gateway.originAllowed({ headers: { origin: 'http://10.0.0.215:19400' } }), false);
+    assert.equal(gateway.originAllowed({ headers: { origin: 'http://10.20.30.41:19400' } }), false);
     assert.throws(() => gateway.authorize({ headers: { cookie: 'novnc_probe=wrong' } }, session), /session/i);
     await gateway.end(session, 'done');
     assert.equal(session.mode, 'ended');
@@ -187,12 +187,12 @@ test('only opted-in LAN HTTP omits Secure while retaining scoped authentication 
   }
 
   const supervisor = new FakeSupervisor();
-  supervisor.endpoint.host = '10.0.0.214';
-  const gateway = new NoVncProbeGateway({ supervisor, publicBaseUrl: 'http://10.0.0.214:19400', allowLanHttp: true });
+  supervisor.endpoint = { host: '10.20.30.40', port: 59080 };
+  const gateway = new NoVncProbeGateway({ supervisor, publicBaseUrl: 'http://10.20.30.40:19400', allowLanHttp: true });
   t.after(() => gateway.close());
   mockListener(gateway);
-  await gateway.start({ host: '10.0.0.214' });
-  await assert.rejects(gateway.createProbe(), (error) => /fixed loopback VNC/.test(error.cause?.message));
+  await gateway.start({ host: '10.20.30.40' });
+  await assert.rejects(gateway.createProbe(), (error) => /private VNC socket/.test(error.cause?.message));
 });
 
 async function socketOutcome(socket) {
@@ -219,14 +219,77 @@ async function settledToWatch(ctx) {
   assert.equal(ctx.gateway.status(ctx.invite.id).mode, 'watch');
 }
 
-test('creation registers only the fixed owned loopback endpoint and returns a secret in the fragment', async (t) => {
+test('creation registers only the owned private socket and returns a secret in the fragment', async (t) => {
   const ctx = await setup(t);
   assert.deepEqual(ctx.supervisor.calls.slice(0, 3).map(([name]) => name), ['create', 'read', 'register']);
   assert.match(ctx.invite.url, /^http:\/\/127\.0\.0\.1:\d+\/probe\/novnc\/[a-f0-9]{32}\/#invite=[A-Za-z0-9_-]{43}$/);
   assert.equal(ctx.invite.url.includes(ctx.supervisor.credentials.watch), false);
   assert.equal(ctx.invite.url.includes(ctx.supervisor.credentials.control), false);
   const session = ctx.gateway.sessions.get(ctx.invite.id);
-  assert.deepEqual(session.endpoint, { host: '127.0.0.1', port: 59080 });
+  assert.deepEqual(session.endpoint, { path: '/tmp/fixture.sock' });
+});
+
+test('registration with a TCP endpoint or relative path is refused', async (t) => {
+  const refused = [
+    { host: '127.0.0.1', port: 59080 },
+    { path: '/tmp/fixture.sock', host: '127.0.0.1' },
+    { path: '/tmp/fixture.sock', port: 59080 },
+    { path: 'fixture.sock' },
+    { path: './run/fixture.sock' },
+    { path: '/tmp/fixture\n.sock' },
+    { path: '/tmp/fixture\x7f.sock' },
+    { path: '/' + 'a'.repeat(107) },
+    { path: '/' + '\u00e9'.repeat(54) },
+    { path: 42 },
+    {},
+    '/tmp/fixture.sock',
+  ];
+  for (const endpoint of refused) {
+    const supervisor = new FakeSupervisor();
+    supervisor.endpoint = endpoint;
+    const gateway = new NoVncProbeGateway({ supervisor });
+    t.after(() => gateway.close());
+    mockListener(gateway);
+    await gateway.start();
+    await assert.rejects(gateway.createProbe(), (error) => /private VNC socket/.test(error.cause?.message), JSON.stringify(endpoint));
+    assert.deepEqual(supervisor.calls.slice(-2).map(([name]) => name), ['destroy', 'verifyExited']);
+  }
+  // The limit counts bytes: 53 two-byte characters fit, 54 do not.
+  for (const path of ['/' + 'a'.repeat(106), '/' + '\u00e9'.repeat(53)]) {
+    assert.equal(Buffer.byteLength(path), 107);
+    const supervisor = new FakeSupervisor();
+    supervisor.endpoint = { path };
+    const gateway = new NoVncProbeGateway({ supervisor });
+    t.after(() => gateway.close());
+    mockListener(gateway);
+    await gateway.start();
+    const invite = await gateway.createProbe();
+    assert.deepEqual(gateway.sessions.get(invite.id).endpoint, { path });
+  }
+});
+
+test('the default upstream connects to the registered private socket', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'novnc-upstream-'));
+  const path = join(directory, 'vnc.sock');
+  const accepted = [];
+  const server = createNetServer((socket) => { accepted.push(socket); socket.write('RFB 003.008\n'); });
+  await new Promise((resolve) => server.listen(path, resolve));
+  t.after(async () => {
+    for (const socket of accepted) socket.destroy();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  });
+  const supervisor = new FakeSupervisor();
+  supervisor.endpoint = { path };
+  const ctx = await setup(t, { supervisor, defaultUpstream: true });
+  const cookie = await claim(ctx);
+  const { body } = await credentials(ctx, cookie);
+  const viewer = openSocket(ctx, cookie, body.generation);
+  const greeting = once(viewer, 'message');
+  assert.equal((await socketOutcome(viewer)).status, 101);
+  assert.equal(String((await greeting)[0]), 'RFB 003.008\n');
+  assert.equal(accepted.length, 1);
+  viewer.terminate();
 });
 
 test('claim is one-use, origin-bound, and establishes a scoped hardened cookie', async (t) => {
@@ -408,7 +471,7 @@ test('duplicate upgrades cannot clear an in-flight stream reservation', async (t
   const held = new Promise((resolve) => { allowConnect = resolve; });
   t.after(allowConnect);
   const sockets = [];
-  const ctx = await setup(t, { tcpConnect: async () => {
+  const ctx = await setup(t, { upstreamConnect: async () => {
     const socket = new MemoryVncSocket();
     sockets.push(socket);
     await held;
@@ -436,7 +499,7 @@ test('an upstream connect deadline destroys a late VNC socket and the owned serv
   const connecting = new Promise((resolve) => { started = resolve; });
   t.after(allowConnect);
   const late = new MemoryVncSocket();
-  const ctx = await setup(t, { upstreamConnectMs: 20, tcpConnect: async () => { started(); await waiting; return late; } });
+  const ctx = await setup(t, { upstreamConnectMs: 20, upstreamConnect: async () => { started(); await waiting; return late; } });
   const cookie = await claim(ctx);
   await credentials(ctx, cookie);
   const attempt = openSocket(ctx, cookie);
@@ -455,7 +518,7 @@ test('a raw viewer that leaves during upstream connect cannot leak the late sock
   const connecting = new Promise((resolve) => { started = resolve; });
   t.after(allowConnect);
   const late = new MemoryVncSocket();
-  const ctx = await setup(t, { upstreamConnectMs: 200, tcpConnect: async () => { started(); await waiting; return late; } });
+  const ctx = await setup(t, { upstreamConnectMs: 200, upstreamConnect: async () => { started(); await waiting; return late; } });
   const cookie = await claim(ctx);
   await credentials(ctx, cookie);
   const attempt = openSocket(ctx, cookie);

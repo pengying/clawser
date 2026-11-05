@@ -10,7 +10,7 @@ const owner = JSON.stringify(['agent:main:main', 'fixture-owner']);
 const id = 'a'.repeat(32);
 const row = () => ({ id, owner, profile: 'fixture', state: 'recovery_required', reason: 'done', recoveryStage: 'input_fence', mayBeWritable: true, epoch: 35, displayGeneration: 'display', browserGeneration: 'browser' });
 const receipt = () => ({ leaseId: id, epoch: 36, displayGeneration: 'display', browserGeneration: 'browser', readOnly: false, inputResetRequired: true, vncProcessesExited: true, xClientsAbsent: true, heldInputCleared: true, xSyncComplete: true, retirementReason: 'heartbeat_timeout' });
-const status = () => ({ ready: true, tainted: false, viewer: null, epoch: 36, displayGeneration: 'display', browserGeneration: 'browser', browserSandbox: true, authenticatedInternetReady: true });
+const status = () => ({ ready: true, browserReady: true, tainted: false, viewer: null, epoch: 36, displayGeneration: 'display', browserGeneration: 'browser' });
 const observation = () => ({ snapshotObserved: true, displayGeneration: 'display', browserGeneration: 'browser' });
 async function fixture(t, overrides = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), 'desktop-recovery-'));
@@ -31,7 +31,7 @@ test('lost host retirement response followed by watchdog settlement stays blocke
   if (!recovery) return;
   const f = await fixture(t);
   let available = false;
-  f.runtime.startViewer = async ({ leaseId }) => ({ leaseId, role: 'watch', epoch: 34, displayGeneration: 'display', browserGeneration: 'browser', host: '127.0.0.1', port: 59090, password: 'fixture' });
+  f.runtime.startViewer = async ({ leaseId }) => ({ leaseId, role: 'watch', epoch: 34, displayGeneration: 'display', browserGeneration: 'browser', socketPath: '/tmp/fixture.sock', password: 'fixture' });
   f.runtime.promoteViewer = async ({ leaseId }) => ({ ...(await f.runtime.startViewer({ leaseId })), role: 'control', epoch: 35 });
   f.runtime.stopViewerAndSettle = async params => { if (!available) throw new Error('fixture host transport loss'); return receipt(); };
   f.runtime.heartbeatViewer = async params => ({ ok: true, ...params });
@@ -79,6 +79,14 @@ for (const scenario of ['active-call', 'active-lease', 'other-failed-lease', 'ac
   assert.notEqual((await f.journal()).leases[id].state, 'ended');
 });
 
+test('offline reconciliation refuses a browser that is not ready and keeps failed authority fenced', async t => {
+  const f = await fixture(t);
+  f.runtime.status = async () => { f.events.push('status'); return { ...status(), browserReady: false }; };
+  await assert.rejects(recovery.reconcileDesktop(f.options, f.dependencies), { code: 'DESKTOP_RECOVERY_RUNTIME_NOT_IDLE_OR_CHANGED' });
+  assert.deepEqual(f.events, ['status']);
+  assert.equal((await f.journal()).leases[id].state, 'recovery_required');
+});
+
 test('offline reconciliation refuses the running controller lock before reading runtime', async t => {
   if (!recovery) return;
   const f = await fixture(t);
@@ -107,6 +115,24 @@ test('operator binary reports a fixed code for an invalid private configuration'
   const result = await promisify(execFile)(process.execPath, ['bin/reconcile-desktop.mjs', '/missing-private-config', id]).catch(error => error);
   assert.equal(result.code, 1);
   assert.equal(result.stderr.trim(), 'Desktop recovery refused: DESKTOP_RECOVERY_CONFIG_INVALID');
+});
+
+test('operator binary builds the host runtime from controller.json relative to its folder', async t => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const stateDir = await mkdtemp(join(tmpdir(), 'desktop-recovery-bin-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const config = join(stateDir, 'controller.json');
+  const refusal = async runtime => {
+    await writeFile(config, JSON.stringify({ stateDir: '.', profile: 'fixture', socketPath: 'desktop.sock', runtime }), { mode: 0o600 });
+    const result = await promisify(execFile)(process.execPath, ['bin/reconcile-desktop.mjs', config, id]).catch(error => error);
+    assert.equal(result.code, 1);
+    return result.stderr.trim();
+  };
+  // A Docker-era runtime block names no control socket and fails closed.
+  assert.equal(await refusal({ name: 'openclaw-handoff-desktop', cdpPort: 18812, vncPort: 59092 }), 'Desktop recovery refused: DESKTOP_RECOVERY_CONFIG_INVALID');
+  // A relative control socket resolves against the config folder. Recovery then stops at the missing journal.
+  assert.equal(await refusal({ controlSocket: 'run/supervisor.sock', cdpUrl: 'http://127.0.0.1:18820' }), 'Desktop recovery refused: DESKTOP_RECOVERY_INVALID_JOURNAL');
 });
 
 

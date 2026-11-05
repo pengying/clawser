@@ -1,45 +1,69 @@
 # Clawser
 
-**Let a human take over the agent’s existing browser tab from a phone, then hand it back.**
+**Let a human take over the agent’s browser from a phone, then hand it back.**
 
-Clawser gives OpenClaw a temporary HTTPS link to a selected tab in its already
-configured default Chromium browser. Open the link in a regular mobile browser,
-take control for a CAPTCHA, login or sensitive form step, then press **Done**.
-The agent checks the page again and continues the pending task in that same tab.
-
-Default setup uses the existing **OpenClaw browser connection**, which is not
-automatically your everyday OS Chrome profile. It never launches another browser,
-creates a Chrome user-data directory, copies cookies, guesses a CDP port or falls
-back to a different browser. Keep the configured browser running.
-
-- Selected-tab viewing through CDP screencast images, with touch scrolling,
-  pinch/pan, zoom, a mobile keyboard and device paste.
-- Phone controls for supported native HTML selects and classic RGB color fields.
-- Explicit **Keyboard** control after tapping a cross-origin frame field; this
-  grants manual keyboard input to the focused frame, not verified field autofill.
-- Browser-tool coordination that keeps automation paused when human input or
-  handback is uncertain. Done preserves the browser, tabs, cookies and profile.
-- Optional `--novnc` setup for a dedicated Docker desktop when you need browser
-  chrome, all tabs, popup switching, native OS dialogs or system clipboard access.
+Clawser gives OpenClaw a temporary HTTPS link to the agent's browser. Open the
+link in a regular mobile browser, take control for a CAPTCHA, login or sensitive
+form step, then press **Done**. The agent checks the page again and continues
+the pending task.
 
 The recipient needs no VPN or app installation. A Cloudflare HTTPS tunnel exposes
 only the authenticated viewer, never the Gateway or browser debugging endpoint.
+
+## How it works
+
+```text
+phone ──HTTPS──> Cloudflare tunnel ──> controller (127.0.0.1)
+                                            │
+                                            ▼
+                  supervisor ──starts──> x11vnc (private socket)
+                                            │
+                                    virtual screen (Xvfb + openbox)
+                                                          │
+agent ──browser tool──> Clawser gate ──CDP (127.0.0.1)──> Chrome on that screen
+```
+
+- **The agent has its own Chrome.** It runs on a virtual screen on the Gateway
+  host, under five systemd user services that Clawser manages. It is not your
+  everyday browser.
+- **A link shows the whole browser.** You see the whole window and every tab in
+  it, through noVNC. Native dropdowns, date pickers, file choosers, dialogs and
+  popups all work.
+- **Watch-only links** show what the agent is doing, without control.
+- **No Docker.** Clawser needs Linux x86_64, systemd user services, Xvfb,
+  x11vnc, python3, the X client libraries libX11, libXRes, libXtst and libXi,
+  and Google Chrome or Chromium. openbox is recommended. Setup installs none of
+  them. It prints the install command for whatever is missing.
+- **Two ways to set up the browser.** Option A, the default, creates a new
+  browser profile that starts with no logins. You sign in to sites through a
+  handoff link the first time. Option B, `--browser-profile <name>`, takes over a
+  browser profile OpenClaw already uses and keeps its logins. Setup closes that
+  browser and restarts it on the virtual screen, so it needs `--yes`.
+- **The CDP viewer is still available.** `setup --cdp` shares one tab of an
+  existing browser instead. Dropdowns and color fields get phone controls.
+  Date pickers, file choosers, dialogs, popups and browser menus don't reach the
+  phone.
+- **Upgrades need a setup run.** See [Upgrade](#upgrade).
+- **Security, plainly.** There is no container and no network firewall around
+  the browser. Chrome runs in its normal OS sandbox. Only your account can reach
+  the VNC server and the virtual screen. Other accounts on the same machine can
+  reach the browser's debugging port, so use a machine you don't share. Anyone
+  who opens a link sees every tab in the agent's browser.
 
 ## Install
 
 The validated host is **Linux x86_64**, **Node.js >=24.16 <25 or >=26.1**, and
 **OpenClaw 2026.10.4+** with the native trusted-tool-policy API. Native fixtures
 cover 2026.10.4 and 2026.10.7. Other operating systems and ARM hosts are unverified.
-Start your OpenClaw Gateway and the configured attach-only browser before setup.
-Default setup needs no Docker, user systemd, `flock`, `tar` or noVNC download.
+Start your OpenClaw Gateway before setup.
 
-Install the tagged **v0.6.3** release from GitHub. ClawHub availability may lag
-GitHub; use v0.5.0 or newer for the CDP-default behavior described here.
+Install the tagged **v0.7.0** release from GitHub. ClawHub availability may lag
+GitHub.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.6.3 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.7.0 --force --accept-capabilities
 openclaw clawser setup --dry-run
-openclaw clawser setup
+openclaw clawser setup --yes
 openclaw clawser doctor
 ```
 
@@ -47,28 +71,38 @@ openclaw clawser doctor
 contracts through OpenClaw. Use the supported native capability-acceptance flow
 for installs, updates and enabling; do not hand-write acknowledgement settings.
 
-Setup validates the current default profile’s explicit loopback CDP origin and
-`attachOnly=true`, verifies a checksum-pinned cloudflared download, configures
-the viewer and reloads the plugin. Use `--browser-profile NAME` to select another
-**existing configured connection** and make it the OpenClaw default; this does
-not create a Chrome profile. An incompatible or unavailable connection fails
-with guidance, without starting or substituting a browser.
+The dry run prints exactly what setup will do and changes nothing. It shows
+which browser setup will close and how many keyring-encrypted cookies it will
+move. With `--no-migrate-cookies`, it warns how many will be unreadable. A real run
+refuses to close a browser, take over services or move cookies without `--yes`.
+Add `--browser-profile <name>` for option B, or `--cdp` for the CDP viewer.
 
 Follow setup’s printed activation instructions, then run `doctor` and ask the
 owner session to list tabs. See [installation and maintenance](docs/install.md)
-for connection requirements, the optional noVNC desktop, upgrades and recovery.
+for requirements, options A and B, keyring cookies, undoing setup and recovery.
 
 ### Upgrade
 
-Finish any open handoffs, then install the new tag over the old one and check it:
+From 0.6.x, setup moves a CDP install to noVNC with the browser profile it
+already uses. That profile must point at `127.0.0.1`, not `localhost`. Setup
+refuses a `localhost` profile before it stops anything, and says how to fix it.
+To keep the CDP viewer, run `setup --cdp` in step 3 instead. A
+Docker desktop install becomes option A. Setup prints the commands that remove
+its old Docker resources, and never runs them.
 
-```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.6.3 --force --accept-capabilities
-openclaw clawser doctor
-```
+Finish any open handoffs, then:
 
-Each tag installs into its own directory, and setup and doctor accept the move.
-The optional noVNC desktop has [its own upgrade steps](docs/install.md#upgrade).
+1. Install the new version:
+
+   ```sh
+   openclaw plugins install git:github.com/pengying/clawser@v0.7.0 --force --accept-capabilities
+   ```
+
+2. Check the plan with `openclaw clawser setup --dry-run`.
+3. Run `openclaw clawser setup --yes`.
+
+A `git:` install moves the plugin folder, so rerun setup after every upgrade.
+
 The package is **`@pengying/clawser`**, the plugin ID is `browser-handoff` and the
 agent tool is `browser_handoff`.
 
@@ -84,19 +118,22 @@ Ask OpenClaw in your private owner conversation:
 3. Complete the manual step and press **Done**.
 4. The agent waits for safe handback and takes a fresh browser snapshot.
 
-CDP shares the **selected tab**. Full browser UI, native OS dialogs and automatic
-popup switching require the optional noVNC desktop, which shares the **entire
-profile**, including all tabs, dialogs and the system clipboard during control.
-Choose a browser whose contents you intend to share. noVNC offers explicit
-plain-text clipboard transfer with a manual fallback, without file transfer or
-automatic clipboard sync. Device paste works in CDP;
-it does not synchronize or copy the remote OS clipboard. Phone autofill and
-passkeys do not automatically transfer to the remote browser.
+A noVNC link shares the **whole browser**: every tab, dialog and the browser's
+clipboard during control. The CDP viewer shares the **selected tab**. Choose a
+browser whose contents you intend to share.
+
+To move text, take control and use the viewer's **Copy** and **Paste** buttons.
+Copy sends the browser's current selection to your phone. Paste sends your
+phone's clipboard text to the focused field. When the phone blocks clipboard
+access, a text box opens to copy or paste by hand. Only plain text moves. There
+is no file transfer and no automatic clipboard sync. In the CDP viewer, your
+phone's own paste works in a focused field, but nothing is copied back. Phone
+autofill and passkeys don't transfer to the agent's browser.
 
 CAPTCHA, login and form completion are manual human actions. Support varies by
-site and phone. The CDP viewer uses screencast images, not native video; there are
-no guarantees about frame rate, network latency or a site’s automation detection.
-Physical iOS Safari coverage remains unverified.
+site and phone. Neither viewer is native video; there are no guarantees about
+frame rate, network latency or a site’s automation detection. Physical iOS
+Safari coverage remains unverified.
 
 An invitation is a **one-use bearer credential**, with one viewer connection at
 a time. Reopening it in the same browser can resume its valid viewer cookie;
@@ -111,15 +148,14 @@ keeps the invitation in watch mode until expiry. noVNC settles input with the
 full fence first. Control needs **Take control** again.
 There is **no human-inactivity timeout**. A dropped connection may take a
 heartbeat interval to detect. First-link tunnel readiness can take up to 90
-seconds. Ending a handoff leaves the browser, tabs, cookies and profile intact;
-CDP has no browser idle-cleanup lifecycle.
+seconds. Ending a handoff leaves the browser, tabs, cookies and profile intact.
 
-CDP allows invitations for different tabs (up to 100), one invitation per same
-tab, and **one human control session per Gateway**. Another takeover receives a
-busy response; there is no queue. noVNC allows one active invitation per controller.
-Use distinct browser connections for personal and family Gateways. Sharing one
-Chrome instance across multiple Gateways is unsupported: there is no cross-process
-control coordination.
+noVNC allows one active invitation per controller. CDP allows invitations for
+different tabs (up to 100), one invitation per same tab, and **one human control
+session per Gateway**. Another takeover receives a busy response; there is no
+queue. Use distinct browser connections for personal and family Gateways.
+Sharing one Chrome instance across multiple Gateways is unsupported: there is no
+cross-process control coordination.
 
 ## Agent tool and browser routing
 
@@ -168,10 +204,14 @@ for native-ingress requirements and exact matching rules.
 
 ## Safety and limits
 
-Default CDP runs in the host browser’s normal OS sandbox; it adds no Docker
-isolation. The optional desktop keeps Chromium’s sandbox enabled and restricts
-ordinary browser egress. Neither mode guarantees containment of a compromised
-browser or safety of every website.
+There is no container and no egress firewall. The agent's Chrome runs in its
+normal OS sandbox, like any desktop Chrome. Neither viewer guarantees
+containment of a compromised browser or safety of every website.
+
+The VNC server listens only on a private socket in a folder only your account
+can open. The virtual screen requires a cookie only your account can read. The
+browser's debugging port listens on 127.0.0.1, where other accounts on the same
+machine can reach it and control the browser. Use a machine you don't share.
 
 Clawser coordinates OpenClaw’s normal browser-tool path. It does not stop
 arbitrary shell commands, independent CDP clients or manual desktop operators.
@@ -179,20 +219,21 @@ Never use those routes to bypass a gate. Keep automation paused and follow
 recovery guidance if input retirement or fresh observation cannot be established.
 
 See [SECURITY.md](SECURITY.md) for the trust model and disclosure, and
-[desktop runtime documentation](runtime/desktop/README.md) for the optional
-noVNC implementation.
+[desktop runtime documentation](runtime/desktop/README.md) for the noVNC
+implementation.
 
 ## Development
 
 ```sh
 npm ci --ignore-scripts
 npm test
-npm run test:runtime
+npm run test:desktop
 npm run check:package
 ```
 
 Browser fixtures require local Chrome/Chromium (`CHROME_BIN`). RFB pointer tests
-also require pinned noVNC assets (`NOVNC_ASSETS_DIR`). Full Docker tests are opt-in.
+also require pinned noVNC assets (`NOVNC_ASSETS_DIR`). Desktop tests skip when
+Xvfb, x11vnc or python3 is missing.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for source installation and release checks.
 Releases contain a plugin archive and SHA-256 checksums; there is no npm registry
 publication step.

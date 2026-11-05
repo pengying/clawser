@@ -39,7 +39,7 @@
         "additionalProperties": {
           "type": "string"
         },
-        "description": "Optional additional existing host CDP profiles. Every mapping must match an eligible attach-only Chromium host profile; the configured default is included automatically."
+        "description": "CDP viewer only: optional additional existing host CDP profiles. Every mapping must match an eligible attach-only Chromium host profile; the configured default is included automatically."
       },
       "funnel": {
         "type": "object",
@@ -63,7 +63,7 @@
       "desktop": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Explicit noVNC full-browser handoff through an operator-managed private Unix controller. When disabled or absent, reuse the existing configured default Chromium browser through CDP without starting a browser. Both modes require attachOnly=true and a matching explicit loopback CDP origin.",
+        "description": "noVNC full-browser handoff, the default that setup configures. The agent's browser runs on a private virtual screen behind a private Unix controller. When disabled or absent, the one-tab CDP viewer reuses the existing configured default Chromium browser without starting one. Both modes require attachOnly=true and a matching explicit loopback CDP origin.",
         "properties": {
           "enabled": {
             "type": "boolean",
@@ -75,7 +75,7 @@
           },
           "profile": {
             "type": "string",
-            "description": "Required when enabled: dedicated ordinary OpenClaw browser profile shared with the controller; handoff includes all tabs"
+            "description": "Required when enabled: the OpenClaw browser profile of the agent's browser on the virtual screen; handoff includes all tabs"
           }
         }
       },
@@ -92,7 +92,7 @@
       "cloudflare": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Optional operator-managed Cloudflare Quick Tunnel for existing-browser CDP mode. Exposes the authenticated viewer only, never CDP. Mutually exclusive with Funnel. Desktop uses its separate controller transport.",
+        "description": "Optional operator-managed Cloudflare Quick Tunnel for the CDP viewer. Exposes the authenticated viewer only, never CDP. Mutually exclusive with Funnel. The noVNC handoff uses its controller's own tunnel.",
         "properties": {
           "enabled": {
             "type": "boolean",
