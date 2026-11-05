@@ -369,6 +369,11 @@ next setup run.
   Setup refuses a `localhost` profile before it stops anything. Change it with
   `openclaw config set browser.profiles.<name>.cdpUrl http://127.0.0.1:<port>`,
   then rerun setup.
+- **A CDP install that replaced an older desktop.** CDP setup switched that
+  desktop off but kept the `socketPath` and `profile` fields that name it.
+  Setup won't take over a desktop it didn't create, so it stops and prints the
+  `openclaw config unset` command for each field. Run them only if that
+  desktop is no longer used, then rerun setup.
 - **A Docker desktop install.** Links stop working after the upgrade, and doctor
   says to rerun setup. Setup converts it to option A, because the container's
   profile can't move to Chrome on the host. It prints the commands that remove
