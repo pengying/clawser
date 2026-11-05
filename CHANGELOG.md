@@ -2,7 +2,7 @@
 
 ## 0.7.2
 
-- The skill now asks the owner before an agent looks up saved details, such as a profile, contacts or memory, and before it reads a code from the owner's email or messages. It asks once per task, names the fields and the site, and uses them only there. A texted code can still come back as a chat reply, and the agent offers a handoff link for owners who would rather type it in themselves. It uses a code once and doesn't repeat or store it.
+- The skill now has the agent check the page is on the site the owner asked for, and fill only the fields a step requires. It asks the owner before it looks up saved details, such as a profile, contacts or memory, and before it reads a code from the owner's email or messages. It asks once per task, names the fields and the site, and uses them only there. Details given for one site or task don't carry over to another. A texted code can still come back as a chat reply, and the agent offers a handoff link for owners who would rather type it in themselves. It uses a code once and doesn't repeat or store it.
 - Option B no longer moves keyring cookies by default. Moved cookies lose the keyring's encryption and are protected only by file permissions, so the move is now opt-in with `--migrate-cookies`. Without it, setup warns how many cookies won't carry over. An export that a failed import left behind still resumes on a rerun, since it may be the only readable copy of those logins; `--no-migrate-cookies` removes it.
 - Option B refuses a browser profile folder that other users can read, before it stops anything. It used to warn and carry on. Run the `chmod 700` it prints, then rerun setup.
 

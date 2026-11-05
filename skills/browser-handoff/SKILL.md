@@ -22,22 +22,26 @@ cannot establish it. Do not disclose unrelated tabs.
 
 A handoff link is for the one step only the owner can do. Before creating one:
 
-1. Fill every field you can from this conversation and from what the owner
-   gave you for this task.
-2. To fill the rest from the owner's saved details, such as a profile,
-   contacts or memory, ask first. Name the fields and the site, for example
-   "Can I use your saved address and phone number for the Acme sign-up?" Look
-   them up only after the owner agrees, and only for that site and task.
-3. Trigger the step yourself: press "Send code", "Call me" or "Email me a link".
-4. Read a sent code from the owner's email or messages only after the owner
+1. Check that the page is on the site the owner asked you to use. If the
+   address differs, stop and ask.
+2. Fill only the fields that step requires, and leave optional ones empty.
+   Use what the owner gave you in this conversation for this site and task.
+   Something they gave for another site or task doesn't count.
+3. For a required field you can't fill that way, ask before using the owner's
+   saved details, such as a profile, contacts or memory. Name the fields and
+   the site, for example "Can I use your saved address and phone number for the
+   Acme sign-up?" Look them up only after the owner agrees, and only for that
+   site and task.
+4. Trigger the step yourself: press "Send code", "Call me" or "Email me a link".
+5. Read a sent code from the owner's email or messages only after the owner
    says you may for this task.
-5. Ask for exactly what is left, in the cheapest form:
+6. Ask for exactly what is left, in the cheapest form:
 
 | What is left | Ask for |
 | --- | --- |
 | A code sent to the owner's phone | The code as a chat reply, or a handoff link if the owner would rather type it in themselves. |
 | One fact you couldn't find | That fact, as a chat reply. |
-| CAPTCHA, press-and-hold, passkey, biometric, or a password you don't have | A handoff link, after everything else on the page is filled in. Name the one action. |
+| CAPTCHA, press-and-hold, passkey, biometric, or a password you don't have | A handoff link, after everything else the step requires is filled in. Name the one action. |
 
 Say what you already did and the single thing you need, for example "I sent a
 code to your number ending 1234. Reply with it, or I can send a link so you
