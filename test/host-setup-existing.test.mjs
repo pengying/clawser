@@ -380,7 +380,7 @@ test('option B refuses a profile or Chrome it cannot read cleanly', async t => {
     [async w => { await fs.writeFile(join(w.root, 'proc/400/cmdline'), '/opt/google/chrome/chrome\0--user-data-dir=udd\0'); },
       'The browser on port 9222 uses a relative --user-data-dir; restart it with an absolute path, then rerun setup.'],
     [async w => { await fs.rm(join(w.root, 'proc/400/exe')); await fs.symlink('/opt/google/chrome/chrome (deleted)', join(w.root, 'proc/400/exe')); },
-      'Chrome was upgraded while it was running; restart it, then rerun setup.'],
+      'Chrome on port 9222 was upgraded while it was running; restart it with: systemctl --user restart my-chrome.service, then rerun setup.'],
     [w => { w.foreign['my-chrome.service'].Environment = '"LANG=fr_FR.UTF-8'; },
       'Could not read the Environment= settings of my-chrome.service; move them onto the Chrome command line or remove them, then rerun setup.'],
     [w => { w.foreign['my-chrome.service'].Environment = 'LANG=fr_FR.UTF-8 NOVALUE'; }, /^Could not read the Environment= settings of my-chrome\.service/],

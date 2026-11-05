@@ -13,6 +13,8 @@ CLIPBOARD=os.path.join(HERE,'clipboard.py')
 BOOT=str(uuid.uuid4())
 HEARTBEAT_TIMEOUT_MS=int(os.environ.get('DESKTOP_TEST_HEARTBEAT_TIMEOUT_MS','30000'))
 if not 1000<=HEARTBEAT_TIMEOUT_MS<=30000: raise RuntimeError('invalid trusted heartbeat test timeout')
+BROWSER_CHECK_S=int(os.environ.get('DESKTOP_TEST_BROWSER_CHECK_MS','10000'))/1000
+if not .1<=BROWSER_CHECK_S<=10: raise RuntimeError('invalid trusted browser check interval')
 
 def load_config(path):
     info=os.lstat(path)
@@ -22,6 +24,7 @@ def load_config(path):
     for name in ('xauthority','controlSocket','vncDir')+(('x11vnc',) if 'x11vnc' in config else ()):
         value=config.get(name)
         if not isinstance(value,str) or not os.path.isabs(value) or re.search(r'[\x00-\x1f\x7f]',value): raise SystemExit('supervisor config '+name+' must be an absolute path')
+    if 'browserPort' in config and (type(config['browserPort']) is not int or not 1<=config['browserPort']<=65535): raise SystemExit('supervisor config browserPort must be a port number')
     url=urllib.parse.urlsplit(str(config.get('cdpUrl','')))
     # localhost can resolve to ::1 while Chrome listens only on 127.0.0.1.
     if url.scheme!='http' or url.hostname!='127.0.0.1' or url.username or url.password or url.query or url.fragment or url.path not in ('','/'): raise SystemExit('supervisor config cdpUrl must be http://127.0.0.1:<port>')
@@ -400,10 +403,63 @@ def observe_browser():
         seq=probe_seq[0]
     observe(seq,*probe_browser())
 
+def listener_pid(port):
+    # /proc/net/tcp lists sockets by inode; the process holding that inode is the listener.
+    want='0100007F:%04X'%port
+    inodes=set()
+    try:
+        with open('/proc/net/tcp') as file:
+            for line in file.readlines()[1:]:
+                fields=line.split()
+                if fields[1]==want and fields[3]=='0A': inodes.add('socket:['+fields[9]+']')
+    except OSError: return None
+    if not inodes: return None
+    for name in os.listdir('/proc'):
+        if not name.isdigit(): continue
+        try:
+            if os.stat('/proc/'+name).st_uid!=os.getuid(): continue
+            for fd in os.listdir('/proc/'+name+'/fd'):
+                if os.readlink('/proc/'+name+'/fd/'+fd) in inodes: return int(name)
+        except OSError: continue
+    return None
+
+def upgraded_browser():
+    # A package upgrade replaces Chrome's files under a running Chrome. It keeps running from the deleted binary, and its CDP can hang.
+    pid=listener_pid(CONFIG['browserPort'])
+    if pid is None: return None
+    try: exe=os.readlink('/proc/%d/exe'%pid)
+    except OSError: return None
+    # Without a new binary at the same path, a restart would fail. Leave that browser to the person.
+    if not exe.endswith(' (deleted)') or not os.path.isfile(exe[:-10]): return None
+    return pid
+
+def restart_upgraded_browser():
+    with lifecycle_lock:
+        # Never under a person: a session that is active, or still settling, keeps the browser it started with.
+        if actor is not None: return
+        pid=upgraded_browser()
+        if pid is None: return
+        print('supervisor: the browser (pid %d) was upgraded while it ran; stopping it so its unit restarts it on the new version'%pid,file=sys.stderr,flush=True)
+        try: os.kill(pid,signal.SIGTERM)
+        except ProcessLookupError: return
+    deadline=time.monotonic()+15
+    while time.monotonic()<deadline and not stopping.is_set():
+        try:
+            with open('/proc/%d/stat'%pid) as file:
+                if file.read().rsplit(')',1)[1].split()[0]=='Z': return
+        except OSError: return
+        time.sleep(.2)
+    try: os.kill(pid,signal.SIGKILL)
+    except ProcessLookupError: pass
+
 def monitor():
+    checked=time.monotonic()
     while not stopping.wait(.5):
         observe()
         observe_browser()
+        if 'browserPort' in CONFIG and time.monotonic()-checked>=BROWSER_CHECK_S:
+            checked=time.monotonic()
+            restart_upgraded_browser()
 
 def take_control_path():
     try: info=os.lstat(CONTROL)

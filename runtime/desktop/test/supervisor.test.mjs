@@ -81,7 +81,7 @@ async function until(check, ms, what) {
 const exists = path => fs.lstat(path).then(() => true, () => false);
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-async function desktop(t, { cdpDown = false, extraEnv = {} } = {}) {
+async function desktop(t, { cdpDown = false, extraEnv = {}, browserCheckMs } = {}) {
   const x = await startX({ numbered: true });
   const cdp = await fakeCdp();
   cdp.down = cdpDown;
@@ -92,7 +92,7 @@ async function desktop(t, { cdpDown = false, extraEnv = {} } = {}) {
   const display = Number(x.env.DISPLAY.slice(1));
   await fs.writeFile(config, JSON.stringify({ display, xauthority: x.env.XAUTHORITY, controlSocket, vncDir, cdpUrl: cdp.url }), { mode: 0o600 });
   // The config alone must name the display.
-  const env = { ...x.env, DESKTOP_TEST_HEARTBEAT_TIMEOUT_MS: '2000' };
+  const env = { ...x.env, DESKTOP_TEST_HEARTBEAT_TIMEOUT_MS: '2000', ...browserCheckMs ? { DESKTOP_TEST_BROWSER_CHECK_MS: String(browserCheckMs) } : {} };
   delete env.DISPLAY; delete env.XAUTHORITY;
   Object.assign(env, extraEnv);
   const children = [], pgids = new Set(), holders = [], timers = new Set(), displays = [];
@@ -107,6 +107,13 @@ async function desktop(t, { cdpDown = false, extraEnv = {} } = {}) {
       child.refused = () => Promise.race([child.exited, sleep(10_000).then(() => { throw new Error('supervisor kept running'); })]);
       children.push(child);
       return child;
+    },
+    // Restarts the supervisor with extra config fields.
+    async restartWith(fields) {
+      h.supervisor.kill('SIGTERM');
+      await h.supervisor.exited;
+      await fs.writeFile(config, JSON.stringify({ ...JSON.parse(await fs.readFile(config, 'utf8')), ...fields }), { mode: 0o600 });
+      return h.serve();
     },
     async serve() {
       const child = h.launch();
@@ -337,6 +344,54 @@ test('heartbeats keep a viewer alive and their loss retires it', opts, async t =
   assert.equal(receipt.heldInputCleared, true);
   assert.deepEqual(await h.query(), { shift: false, button1: false });
   assert.equal((await h.rpc('status')).tainted, false);
+});
+
+// A stand-in browser: a copy of python3 that listens on the fake CDP port, so the supervisor finds it by port, as it finds Chrome.
+async function browserHolder(t, h) {
+  const dir = await fs.mkdtemp(join(h.x.dir, 'chrome-'));
+  const exe = join(dir, 'chrome');
+  await fs.copyFile(execFileSync('python3', ['-c', 'import sys,os;print(os.path.realpath(sys.executable))']).toString().trim(), exe);
+  await fs.chmod(exe, 0o755);
+  // The fake CDP server owns the port, so the holder takes a second port and the supervisor is told about it.
+  const holder = spawn(exe, ['-c', 'import socket,sys,time\ns=socket.socket();s.bind(("127.0.0.1",0));s.listen();print(s.getsockname()[1],flush=True)\nwhile True: time.sleep(1)'],
+    { stdio: ['ignore', 'pipe', 'inherit'] });
+  holder.exited = new Promise(resolve => holder.once('exit', (code, signal) => resolve({ code, signal })));
+  const port = Number(await new Promise((resolve, reject) => { holder.stdout.once('data', resolve); holder.once('exit', () => reject(new Error('holder exited'))); }));
+  t.after(async () => { if (holder.exitCode === null && holder.signalCode === null) { holder.kill('SIGKILL'); await holder.exited; } });
+  return { holder, exe, port, upgrade: async () => { await fs.rm(exe); await fs.copyFile(execFileSync('python3', ['-c', 'import sys,os;print(os.path.realpath(sys.executable))']).toString().trim(), exe); await fs.chmod(exe, 0o755); } };
+}
+
+test('an idle browser whose binary was upgraded underneath it is stopped so its unit restarts it', opts, async t => {
+  const h = await desktop(t, { browserCheckMs: 300 });
+  const b = await browserHolder(t, h);
+  await h.restartWith({ browserPort: b.port });
+  await sleep(1000);
+  assert.equal(b.holder.exitCode, null, 'a current binary is left running');
+  await b.upgrade();
+  assert.deepEqual(await Promise.race([b.holder.exited, sleep(5000).then(() => 'still running')]), { code: null, signal: 'SIGTERM' });
+  assert.match(h.supervisor.log, /was upgraded while it ran; stopping it so its unit restarts it on the new version/);
+  assert.equal((await h.rpc('status')).tainted, false);
+});
+
+test('a browser upgraded during a control session is left running until the session ends', opts, async t => {
+  const h = await desktop(t, { browserCheckMs: 300 });
+  const b = await browserHolder(t, h);
+  await h.restartWith({ browserPort: b.port });
+  const viewer = await h.start('control-browser-upgrade', 'control');
+  await b.upgrade();
+  await sleep(1500);
+  assert.equal(b.holder.exitCode, null, 'never restarted under a person');
+  await h.rpc('stopViewerAndSettle', { leaseId: viewer.leaseId, mayBeWritable: true });
+  assert.deepEqual(await Promise.race([b.holder.exited, sleep(5000).then(() => 'still running')]), { code: null, signal: 'SIGTERM' });
+});
+
+test('a browser whose binary was removed, not replaced, is left running', opts, async t => {
+  const h = await desktop(t, { browserCheckMs: 300 });
+  const b = await browserHolder(t, h);
+  await h.restartWith({ browserPort: b.port });
+  await fs.rm(b.exe);
+  await sleep(1500);
+  assert.equal(b.holder.exitCode, null, 'a restart would fail with no binary to start');
 });
 
 test('a browser restart while idle changes browserGeneration and leaves the desktop usable', opts, async t => {

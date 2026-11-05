@@ -93,11 +93,14 @@ export async function discoverExisting(o, p, d, h, { expected } = {}) {
   if (userDataDir === undefined) throw new Error(`The browser on port ${cdpPort} has no --user-data-dir, so setup can't tell which profile folder it uses. Restart it with --user-data-dir, then rerun setup.`);
   if (!isAbsolute(userDataDir)) throw new Error(`The browser on port ${cdpPort} uses a relative --user-data-dir; restart it with an absolute path, then rerun setup.`);
   if (info.rewritten && !(await h.stat(join(userDataDir, 'Local State'), d))?.isFile()) throw new Error(rewrote);
-  if (info.exe.endsWith(' (deleted)')) throw new Error('Chrome was upgraded while it was running; restart it, then rerun setup.');
+  const owner = classifyOwner(info.cgroup, d.uid);
+  if (info.exe.endsWith(' (deleted)')) {
+    const how = owner.kind === 'user-unit' ? `restart it with: systemctl --user restart ${owner.unit}` : 'close it and start it again';
+    throw new Error(`Chrome on port ${cdpPort} was upgraded while it was running; ${how}, then rerun setup.`);
+  }
   if (isSnapBrowser(info.exe)) throw new Error(SNAP_MESSAGE);
 
   const takeover = [], stop = [];
-  const owner = classifyOwner(info.cgroup, d.uid);
   let chrome;
   if (owner.kind === 'user-unit') {
     if (Object.values(p.names).includes(owner.unit)) throw new Error(conflict);

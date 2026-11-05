@@ -589,6 +589,11 @@ own setup receipt and is not an adoption tool for manual installations.
 - **A service is down:** doctor names it. Inspect it with
   `journalctl --user -u <unit>`.
 - **The plugin moved:** an upgrade installed Clawser in a new folder. Rerun setup.
+- **Chrome was upgraded while it ran:** a package upgrade replaces Chrome's
+  files under the running browser, and its CDP connection can stop answering.
+  Clawser's supervisor notices within about 10 seconds and stops the browser.
+  Its service then restarts it on the new version. It waits until no handoff is
+  in progress, so a person in control never loses the browser.
 - **Connection unavailable (CDP viewer):** keep the configured browser running
   and verify its actual attach-only loopback connection. Do not guess ports or
   launch/copy a replacement browser to bypass setup.

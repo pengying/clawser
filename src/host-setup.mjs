@@ -166,7 +166,8 @@ export function renderHost({ p, display, cdpPort, port, profile, browser, bins, 
   });
   const controller = { stateDir: p.state, profile, port, socketPath: p.socket, noVncAssetsDir: p.assets,
     runtime: { stateDir: p.runtime, controlSocket: p.control, cdpUrl }, transport: { binaryPath: p.binary, startupTimeoutMs: 90_000 } };
-  const supervisor = { display, xauthority: p.xauthority, controlSocket: p.control, vncDir: p.vncDir, cdpUrl, x11vnc: bins.x11vnc.path };
+  // The supervisor restarts an idle browser that a package upgrade replaced underneath it, found by this port.
+  const supervisor = { display, xauthority: p.xauthority, controlSocket: p.control, vncDir: p.vncDir, cdpUrl, browserPort: Number(new URL(cdpUrl).port), x11vnc: bins.x11vnc.path };
   return { units, controller, supervisor };
 }
 

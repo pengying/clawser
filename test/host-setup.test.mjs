@@ -170,7 +170,7 @@ test('option A creates a private profile, a cookie and five owned units, then ma
   assert.match(saved.assetsDigest, /^[a-f0-9]{64}$/);
   assert.deepEqual(saved.hostDeps, { binaries: x.binaries });
   const supervisor = JSON.parse(await fs.readFile(x.p.supervisorConfig, 'utf8'));
-  assert.deepEqual(supervisor, { display: 20, xauthority: x.p.xauthority, controlSocket: x.p.control, vncDir: x.p.vncDir, cdpUrl: 'http://127.0.0.1:18820', x11vnc: x.binaries.x11vnc.path });
+  assert.deepEqual(supervisor, { display: 20, xauthority: x.p.xauthority, controlSocket: x.p.control, vncDir: x.p.vncDir, cdpUrl: 'http://127.0.0.1:18820', browserPort: 18820, x11vnc: x.binaries.x11vnc.path });
   const controller = JSON.parse(await fs.readFile(x.p.config, 'utf8'));
   assert.equal(controller.profile, 'clawser');
   assert.deepEqual(controller.runtime, { stateDir: x.p.runtime, controlSocket: x.p.control, cdpUrl: 'http://127.0.0.1:18820' });
