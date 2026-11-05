@@ -84,8 +84,10 @@ Setup touches only three browser profiles: the one Clawser created, the one
 named with `--browser-profile`, and, on an upgrade from the CDP viewer, the
 profile that viewer already used. It never copies, moves or recreates a
 profile folder. It closes a browser, takes over services it didn't write, or
-moves cookies only with `--yes`. Local access to the operator's account remains
-trusted and can bypass every control here.
+moves cookies only with `--yes`.
+
+Local access to the operator's account remains trusted and can bypass every
+control here.
 
 The CDP viewer attaches only to an explicitly configured loopback Chromium CDP
 origin with `attachOnly=true`. It never launches Chrome, creates a Chrome

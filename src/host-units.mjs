@@ -70,7 +70,9 @@ export function renderUnits(i) {
   units[n.browser] = `${header}[Unit]\nDescription=Clawser agent browser\nRequires=${n.display}\nAfter=${[n.display, wm].filter(Boolean).join(' ')}\n\n[Service]\nType=simple\n${x}${extra}UnsetEnvironment=WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS\nExecStartPre=/bin/sh -c '${wait}'\nExecStart=${command}\nRestart=always\nRestartSec=5\nTimeoutStopSec=15\n${install}`;
 
   const ordered = `${n.display} ${n.browser}`;
-  units[n.supervisor] = `${header}[Unit]\nDescription=Clawser browser handoff supervisor\nWants=${ordered}\nAfter=${ordered}\n\n[Service]\nType=simple\nKillMode=control-group\nUnsetEnvironment=WAYLAND_DISPLAY\nExecStart=${[i.python, i.supervisorScript, i.supervisorConfig].map(systemdArgument).join(' ')}\nUMask=0077\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=3\n${install}`;
+  const supervise = [i.python, i.supervisorScript, i.supervisorConfig].map(systemdArgument).join(' ');
+  units[n.supervisor] = `${header}[Unit]\nDescription=Clawser browser handoff supervisor\nWants=${ordered}\nAfter=${ordered}\n\n[Service]\nType=simple\nKillMode=control-group\nUnsetEnvironment=WAYLAND_DISPLAY\n`
+    + `ExecStart=${supervise}\nUMask=0077\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=3\n${install}`;
 
   units[n.controller] = `${header}[Unit]\nDescription=Clawser private browser handoff controller\nWants=${n.supervisor}\nAfter=network-online.target ${n.supervisor}\n\n[Service]\nType=simple\nKillMode=mixed\nExecStart=${[i.node, i.controllerScript, i.controllerConfig].map(systemdArgument).join(' ')}\nUMask=0077\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=180\n${install}`;
   return units;
