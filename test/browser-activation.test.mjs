@@ -97,12 +97,18 @@ test('private diagnostics identify the producer and an older stopped generation 
     return { activation, scheduler, commit() { current = config; } };
   }
   const old = candidate(), next = candidate();
+  // A failed assertion must not leave a live activation behind for the next test.
+  t.after(() => Promise.allSettled([old.activation.stop(), next.activation.stop()]));
   await old.activation.start({ stateDir }); await next.activation.start({ stateDir }); await old.activation.stop();
   const path = activationModule.activationDiagnosticPath(stateDir), pending = JSON.parse(await readFile(path, 'utf8'));
   assert.equal(pending.generation, next.activation.status().generation); assert.equal(pending.phase, 'awaiting-commit');
   next.commit(); next.scheduler.advance(100); await flush();
+  // The status file is written asynchronously; a slow CI runner needs real time, not a fixed number of reads.
   let text, active;
-  for (let attempt = 0; attempt < 100; attempt++) { text = await readFile(path, 'utf8'); active = JSON.parse(text); if (active.phase === 'active') break; }
+  for (const deadline = Date.now() + 5000; ; await new Promise(resolve => setTimeout(resolve, 10))) {
+    text = await readFile(path, 'utf8'); active = JSON.parse(text);
+    if (active.phase === 'active' || Date.now() > deadline) break;
+  }
   assert.equal(active.phase, 'active'); assert.equal(active.producerPid, process.pid); assert.match(active.producerStartTicks, /^[0-9]+$/);
   assert.equal((await stat(path)).mode & 0o777, 0o600); assert.equal((await stat(join(stateDir, 'browser-handoff'))).mode & 0o777, 0o700);
   assert.doesNotMatch(text, /9222|127\.0\.0\.1/); await next.activation.stop();
