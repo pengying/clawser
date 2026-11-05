@@ -1,5 +1,9 @@
 # Changes
 
+## Unreleased
+
+- Tell agents to fill in what they already know and trigger codes themselves before asking the owner for anything. A code texted to the owner's phone is now asked for as a chat reply, and a handoff link is only for steps the owner must do in person, such as a CAPTCHA. Agents had been sending a takeover link to "complete phone verification" when they could enter the saved number, press Send code, and ask only for the code.
+
 ## 0.6.3
 
 - Route an ordinary browser call that omits `target` to the host browser instead of refusing it. OpenClaw's browser tool tells agents that `target` defaults to the host, so agents left it out and every first call failed with "Browser access requires target=\"host\"". Explicit sandbox or node targets, other profiles and endpoint overrides are still refused, and non-owners are still blocked.
