@@ -86,7 +86,10 @@ test('first noVNC setup can replace inert CDP desktop disable config but cannot 
     const h = await harness(t, { plugins: { entries: { 'browser-handoff': { config: { desktop } } } } });
     if (Object.keys(desktop).length === 1) assert.equal((await runClawser(h.args, h.deps)).ok, true);
     else {
-      await assert.rejects(runClawser(h.args, h.deps), /unowned/);
+      // A desktop switched off by an older setup keeps the fields that name it. The refusal says how to clear them.
+      const field = Object.keys(desktop).find(key => key !== 'enabled');
+      await assert.rejects(runClawser(h.args, h.deps), { message: 'Existing browser-handoff desktop config is unowned or conflicts with Clawser. If that desktop is no longer used, '
+        + `run: openclaw config unset plugins.entries.browser-handoff.config.desktop.${field}, then rerun setup.` });
       await assert.rejects(fs.stat(h.stateDir), { code: 'ENOENT' });
     }
   }

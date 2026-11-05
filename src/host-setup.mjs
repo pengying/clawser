@@ -72,7 +72,12 @@ export async function hostConfigPatch(o, p, saved, d, h, { requireConfigured = f
   if (!saved && inertDesktop) o.pendingInertDesktop = true;
   const anyEnabled = wanted => typeof desktop?.enabled === 'boolean' && fieldsMatch({ ...desktop, enabled: true }, wanted);
   const ownedDesktop = anyEnabled(ours) || (convertingFrom && anyEnabled({ ...ours, profile: convertingFrom.profile }));
-  if (desktop !== undefined && !inertDesktop && !ownedDesktop) throw new Error('Existing browser-handoff desktop config is unowned or conflicts with Clawser');
+  if (desktop !== undefined && !inertDesktop && !ownedDesktop) {
+    // A desktop that an older setup switched off keeps the fields that name it. Say which ones to clear, rather than adopting them.
+    const named = desktop?.enabled === false && !saved ? Object.keys(desktop).filter(key => key !== 'enabled') : [];
+    throw new Error('Existing browser-handoff desktop config is unowned or conflicts with Clawser' + (named.length ? '. If that desktop is no longer used, run: '
+      + named.map(key => 'openclaw config unset plugins.entries.browser-handoff.config.desktop.' + key).join(' and ') + ', then rerun setup.' : ''));
+  }
   for (const [name, value] of [['browser.profiles', browser.profiles], ['plugins.entries', plugins.entries], ['plugin config', entry?.config]]) {
     if (value !== undefined && !object(value)) throw new Error('Conflicting ' + name + ' configuration');
   }
