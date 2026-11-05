@@ -57,11 +57,11 @@ The validated host is **Linux x86_64**, **Node.js >=24.16 <25 or >=26.1**, and
 cover 2026.10.4 and 2026.10.7. Other operating systems and ARM hosts are unverified.
 Start your OpenClaw Gateway before setup.
 
-Install the tagged **v0.7.1** release from GitHub. ClawHub availability may lag
+Install the tagged **v0.7.2** release from GitHub. ClawHub availability may lag
 GitHub.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.7.1 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.7.2 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -72,9 +72,9 @@ contracts through OpenClaw. Use the supported native capability-acceptance flow
 for installs, updates and enabling; do not hand-write acknowledgement settings.
 
 The dry run prints exactly what setup will do and changes nothing. It shows
-which browser setup will close and how many keyring-encrypted cookies it will
-move. With `--no-migrate-cookies`, it warns how many will be unreadable. A real run
-refuses to close a browser, take over services or move cookies without `--yes`.
+which browser setup will close and warns how many keyring-encrypted cookies
+won't carry over. Add `--migrate-cookies` to move them. A real run refuses to
+close a browser, take over services or move cookies without `--yes`.
 Add `--browser-profile <name>` for option B, or `--cdp` for the CDP viewer.
 
 Follow setup’s printed activation instructions, then run `doctor` and ask the
@@ -95,7 +95,7 @@ Finish any open handoffs, then:
 1. Install the new version:
 
    ```sh
-   openclaw plugins install git:github.com/pengying/clawser@v0.7.1 --force --accept-capabilities
+   openclaw plugins install git:github.com/pengying/clawser@v0.7.2 --force --accept-capabilities
    ```
 
 2. Check the plan with `openclaw clawser setup --dry-run`.

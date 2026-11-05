@@ -188,7 +188,8 @@ test('a Docker-era receipt says to rerun setup', async t => {
 test('keyring cookies are a warning, not a failure', async t => {
   const w = await applyWorld(t);
   await cookieStore(w.udd, ['v11a', 'v11b', 'v11c', 'v10a'], { legacy: true });
-  assert.equal((await runClawser([...w.yes, '--no-migrate-cookies'], w.deps)).ok, true);
+  // The default leaves keyring cookies where they are.
+  assert.equal((await runClawser([...w.args, '--browser-profile', 'user', '--yes'], w.deps)).ok, true);
   assert.equal(Object.hasOwn(await w.receipt(), 'cookieMigration'), false);
   const result = await doctor(w);
   assert.equal(result.ok, true, JSON.stringify(result.checks));

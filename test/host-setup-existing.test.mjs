@@ -107,16 +107,35 @@ test('an Xvfb outside a unit leaves that display running and moves the browser t
   await w.unchanged();
 });
 
-test('keyring cookies are counted for migration, and --no-migrate-cookies warns how many logins will be lost', async t => {
+test('keyring cookies move only with --migrate-cookies; without it setup says how many logins will be lost', async t => {
   const w = await handWritten(t);
   await cookieStore(w.udd, ['v11a', 'v11b', 'v11c', 'v10a', 'v10b']);
-  const migrate = await runClawser([...w.takeover, '--dry-run'], w.deps);
+  const base = [...w.args, '--browser-profile', 'user', '--dry-run'];
+  const migrate = await runClawser([...base, '--migrate-cookies'], w.deps);
   assert.ok(migrate.plan.includes('Move 3 keyring-encrypted cookies into the new browser'), migrate.plan.join('\n'));
   assert.deepEqual((await w.plan()).cookies, { migrate: true, count: 3 });
-  const lose = await runClawser([...w.takeover, '--dry-run', '--no-migrate-cookies'], w.deps);
+  // The default leaves the keyring alone and names the flag that moves them.
+  const plain = await runClawser(base, w.deps);
+  assert.equal(plain.plan.some(line => line.startsWith('Move ')), false, plain.plan.join('\n'));
+  assert.ok(plain.plan.includes("Warning: 3 keyring-encrypted cookies will be unreadable, so you'll need to sign in to those sites again. To move them instead, rerun with --migrate-cookies; Clawser's browser keeps them protected only by file permissions."), plain.plan.join('\n'));
+  assert.equal((await w.plan({ migrateCookies: undefined })).cookies, undefined);
+  const lose = await runClawser([...base, '--no-migrate-cookies'], w.deps);
   assert.ok(lose.plan.includes("Warning: 3 keyring-encrypted cookies will be unreadable; you'll need to sign in to those sites again."), lose.plan.join('\n'));
   assert.equal(lose.plan.some(line => line.startsWith('Move ')), false);
+  await assert.rejects(runClawser([...base, '--migrate-cookies', '--no-migrate-cookies'], w.deps), { message: '--migrate-cookies and --no-migrate-cookies cannot be used together' });
   await w.unchanged();
+});
+
+test('without --migrate-cookies, a takeover exports no cookies and still runs', async t => {
+  const w = await applyWorld(t);
+  await cookieStore(w.udd, ['v11a', 'v11b', 'v11c']);
+  Object.assign(w.cookies, { exportCookies: exportsThree, importCookies: async () => ({ count: 3 }), countCookies: async () => 3 });
+  const result = await runClawser([...w.args, '--browser-profile', 'user', '--yes'], w.deps);
+  assert.equal(result.ok, true, JSON.stringify(result.plan));
+  assert.equal(w.calls.some(cookieCall('exportCookies')), false);
+  assert.equal(w.calls.some(cookieCall('importCookies')), false);
+  assert.deepEqual(await cookieDirs(w), []);
+  assert.equal(Object.hasOwn(await w.receipt(), 'cookieMigration'), false);
 });
 
 // A CDP install from before the explicit mark, bound to profile user, with its desktop off.
@@ -897,14 +916,13 @@ test('a Chrome started from a terminal scope is closed like a desktop session Ch
   await w.unchanged();
 });
 
-test('option B warns when the profile folder is readable by other users', async t => {
+test('option B refuses a profile folder other users can read, before anything stops', async t => {
   const w = await handWritten(t);
-  const loose = `${w.udd} is readable by other users, and Clawser's browser keeps cookies protected only by file permissions; run: chmod 700 ${w.udd}`;
-  assert.equal((await w.plan()).warnings.includes(loose), false, 'a private folder needs no warning');
+  const loose = `${w.udd} is readable by other users, and Clawser's browser keeps cookies protected only by file permissions. Run: chmod 700 ${w.udd}, then rerun setup.`;
+  assert.ok((await w.plan()).takeover.length, 'a private folder is accepted');
   await fs.chmod(w.udd, 0o750);
-  const result = await runClawser([...w.takeover, '--dry-run'], w.deps);
-  assert.ok(result.plan.includes('Warning: ' + loose), result.plan.join('\n'));
-  assert.ok((await w.plan()).warnings.includes(loose));
+  await assert.rejects(runClawser([...w.takeover, '--dry-run'], w.deps), { message: loose });
+  await assert.rejects(runClawser([...w.takeover, '--yes'], w.deps), { message: loose });
   assert.equal((await fs.stat(w.udd)).mode & 0o777, 0o750, 'setup never changes the folder');
   await w.unchanged();
 });

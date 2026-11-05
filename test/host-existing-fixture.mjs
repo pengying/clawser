@@ -27,7 +27,8 @@ export async function handWritten(t, { config = userProfile(), chrome = {}, xvfb
   w.foreign['my-chrome.service'] = unit('my-chrome.service', 400, { Environment: 'LANG=fr_FR.UTF-8 DISPLAY=:20' });
   w.foreign['my-xvfb.service'] = unit('my-xvfb.service', 300);
   w.foreign['my-openbox.service'] = unit('my-openbox.service', 350);
-  w.takeover = [...w.args, '--browser-profile', 'user'];
+  // Moving keyring cookies is opt-in. Most option B tests exercise the move, so they opt in here.
+  w.takeover = [...w.args, '--browser-profile', 'user', '--migrate-cookies'];
   // Unit texts never leave runClawser. The rendered units are read from the plan itself.
   w.plan = (extra = {}) => planHost({ command: 'setup', stateDir: w.stateDir, profile: 'user', port: 19420, dryRun: true, yes: false, cdp: false, migrateCookies: true,
     specified: ['--state-dir', '--browser-profile', '--dry-run'], option: 'existing', ...extra }, w.deps, setupHelpers);

@@ -23,6 +23,7 @@ export function registerClawserCli(api, dependencies = {}) {
       if (name === 'setup') command
         .option('--dry-run', 'Show the setup plan without making changes')
         .option('--yes', "Go ahead when setup has to close the agent's browser")
+        .option('--migrate-cookies', "Copy logins into the agent's browser")
         .option('--no-migrate-cookies', 'Do not copy logins into the agent browser');
       command.action(async options => {
         const argv = [name];
@@ -30,7 +31,8 @@ export function registerClawserCli(api, dependencies = {}) {
           if (options[key] !== undefined) argv.push(flag, String(options[key]));
         }
         for (const [key, flag] of [['cdp', '--cdp'], ['novnc', '--novnc'], ['dryRun', '--dry-run'], ['yes', '--yes']]) if (options[key]) argv.push(flag);
-        if (options.migrateCookies === false) argv.push('--no-migrate-cookies');
+        if (options.migrateCookies === true) argv.push('--migrate-cookies');
+        else if (options.migrateCookies === false) argv.push('--no-migrate-cookies');
         try {
           if (typeof api.rootDir !== 'string' || !api.rootDir) {
             throw new Error('OpenClaw did not provide the stable installed plugin directory; reinstall Clawser or use its standalone CLI');
