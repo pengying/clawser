@@ -1,5 +1,9 @@
 # Changes
 
+## 0.7.1
+
+- Fix setup reruns on a noVNC install. Setup restarts the controller and then reloads the plugin, but the old plugin's shutdown tried to end open handoffs over its connection to the controller, which the restart had already closed. The shutdown failed, OpenClaw refused to swap the plugin, and handoffs stayed unavailable until the Gateway restarted. Shutdown now retries once over a new connection, since the controller keeps its handoff records on disk. A timeout is never retried, and a controller that still can't be reached fails as before. A host that already hit this in 0.7.0 needs one `openclaw gateway restart` after upgrading.
+
 ## 0.7.0
 
 - Make noVNC on the host the default handoff. Setup gives the agent its own Google Chrome, or Chromium, on a private virtual screen run by five user services. A link shows the whole browser window and every tab, so native dropdowns, date pickers, file choosers, dialogs and popups work from a phone.

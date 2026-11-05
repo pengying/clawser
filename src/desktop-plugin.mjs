@@ -217,15 +217,23 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
       clearInterval(pollTimer); pollTimer = undefined;
       const rpc = client;
       client = undefined; calls.clear();
-      try {
-        if (rpc) {
-          // The dedicated controller survives Gateway restarts. Its ledger,
-          // rather than this plugin's memory, identifies every profile lease.
-          const receipt = await rpc.request('revokeAll', { reason: 'plugin_stop' }, { timeoutMs: 180_000 });
-          if (receipt?.allRetired !== true || receipt?.recoveryRequired !== false)
-            throw new Error('Browser Handoff shutdown could not verify every viewer retirement; operator recovery is required');
-        }
-      } finally { rpc?.close(); }
+      if (!rpc) return;
+      // The dedicated controller survives Gateway restarts. Its ledger,
+      // rather than this plugin's memory, identifies every profile lease.
+      let receipt;
+      try { receipt = await rpc.request('revokeAll', { reason: 'plugin_stop' }, { timeoutMs: 180_000 }); }
+      catch (error) {
+        // Setup restarts the controller before it reloads this plugin, so the old connection is already closed.
+        // revokeAll is idempotent and the ledger is on disk: retry once on a new connection. Never retry a timeout.
+        if (error?.code !== 'CONTROLLER_DISCONNECTED') throw error;
+        let retry;
+        try {
+          retry = await desktopRpcFactory(config.socketPath);
+          receipt = await retry.request('revokeAll', { reason: 'plugin_stop' }, { timeoutMs: 180_000 });
+        } finally { retry?.close(); }
+      } finally { rpc.close(); }
+      if (receipt?.allRetired !== true || receipt?.recoveryRequired !== false)
+        throw new Error('Browser Handoff shutdown could not verify every viewer retirement; operator recovery is required');
     },
   };
   activation = createBrowserActivation({ api, binding, scheduler: activationScheduler, writeDiagnostic: activationWriteDiagnostic,

@@ -30,6 +30,50 @@ test('disconnect rejects pending admissions without reporting success', async t 
   await request;
 });
 
+test('only a lost connection carries the disconnect code; a timeout does not', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'desktop-rpc-')), path=join(dir,'desktop.sock');
+  const server = new DesktopRpcServer({socketPath:path,handler:()=>new Promise(()=>{})});
+  await server.start();
+  const slow = new DesktopRpcClient(path), dropped = new DesktopRpcClient(path);
+  t.after(async()=>{slow.close();dropped.close();await server.close().catch(()=>{});await rm(dir,{recursive:true,force:true});});
+  await assert.rejects(slow.request('revokeAll',{},{timeoutMs:20}),error=>/timed out/.test(error.message)&&error.code===undefined);
+  await assert.rejects(slow.request('revokeAll',{}),{code:'CONTROLLER_DISCONNECTED',message:/connection is closed/});
+  const pending=assert.rejects(dropped.request('revokeAll',{}),{code:'CONTROLLER_DISCONNECTED',message:/disconnected/});
+  await new Promise(resolve=>setTimeout(resolve,20)); await server.close();
+  await pending;
+  const refused=new DesktopRpcClient(path);t.after(()=>refused.close());
+  await assert.rejects(refused.request('revokeAll',{}),{code:'CONTROLLER_DISCONNECTED'});
+});
+
+test('plugin shutdown after a controller restart retires leases on the restarted controller', async t => {
+  const { registerDesktopPlugin } = await import('../src/desktop-plugin.mjs');
+  const dir = await mkdtemp(join(tmpdir(), 'desktop-rpc-')), socketPath = join(dir, 'desktop.sock'), revoked = [];
+  const controller = generation => new DesktopRpcServer({ socketPath, handler: async method => {
+    if (method === 'health' || method === 'ensure') return { profile: 'handoff', cdpUrl: 'http://127.0.0.1:19333' };
+    if (method === 'revokeAll') { revoked.push(generation); return { revoked: 1, allRetired: true, recoveryRequired: false }; }
+    return [];
+  } });
+  let server = controller('before');
+  await server.start();
+  t.after(async () => { await server.close().catch(() => {}); await rm(dir, { recursive: true, force: true }); });
+  const services = [], pluginConfig = { desktop: { enabled: true, profile: 'handoff', socketPath } };
+  const api = {
+    pluginConfig, registerTool() {}, registerService: value => services.push(value), registerTrustedToolPolicy() {}, on() {},
+    logger: { warn() {}, info() {} },
+    config: { browser: { profiles: { handoff: { cdpUrl: 'http://127.0.0.1:19333', attachOnly: true, driver: 'openclaw' } } },
+      plugins: { entries: { 'browser-handoff': { enabled: true, config: pluginConfig } } } },
+  };
+  api.runtime = { config: { current: () => api.config } };
+  registerDesktopPlugin(api, { activationWriteDiagnostic: async () => {} });
+  await services[0].start();
+  // What setup does: restart the controller, then ask the Gateway to reload the plugin.
+  await server.close();
+  server = controller('after');
+  await server.start();
+  await services[0].stop();
+  assert.deepEqual(revoked, ['after']);
+});
+
 test('malformed and oversized RPC messages are disconnected before dispatch',async t=>{
   const net=await import('node:net');
   const dir=await mkdtemp(join(tmpdir(),'desktop-rpc-')),path=join(dir,'desktop.sock');let calls=0;

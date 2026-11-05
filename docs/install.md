@@ -52,11 +52,11 @@ a loopback CDP connection, and outbound HTTPS. See
 
 ## Tagged Git installation
 
-This guide describes v0.7.0. Tagged Git installation is the recommended
+This guide describes v0.7.1. Tagged Git installation is the recommended
 distribution path.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.7.0 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.7.1 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -310,13 +310,13 @@ replace the native capability-acceptance step. Developer installation is in
 
 ## Release archive alternative
 
-Once published, download `pengying-clawser-0.7.0.tgz` and `SHA256SUMS` from the
-[v0.7.0 release](https://github.com/pengying/clawser/releases/tag/v0.7.0) into the
+Once published, download `pengying-clawser-0.7.1.tgz` and `SHA256SUMS` from the
+[v0.7.1 release](https://github.com/pengying/clawser/releases/tag/v0.7.1) into the
 same directory:
 
 ```sh
 sha256sum --check SHA256SUMS
-openclaw plugins install ./pengying-clawser-0.7.0.tgz --force --accept-capabilities
+openclaw plugins install ./pengying-clawser-0.7.1.tgz --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -333,7 +333,7 @@ file; they are not an independent publisher signature.
 2. Install the new release:
 
    ```sh
-   openclaw plugins install git:github.com/pengying/clawser@v0.7.0 --force --accept-capabilities
+   openclaw plugins install git:github.com/pengying/clawser@v0.7.1 --force --accept-capabilities
    ```
 
 3. Check the plan:
@@ -594,6 +594,12 @@ own setup receipt and is not an adoption tool for manual installations.
   Clawser's supervisor notices within about 10 seconds and stops the browser.
   Its service then restarts it on the new version. It waits until no handoff is
   in progress, so a person in control never loses the browser.
+- **Setup fails with "The CLI command failed" after a 0.7.0 rerun:** in 0.7.0,
+  setup restarted the controller and then reloaded the plugin, and the old
+  plugin could not shut down over its closed connection. The Gateway log shows
+  "plugin service replacement cleanup failed". Install 0.7.1, then run
+  `openclaw gateway restart` and `openclaw clawser doctor`. 0.7.1 shuts down
+  over a new connection.
 - **Connection unavailable (CDP viewer):** keep the configured browser running
   and verify its actual attach-only loopback connection. Do not guess ports or
   launch/copy a replacement browser to bypass setup.
