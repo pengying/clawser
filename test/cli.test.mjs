@@ -25,6 +25,8 @@ test('CLI registration is inert and forwards setup options without shell parsing
   await setup.callback({ stateDir: '/tmp/a directory', browserProfile: 'demo', port: '19510', cdp: true, novnc: true, dryRun: true, yes: true, migrateCookies: false });
   assert.deepEqual(received, ['setup', '--state-dir', '/tmp/a directory', '--browser-profile', 'demo', '--port', '19510', '--cdp', '--novnc', '--dry-run', '--yes', '--no-migrate-cookies']);
   await setup.callback({ migrateCookies: true });
+  assert.deepEqual(received, ['setup', '--migrate-cookies']);
+  await setup.callback({});
   assert.deepEqual(received, ['setup']);
 });
 
@@ -43,7 +45,7 @@ test('CLI registers the 0.7.0 options and drops the Docker desktop ones', async 
   const setup = root.children.get('setup'), doctor = root.children.get('doctor');
   assert.equal(setup.descriptionText, 'Give the agent its own browser on a private virtual screen (noVNC); --cdp keeps the CDP viewer');
   assert.equal(doctor.descriptionText, 'Check the configured browser backend without changing it');
-  assert.deepEqual(setup.options.sort(), ['--browser-profile', '--cdp', '--dry-run', '--no-migrate-cookies', '--novnc', '--port', '--state-dir', '--yes']);
+  assert.deepEqual(setup.options.sort(), ['--browser-profile', '--cdp', '--dry-run', '--migrate-cookies', '--no-migrate-cookies', '--novnc', '--port', '--state-dir', '--yes']);
   assert.deepEqual(doctor.options.sort(), ['--browser-profile', '--cdp', '--novnc', '--port', '--state-dir']);
 });
 
@@ -52,7 +54,7 @@ test('help text says noVNC is the default and --cdp keeps the one-tab viewer', a
   const result = await runClawser(['help'], { log: message => logs.push(message), run: async () => assert.fail('help runs nothing') });
   assert.deepEqual(result, { ok: true, command: 'help' });
   const text = logs.join('\n');
-  assert.ok(text.includes('Usage: clawser <setup|doctor> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--novnc | --cdp] [--no-migrate-cookies]'), text);
+  assert.ok(text.includes('Usage: clawser <setup|doctor> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--novnc | --cdp] [--migrate-cookies | --no-migrate-cookies]'), text);
   assert.ok(text.includes('Default setup gives the agent its own browser on a private virtual screen that you view over noVNC. --cdp keeps the one-tab CDP viewer.'), text);
 });
 

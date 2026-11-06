@@ -52,11 +52,11 @@ a loopback CDP connection, and outbound HTTPS. See
 
 ## Tagged Git installation
 
-This guide describes v0.7.1. Tagged Git installation is the recommended
+This guide describes v0.7.2. Tagged Git installation is the recommended
 distribution path.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.7.1 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.7.2 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -110,7 +110,9 @@ How setup moves that browser onto the virtual screen depends on what runs it:
   never kills it.
 
 Setup refuses a headless browser, and a browser started without an absolute
-`--user-data-dir`. A rerun refuses a browser whose profile folder changed since
+`--user-data-dir`. It also refuses a profile folder other users can read, because
+Clawser's browser protects cookies only with file permissions. Run
+`chmod 700 <folder>` and rerun setup; setup never changes the folder itself. A rerun refuses a browser whose profile folder changed since
 setup. If nothing is listening on the profile's port, start that browser, then
 rerun setup.
 
@@ -121,11 +123,15 @@ Clawser's browser keeps cookies in a plain store protected by file permissions,
 because nobody is at the machine to unlock a keyring after a reboot. It can't
 read keyring cookies.
 
-When option B finds keyring cookies, setup moves them by default. It exports
-them over CDP before it stops the browser, then imports them into Clawser's
-browser. After a move, sign in to Google once in a handoff link, and re-save any
-saved site passwords. Use `--no-migrate-cookies` to skip the move. Setup then
-warns how many cookies will be unreadable.
+By default, setup leaves keyring cookies where they are. It warns how many
+won't carry over, so you'll need to sign in to those sites again in a handoff
+link.
+
+To move them instead, add `--migrate-cookies`. Setup then exports them over CDP
+before it stops the browser, and imports them into Clawser's browser. The moved
+cookies lose the keyring's encryption and are protected only by file
+permissions. After a move, sign in to Google once in a handoff link, and re-save
+any saved site passwords.
 
 If setup can't read the cookies, it stops before closing anything:
 
@@ -140,8 +146,9 @@ Warning: Moving cookies failed (<reason>); rerun setup to try again, or sign in 
 ```
 
 The export then stays in a private folder under the state directory. A rerun
-imports it and removes it. Until then, doctor reports it in the `cookie export`
-row.
+imports it and removes it, even without `--migrate-cookies`, since it may be the
+only readable copy of those logins. `--no-migrate-cookies` removes it instead.
+Until then, doctor reports it in the `cookie export` row.
 
 ### The CDP viewer
 
@@ -224,7 +231,8 @@ openclaw clawser doctor --help
 | `--dry-run` | Off | Print the plan without changing files, downloads, services or configuration |
 | `--yes` | Off | Allow setup to close or take over the agent's browser and move cookies |
 | `--browser-profile NAME` | `clawser`, a new profile | Option B: hand an existing OpenClaw browser profile to Clawser |
-| `--no-migrate-cookies` | Off | Don't move keyring cookies into the agent's browser |
+| `--migrate-cookies` | Off | Move keyring cookies into the agent's browser |
+| `--no-migrate-cookies` | Off | Don't move keyring cookies, and remove an export a failed import left |
 | `--state-dir PATH` | `${OPENCLAW_STATE_DIR:-~/.openclaw}/clawser` | Private state, receipts, profile and downloads |
 | `--port PORT` | `19420` | Loopback controller and viewer port |
 | `--cdp` | Off | Use the one-tab CDP viewer on an existing browser |
@@ -310,13 +318,13 @@ replace the native capability-acceptance step. Developer installation is in
 
 ## Release archive alternative
 
-Once published, download `pengying-clawser-0.7.1.tgz` and `SHA256SUMS` from the
-[v0.7.1 release](https://github.com/pengying/clawser/releases/tag/v0.7.1) into the
+Once published, download `pengying-clawser-0.7.2.tgz` and `SHA256SUMS` from the
+[v0.7.2 release](https://github.com/pengying/clawser/releases/tag/v0.7.2) into the
 same directory:
 
 ```sh
 sha256sum --check SHA256SUMS
-openclaw plugins install ./pengying-clawser-0.7.1.tgz --force --accept-capabilities
+openclaw plugins install ./pengying-clawser-0.7.2.tgz --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -333,7 +341,7 @@ file; they are not an independent publisher signature.
 2. Install the new release:
 
    ```sh
-   openclaw plugins install git:github.com/pengying/clawser@v0.7.1 --force --accept-capabilities
+   openclaw plugins install git:github.com/pengying/clawser@v0.7.2 --force --accept-capabilities
    ```
 
 3. Check the plan:

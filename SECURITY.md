@@ -73,18 +73,21 @@ the viewer origin.
 - **Cookies are protected by file permissions only.** Clawser's browser uses
   Chrome's basic password store, so it starts signed in after a reboot with
   nobody at the machine. Cookies are stored unencrypted on disk. The profile
-  folder must be 0700. Doctor checks it.
-- **A kept cookie export is plaintext.** Option B moves keyring cookies through
-  an export file in a `<stateDir>/cookies-*` folder. The file is 0600 inside a
-  0700 folder. Setup removes it once an import succeeds. A failed import keeps
+  folder must be 0700. Setup refuses a looser option B folder, and doctor
+  checks it.
+- **Moving keyring cookies is opt-in.** Option B leaves them in the keyring
+  unless setup runs with `--migrate-cookies`.
+- **A kept cookie export is plaintext.** With `--migrate-cookies`, option B
+  moves keyring cookies through an export file in a `<stateDir>/cookies-*`
+  folder. The file is 0600 inside a 0700 folder. Setup removes it once an import succeeds. A failed import keeps
   it so a rerun can try again. Doctor reports it until then. Cookie values never
   appear in logs or messages.
 
 Setup touches only three browser profiles: the one Clawser created, the one
 named with `--browser-profile`, and, on an upgrade from the CDP viewer, the
 profile that viewer already used. It never copies, moves or recreates a
-profile folder. It closes a browser, takes over services it didn't write, or
-moves cookies only with `--yes`.
+profile folder. It closes a browser or takes over services it didn't write only
+with `--yes`. It moves cookies only with both `--yes` and `--migrate-cookies`.
 
 Local access to the operator's account remains trusted and can bypass every
 control here.

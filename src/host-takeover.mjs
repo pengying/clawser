@@ -141,8 +141,10 @@ export async function discoverExisting(o, p, d, h, { expected } = {}) {
 
   const store = await cookieStore(userDataDir, profileDirectory, h, d);
   const { v11 } = store ? await cookieEncryption(store, d) : { v11: 0 };
-  const cookies = (takeover.length || stop.length) && v11 > 0 && o.migrateCookies !== false ? { migrate: true, count: v11 } : undefined;
+  // Moving logins is opt-in, since Clawser's browser protects them only with file permissions.
+  const cookies = (takeover.length || stop.length) && v11 > 0 && o.migrateCookies === true ? { migrate: true, count: v11 } : undefined;
   if (o.migrateCookies === false && v11 > 0) warnings.push(`${v11} keyring-encrypted cookies will be unreadable; you'll need to sign in to those sites again.`);
+  else if (o.migrateCookies === undefined && v11 > 0) warnings.push(`${v11} keyring-encrypted cookies will be unreadable, so you'll need to sign in to those sites again. To move them instead, rerun with --migrate-cookies; Clawser's browser keeps them protected only by file permissions.`);
 
   return { profile: name, cdpUrl, sourceCdpUrl: cdpUrl, cdpPort, userDataDir, ...profileDirectory !== undefined ? { profileDirectory } : {},
     browser: { path: info.exe, existingArgs, env }, args, display, takeover, stop, ...cookies ? { cookies } : {}, warnings };
@@ -196,6 +198,7 @@ async function leftoverCookies(o, saved, resumed, d, h) {
     if (file?.isFile() && (await savedExport(join(dir, 'cookies.json'), d)).count > 0) exports.push({ dir, at: file.mtimeMs });
   }
   const newest = exports.reduce((best, item) => !best || item.at >= best.at ? item : best, undefined);
+  // An export exists only because an earlier run chose --migrate-cookies, and it may be the only readable copy of those logins, so it resumes by default.
   const resume = newest && !resumed && (!saved.cookieMigration || saved.cookieMigration.failed === true) && o.migrateCookies !== false;
   return { ...resume ? { cookies: { migrate: true, resumeFrom: join(newest.dir, 'cookies.json') } } : {}, staleCookies: folders.filter(dir => !resume || dir !== newest.dir) };
 }
