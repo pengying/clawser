@@ -917,7 +917,8 @@ async function openProbeFixture(t, options = {}) {
           if (config.stallCredentials) return hang(init);
           if (config.credentialsGone && fixture.credentialCalls > 1) return response({ error: 'Probe access ended' }, 410);
           if (fixture.credentialCalls > 1 && fixture.credentialCalls <= 1 + (config.credentialsDemoting || 0)) return response({ error: 'Credentials are unavailable in this state' }, 409);
-          return response({ mode: 'watch', password: 'watch123', generation: fixture.credentialCalls * 2, expiresAt: Date.now() + 60000 });
+          // The real gateway changes the generation only when it resets or promotes the session.
+          return response({ mode: 'watch', password: 'watch123', generation: config.stableGeneration ? 0 : fixture.credentialCalls * 2, expiresAt: Date.now() + 60000 });
         }
         if (action === 'control') {
           fixture.controlCalls++;
@@ -939,6 +940,8 @@ async function openProbeFixture(t, options = {}) {
       constructor() {
         super(); const index = window.fixture.rfbs.length; window.fixture.rfbs.push(this);
         window.fixture.deadlinePhase = 'vnc';
+        // A refused upgrade: noVNC reports a disconnect without ever connecting.
+        if (window.fixture.config.refuseConnect && index < window.fixture.config.refuseConnect) { setTimeout(() => this.dispatchEvent(new Event('disconnect')), 0); return; }
         if (!window.fixture.config.stallConnect && !(window.fixture.config.stallReplacementConnect && index > 0)) setTimeout(() => this.dispatchEvent(new Event('connect')), 0);
       }
       drop() { this.dispatchEvent(new Event('disconnect')); }
@@ -1082,6 +1085,21 @@ test('a reopened claimed link resumes in watch mode with its existing cookie', {
   const { evaluate, waitFor } = await openProbeFixture(t, { claimReused: true });
   await waitFor('fixture.rfbs.length === 1 && /Watching/.test(document.querySelector("#status").textContent)', 'reopened link resumed with the cookie');
   assert.deepEqual(await evaluate('({ claims: fixture.claimCalls, cleanups: fixture.doneCalls })'), { claims: 1, cleanups: 0 });
+});
+
+test('a second tab refused by the one-viewer limit leaves the handoff running', { skip: !existsSync(chromePath) }, async (t) => {
+  const { evaluate, waitFor } = await openProbeFixture(t, { refuseConnect: 1, stableGeneration: true });
+  await waitFor('/another tab or window/i.test(document.querySelector("#status").textContent)', 'the refused tab explains why it stopped');
+  await pause(150);
+  assert.deepEqual(await evaluate('({ cleanups: fixture.doneCalls, rfbs: fixture.rfbs.length, credentials: fixture.credentialCalls })'), { cleanups: 0, rfbs: 1, credentials: 2 },
+    'the refused tab never posts done, so the tab that holds the stream keeps working');
+  assert.equal(await evaluate('document.querySelector("#control").disabled'), true, 'the refused tab offers no control');
+});
+
+test('a stream refused because the handoff ended still confirms cleanup', { skip: !existsSync(chromePath) }, async (t) => {
+  const { evaluate, waitFor } = await openProbeFixture(t, { refuseConnect: 1, credentialsGone: true });
+  await waitFor('fixture.doneCalls === 1 && /destroyed/i.test(document.querySelector("#status").textContent)', 'ended access is confirmed');
+  assert.doesNotMatch(await evaluate('document.querySelector("#status").textContent'), /another tab/i);
 });
 
 test('a drop after the handoff ended stops reconnecting and confirms cleanup', { skip: !existsSync(chromePath) }, async (t) => {
