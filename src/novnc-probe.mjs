@@ -18,6 +18,16 @@ const matches = (value, expected) => {
 };
 const problem = (message, status = 400) => Object.assign(new Error(message), { status });
 
+// noVNC 1.7.0 awaits a test H.264 decode at module load, with no deadline.
+// Some Android hardware decoders never finish that flush, so the viewer never loads.
+// A probe that hasn't answered in 2 s counts as no H.264, and noVNC uses its other encodings.
+const H264_PROBE = 'supportsWebCodecsH264Decode = await _checkWebCodecsH264DecodeSupport();';
+const BOUNDED_H264_PROBE = 'supportsWebCodecsH264Decode = await Promise.race([_checkWebCodecsH264DecodeSupport().catch(() => false), new Promise(resolve => setTimeout(resolve, 2000, false))]);';
+export function boundH264Probe(source) {
+  if (source.split(H264_PROBE).length !== 2) throw new Error('Pinned noVNC browser.js does not match the expected H.264 probe');
+  return source.replace(H264_PROBE, BOUNDED_H264_PROBE);
+}
+
 function security(res) {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Referrer-Policy', 'no-referrer');
@@ -361,7 +371,7 @@ export class NoVncProbeGateway {
     if (!/^[A-Za-z0-9_./-]+\.js$/.test(decoded)) throw problem('Not found', 404);
     const file = resolve(this.noVncAssetsDir, decoded);
     if (!file.startsWith(this.noVncAssetsDir + sep)) throw problem('Not found', 404);
-    const data = await readFile(file);
+    const data = decoded === 'core/util/browser.js' ? boundH264Probe(await readFile(file, 'utf8')) : await readFile(file);
     res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' }); res.end(data);
   }
 

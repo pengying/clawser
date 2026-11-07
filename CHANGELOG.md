@@ -1,5 +1,10 @@
 # Changes
 
+## 0.7.3
+
+- Fix handoff links that showed a black screen on some Android phones and then ended with "Viewer assets did not load in time". When noVNC 1.7.0 loads, it tests the browser's H.264 video decoder and waits for the result with no time limit. Some Android hardware decoders never answer, so the viewer never loaded and gave up after 12 seconds. The gateway now serves noVNC with a 2 second limit on that test. A decoder that hasn't answered counts as no H.264, and noVNC uses its other encodings. The gateway refuses to serve a noVNC whose test code differs from the pinned 1.7.0, rather than serving it with no limit.
+- Opening a handoff link a second time in the same browser no longer ends the handoff. Only one viewer can hold the stream, so the second tab's stream was refused, and that tab treated the refusal as a failure and ended the handoff for both tabs. The owner saw "Viewer access ended" right away. The second tab now checks that the handoff is still live, says "This handoff is already open in another tab or window", and leaves the first tab connected.
+
 ## 0.7.2
 
 - The skill now has the agent check the page is on the site the owner asked for, and fill only the fields a step requires. It asks the owner before it looks up saved details, such as a profile, contacts or memory, and before it reads a code from the owner's email or messages. It asks once per task, names the fields and the site, and uses them only there. Details given for one site or task don't carry over to another. A texted code can still come back as a chat reply, and the agent offers a handoff link for owners who would rather type it in themselves. It uses a code once and doesn't repeat or store it.

@@ -140,7 +140,7 @@ function openConnection(config) {
     updateInputControls();
     control.disabled = true;
     disconnectedResolve();
-    if (!connected) readyReject(new Error('The VNC connection closed before it became ready'));
+    if (!connected) readyReject(Object.assign(new Error('The VNC connection closed before it became ready'), { closedBeforeReady: true }));
     else if (!connection.retiring && !promoting && !accessEnded) void reconnectWatch();
   }, { once: true });
   connection.ready = withDeadline(readyEvent, connectTimeoutMs, 'The VNC connection did not become ready in time').catch((error) => {
@@ -188,6 +188,17 @@ async function requestCleanup(context = 'Viewer access ended.') {
     } finally { cleanupInFlight = undefined; }
   })();
   return cleanupInFlight;
+}
+
+// The gateway lets one viewer hold the stream, so a second tab's stream closes before it is ready.
+// Credentials that still work with the same generation mean the handoff is live in that other tab,
+// and cleaning up here would end it there too.
+async function streamHeldElsewhere(config) {
+  try {
+    if ((await post('credentials')).generation !== config.generation) return false;
+  } catch { return false; }
+  status.textContent = 'This handoff is already open in another tab or window. Use that one, or close it and reload this page.';
+  return true;
 }
 
 function failAndCleanup(message) {
@@ -244,7 +255,8 @@ async function bootstrap() {
     const config = await watchCredentials(false).catch((error) => { throw claimError && error.status === 401 ? claimError : error; });
     if (accessEnded) return;
     const connection = openConnection(config);
-    await connection.ready;
+    try { await connection.ready; }
+    catch (error) { if (error.closedBeforeReady && await streamHeldElsewhere(config)) return; throw error; }
   } catch (error) {
     await failAndCleanup(error.message);
   }
