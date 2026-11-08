@@ -560,3 +560,19 @@ test('a failed fence after a viewer drop ends the lease with recovery required',
   assert.equal(status.mode,'recovery_required');assert.equal(status.resumeAllowed,false);assert.equal(status.recoveryRequired,true);assert.ok(fences>=1);
   await assert.rejects(c.request('automationEnter',{callKey:'blocked'}),/uncertain|recovery/i);
 });
+
+test('focus answers come from the browser only while the lease holds control',async t=>{
+  const reads=[];
+  const{controller:c}=await setup(t,{controller:{readFocus:async runtime=>{reads.push(runtime.cdpUrl);return{kind:'editable',inputMode:'email',multiline:false};}}});
+  const lease=await c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30,targetId:'tab'});
+  const viewer=await viewerClient(t,c,lease);
+  const watching=await(await viewer.post('credentials')).json();await viewer.open(watching.generation);
+  assert.equal((await viewer.post('focus')).status,409,'watch mode gets no answer');
+  assert.deepEqual(reads,[]);
+  const control=await(await viewer.post('control')).json();assert.deepEqual(control.capabilities,{clipboard:'utf8',focus:true});await viewer.open(control.generation);
+  assert.deepEqual(await(await viewer.post('focus')).json(),{kind:'editable',inputMode:'email',multiline:false});
+  assert.deepEqual(reads,['http://127.0.0.1:18810']);
+  await assert.rejects(c.supervisor.focusRead('someone-else'),/human control/i);
+  await viewer.post('done');
+  await assert.rejects(c.supervisor.focusRead(lease.id),/human control/i);
+});
