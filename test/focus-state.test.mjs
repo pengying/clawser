@@ -70,6 +70,8 @@ async function windowedChrome(t) {
   pages.push(page);
   const evaluate = async expression => (await page.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })).result.value;
   for (let attempt = 0; attempt < 200 && !(await evaluate('document.readyState === "complete" && !!document.getElementById("frame").contentDocument?.getElementById("card")')); attempt++) await pause(50);
+  // A slow host can still be mapping the window when the page is ready, and a click before that is lost.
+  for (let attempt = 0; attempt < 200 && !(await evaluate('document.visibilityState === "visible" && document.hasFocus()')); attempt++) await pause(50);
   // Real X input, as the viewer's taps reach Chrome through x11vnc.
   const x = script => execute('python3', ['-c', `import ctypes,time
 x=ctypes.CDLL('libX11.so.6'); t=ctypes.CDLL('libXtst.so.6'); x.XOpenDisplay.restype=ctypes.c_void_p
@@ -109,6 +111,11 @@ test('the focused field is reported with its keyboard type and never its content
   for (const [selector, expected] of cases) {
     await chrome.clickElement(selector);
     const focus = await readFocus(chrome.runtime);
+    if (focus.kind !== expected.kind) {
+      const later = await pause(1500).then(() => readFocus(chrome.runtime));
+      t.diagnostic('focus miss on ' + selector + ': ' + await chrome.evaluate('JSON.stringify({ active: document.activeElement?.id || document.activeElement?.tagName, hasFocus: document.hasFocus(), visible: document.visibilityState, screenX, screenY, outerWidth, outerHeight, innerWidth, innerHeight })') +
+        ' later=' + JSON.stringify(later) + ' window=' + (await chrome.x('import subprocess; print(subprocess.run(["xprop","-root","_NET_ACTIVE_WINDOW"],capture_output=True,text=True).stdout.strip())').then(r => r.stdout.trim(), e => 'xprop ' + e.message)));
+    }
     assert.deepEqual(focus, expected, selector);
     assert.doesNotMatch(JSON.stringify(focus), /hunter2|4242|fixed|name|phone|secret|card/, 'no field contents or names leave the browser');
   }
