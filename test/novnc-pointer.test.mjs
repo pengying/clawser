@@ -99,7 +99,8 @@ function attachPeer(socket, peers) {
   });
 }
 
-async function fixture(t, { clipboardBridge = false, retained = false } = {}) {
+// focus, when given, is { answer, requests }: the /focus route returns answer and counts requests.
+async function fixture(t, { clipboardBridge = false, retained = false, focus } = {}) {
   assert.equal(JSON.parse(await readFile(join(assets, 'package.json'), 'utf8')).version, '1.7.0', 'use the pinned noVNC release');
   const peers = [];
   const clipboardRequests = [];
@@ -109,7 +110,14 @@ async function fixture(t, { clipboardBridge = false, retained = false } = {}) {
       const path = new URL(request.url, 'http://fixture').pathname;
       if (path.endsWith('/credentials')) {
         response.setHeader('Content-Type', 'application/json');
-        return response.end(JSON.stringify({ mode: 'control', password: 'unused', generation: 0, ...(clipboardBridge ? { capabilities: { clipboard: 'utf8' } } : {}) }));
+        const capabilities = { ...(clipboardBridge ? { clipboard: 'utf8' } : {}), ...(focus ? { focus: true } : {}) };
+        return response.end(JSON.stringify({ mode: 'control', password: 'unused', generation: 0, ...(Object.keys(capabilities).length ? { capabilities } : {}) }));
+      }
+      if (path.endsWith('/focus')) {
+        if (!focus) { response.writeHead(404); return response.end('{}'); }
+        focus.requests++;
+        response.setHeader('Content-Type', 'application/json');
+        return response.end(JSON.stringify(focus.answer));
       }
       if (path.endsWith('/clipboard')) {
         let body = ''; for await (const chunk of request) body += chunk;
@@ -594,4 +602,84 @@ test('a stationary touch holds the remote button until lift; taps still click an
   await waitFor(`document.querySelector('#status').textContent.includes('Test browser destroyed.')`, 'Done completes');
   assert.equal(peer.pointers.at(-1).mask, 0, 'Done releases a held button before ending access');
   await touch('touchEnd', []);
+});
+
+async function phone(t, focus) {
+  const ctx = await fixture(t, { focus });
+  await ctx.cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+  await ctx.cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  await ctx.cdp.send('Page.navigate', { url: ctx.url });
+  await ctx.waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'RFB connected');
+  await ctx.evaluate(`document.querySelector('#collapse').click()`);
+  const touch = (type, points) => ctx.cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([x, y], id) => ({ x, y, id, radiusX: 1, radiusY: 1, force: 1 })) });
+  // Taps at a framebuffer point, so a test can aim at the browser toolbar or the page.
+  const tap = async (fx, fy) => {
+    const [x, y] = await ctx.evaluate(`(() => { const r = document.querySelector('canvas').getBoundingClientRect(), s = r.width / ${width}; return [r.left + ${fx} * s, r.top + ${fy} * s]; })()`);
+    await touch('touchStart', [[x, y]]); await touch('touchEnd', []);
+  };
+  const keyboard = () => ctx.evaluate(`({ open: document.activeElement?.id === 'keyboard-input', inputMode: document.querySelector('#keyboard-input').inputMode, pressed: document.querySelector('#keyboard').getAttribute('aria-pressed') })`);
+  return { ...ctx, tap, keyboard };
+}
+const noVncSkip = !assets ? 'set NOVNC_ASSETS_DIR to the noVNC 1.7.0 source tree' : !existsSync(chromePath) ? 'Chrome unavailable' : false;
+
+test('a tap that focuses a remote text field opens the keyboard with that field’s layout', { skip: noVncSkip }, async t => {
+  const focus = { answer: { kind: 'editable', inputMode: 'tel', multiline: false }, requests: 0 };
+  const { tap, keyboard, waitFor, peers } = await phone(t, focus);
+  const before = peers.at(-1).pointers.length;
+  await tap(640, 400);
+  await waitFor(`document.activeElement?.id === 'keyboard-input'`, 'the keyboard opened after the tap');
+  assert.deepEqual(await keyboard(), { open: true, inputMode: 'tel', pressed: 'true' });
+  assert.ok(peers.at(-1).pointers.slice(before).some(event => event.mask === 1), 'the tap still clicked the remote field');
+  assert.ok(focus.requests >= 1);
+  focus.answer = { kind: 'editable', inputMode: 'email', multiline: false };
+  await tap(640, 500);
+  await waitFor(`document.querySelector('#keyboard-input').inputMode === 'email'`, 'a tap on another field switches the layout');
+  assert.equal((await keyboard()).open, true);
+  focus.answer = { kind: 'none' };
+  await tap(640, 600);
+  await waitFor(`document.activeElement?.id !== 'keyboard-input'`, 'a tap away from any field closes the keyboard it opened');
+});
+
+test('a keyboard the owner opened stays open when a tap lands outside a field', { skip: noVncSkip }, async t => {
+  const focus = { answer: { kind: 'none' }, requests: 0 };
+  const { tap, keyboard, evaluate } = await phone(t, focus);
+  await evaluate(`document.querySelector('#restore').click(); document.querySelector('#keyboard').click()`);
+  assert.equal((await keyboard()).open, true);
+  // The toolbar stays open, as it is while someone types. This tap lands below it.
+  await tap(640, 680);
+  for (let n = 0; n < 100 && focus.requests < 1; n++) await pause(20);
+  assert.ok(focus.requests >= 1, 'the tap was checked');
+  await pause(900);
+  assert.equal((await keyboard()).open, true, 'the owner’s keyboard is left alone');
+});
+
+test('Chrome’s own toolbar opens the keyboard only for a tap at the top of the browser', { skip: noVncSkip }, async t => {
+  const focus = { answer: { kind: 'browser-ui' }, requests: 0 };
+  const { tap, keyboard, waitFor } = await phone(t, focus);
+  await tap(640, 400);
+  for (let n = 0; n < 100 && focus.requests < 1; n++) await pause(20);
+  await pause(900);
+  assert.equal((await keyboard()).open, false, 'a tap in the page area does not open it for browser UI');
+  await tap(400, 60);
+  await waitFor(`document.activeElement?.id === 'keyboard-input'`, 'a tap on the address bar opens the keyboard');
+  assert.equal((await keyboard()).inputMode, 'url');
+});
+
+test('an unknown focus answer, or a viewer without the focus capability, leaves the keyboard alone', { skip: noVncSkip }, async t => {
+  await t.test('unknown', async t => {
+    const focus = { answer: { kind: 'unknown' }, requests: 0 };
+    const { tap, keyboard } = await phone(t, focus);
+    await tap(640, 400);
+    for (let n = 0; n < 100 && focus.requests < 1; n++) await pause(20);
+    await pause(900);
+    assert.equal((await keyboard()).open, false);
+  });
+  await t.test('no capability', async t => {
+    const { tap, keyboard, peers } = await phone(t, undefined);
+    const before = peers.at(-1).pointers.length;
+    await tap(640, 400);
+    for (let n = 0; n < 100 && !peers.at(-1).pointers.slice(before).some(event => event.mask === 1); n++) await pause(10);
+    await pause(500);
+    assert.equal((await keyboard()).open, false);
+  });
 });

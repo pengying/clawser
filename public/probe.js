@@ -536,17 +536,48 @@ keyboardInput.addEventListener('keydown', (event) => {
 });
 // Preserve focus until click so the same button can also dismiss the keyboard.
 document.getElementById('keyboard').addEventListener('pointerdown', event => event.preventDefault());
-document.getElementById('keyboard').addEventListener('click', () => {
-  if (!controlReady || accessEnded) return;
-  if (document.activeElement === keyboardInput) { keyboardInput.blur(); return; }
+function openKeyboard(inputMode = 'text') {
+  keyboardInput.inputMode = inputMode;
+  if (document.activeElement === keyboardInput) return;
   keyboardInput.focus({ preventScroll: true });
   keyboardInput.setSelectionRange(keyboardInput.value.length, keyboardInput.value.length);
+}
+document.getElementById('keyboard').addEventListener('click', () => {
+  if (!controlReady || accessEnded) return;
+  autoKeyboard = false;
+  if (document.activeElement === keyboardInput) { keyboardInput.blur(); return; }
+  openKeyboard();
 });
+
+// After a tap, ask the gateway what the agent's browser focused, and open or close this keyboard to match.
+// Phones open a keyboard only shortly after a tap, so this runs once per tap and never on its own.
+// It closes only a keyboard it opened itself, never one the owner opened with the Keyboard button.
+const toolbarBandPx = 100;
+let autoKeyboard = false;
+let focusCheck;
+function checkFocusAfterTap(framebufferY) {
+  const connection = activeConnection;
+  if (!connection?.capabilities.focus || focusCheck || !controlReady || accessEnded) return;
+  focusCheck = (async () => {
+    let answer;
+    for (const wait of [150, 350]) {
+      await new Promise(resolve => setTimeout(resolve, wait));
+      if (!controlReady || accessEnded || connection !== activeConnection) return;
+      try { answer = await post('focus'); } catch { return; }
+      if (answer.kind !== 'none') break;
+    }
+    if (!controlReady || accessEnded || connection !== activeConnection) return;
+    if (answer.kind === 'editable') { openKeyboard(answer.inputMode); autoKeyboard = true; }
+    else if (answer.kind === 'browser-ui' && framebufferY < toolbarBandPx) { openKeyboard('url'); autoKeyboard = true; }
+    else if (answer.kind === 'none' && autoKeyboard && document.activeElement === keyboardInput) keyboardInput.blur();
+  })().finally(() => { focusCheck = undefined; });
+}
 keyboardInput.addEventListener('focus', () => {
   document.getElementById('keyboard').setAttribute('aria-pressed', 'true');
   if (activeConnection) activeConnection.instance.focusOnClick = false;
 });
 keyboardInput.addEventListener('blur', () => {
+  autoKeyboard = false;
   document.getElementById('keyboard').setAttribute('aria-pressed', 'false');
   if (activeConnection) activeConnection.instance.focusOnClick = controlReady;
 });
@@ -685,4 +716,5 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
   gesture.canvas.dispatchEvent(new MouseEvent('mousedown', mouseOptions(gesture.x, gesture.y, 1)));
   // noVNC's window capture proxy must receive mouseup to release its overlay.
   window.dispatchEvent(new MouseEvent('mouseup', mouseOptions(gesture.x, gesture.y, 0)));
+  checkFocusAfterTap((gesture.y - gesture.canvas.getBoundingClientRect().top) / displayScale);
 }, { capture: true, passive: false });
