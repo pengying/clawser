@@ -103,3 +103,80 @@ test('watch-only permission cannot acquire control', async t => {
   const watch = await (await ctx.post('credentials')).json(); await ctx.open(watch.generation);
   assert.equal((await ctx.post('control')).status, 403);
 });
+
+test('focus is control-only, passes only the field kind, and is advertised as a capability', async t => {
+  const reads = [];
+  const ctx = await fixture(t, { supervisor: { async focusRead(id) { reads.push(id); return { kind: 'editable', inputMode: 'tel', multiline: false, value: 'leak', url: 'https://x' }; } } });
+  assert.equal((await ctx.post('focus')).status, 409, 'no focus answers before control');
+  const watch = await (await ctx.post('credentials')).json(); const oldSocket = await ctx.open(watch.generation);
+  assert.equal((await ctx.post('focus')).status, 409, 'watch mode gets no focus answers');
+  const oldClosed = once(oldSocket, 'close');
+  const control = await (await ctx.post('control')).json(); await oldClosed; await ctx.open(control.generation);
+  assert.deepEqual(control.capabilities, { clipboard: 'utf8', focus: true });
+  const reply = await ctx.post('focus');
+  assert.equal(reply.status, 200);
+  assert.deepEqual(await reply.json(), { kind: 'editable', inputMode: 'tel', multiline: false }, 'only the kind and keyboard type reach the viewer');
+  assert.deepEqual(reads, [ctx.invite.id]);
+  await ctx.post('done');
+  assert.equal((await ctx.post('focus')).status, 410);
+});
+
+test('a focus answer outside the allowed kinds becomes unknown', async t => {
+  let answer;
+  const ctx = await fixture(t, { supervisor: { async focusRead() { return answer; } } });
+  const watch = await (await ctx.post('credentials')).json(); const oldSocket = await ctx.open(watch.generation);
+  const oldClosed = once(oldSocket, 'close');
+  const control = await (await ctx.post('control')).json(); await oldClosed; await ctx.open(control.generation);
+  for (answer of [{ kind: 'secret' }, { kind: 'editable', inputMode: 'javascript:alert(1)' }, null, { kind: 'browser-ui' }, { kind: 'none' }]) {
+    const body = await (await ctx.post('focus')).json();
+    const expected = answer?.kind === 'browser-ui' || answer?.kind === 'none' ? { kind: answer.kind } : { kind: 'unknown' };
+    assert.deepEqual(body, expected, JSON.stringify(answer));
+  }
+});
+
+test('a focus answer says whether text is selected, and nothing more about it', async t => {
+  let answer;
+  const ctx = await fixture(t, { supervisor: { async focusRead() { return answer; } } });
+  const watch = await (await ctx.post('credentials')).json(); const oldSocket = await ctx.open(watch.generation);
+  const oldClosed = once(oldSocket, 'close');
+  const control = await (await ctx.post('control')).json(); await oldClosed; await ctx.open(control.generation);
+  const cases = [
+    [{ kind: 'none', selected: true, text: 'leak' }, { kind: 'none', selected: true }],
+    [{ kind: 'editable', inputMode: 'text', multiline: false, selected: true }, { kind: 'editable', inputMode: 'text', multiline: false, selected: true }],
+    [{ kind: 'none', selected: 'the selected words' }, { kind: 'none' }],
+    [{ kind: 'none', selected: false }, { kind: 'none' }],
+    [{ kind: 'browser-ui', selected: true }, { kind: 'browser-ui' }],
+    [{ kind: 'unknown', selected: true }, { kind: 'unknown' }],
+  ];
+  for ([answer] of cases) {
+    const expected = cases.find(([state]) => state === answer)[1];
+    assert.deepEqual(await (await ctx.post('focus')).json(), expected, JSON.stringify(answer));
+  }
+});
+
+test('a gateway without a focus reader keeps the focus capability off', async t => {
+  const ctx = await fixture(t);
+  const watch = await (await ctx.post('credentials')).json(); const oldSocket = await ctx.open(watch.generation);
+  const oldClosed = once(oldSocket, 'close');
+  const control = await (await ctx.post('control')).json(); await oldClosed; await ctx.open(control.generation);
+  assert.deepEqual(control.capabilities, { clipboard: 'utf8' });
+  assert.equal((await ctx.post('focus')).status, 404);
+});
+
+test('frequent focus checks do not use up the request limit that Done relies on', async t => {
+  const ctx = await fixture(t, { supervisor: { async focusRead() { return { kind: 'none' }; } } });
+  const watch = await (await ctx.post('credentials')).json(); const oldSocket = await ctx.open(watch.generation);
+  const oldClosed = once(oldSocket, 'close');
+  const control = await (await ctx.post('control')).json(); await oldClosed; await ctx.open(control.generation);
+  for (let tap = 0; tap < 40; tap++) assert.equal((await ctx.post('focus')).status, 200, 'tap ' + tap);
+  assert.equal((await ctx.post('done')).status, 200);
+});
+
+test('focus checks with a wrong cookie still count toward the guessing limit', async t => {
+  const ctx = await fixture(t, { supervisor: { async focusRead() { return { kind: 'none' }; } } });
+  const wrong = () => fetch(ctx.base + 'focus', { method: 'POST', headers: { origin: new URL(ctx.base).origin, 'content-type': 'application/json', cookie: 'novnc_probe=wrong' }, body: '{}' });
+  const statuses = [];
+  for (let attempt = 0; attempt < 31; attempt++) statuses.push((await wrong()).status);
+  assert.equal(statuses[0], 401);
+  assert.equal(statuses.at(-1), 429);
+});

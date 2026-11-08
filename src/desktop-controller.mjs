@@ -5,6 +5,7 @@ import { ControlGate } from './leases.mjs';
 import { NoVncProbeGateway } from './novnc-probe.mjs';
 import { CdpConnection, validateCdpUrl } from './cdp.mjs';
 import { DesktopRpcServer } from './desktop-rpc.mjs';
+import { readFocus as readBrowserFocus } from './focus-state.mjs';
 
 const receiptFlags=['vncProcessesExited','xClientsAbsent','heldInputCleared','xSyncComplete'];
 const recoveryMessage='Browser input outcome uncertain; operator recovery is required';
@@ -81,13 +82,13 @@ export class DesktopController {
   createGeneration=0;
   writes=Promise.resolve();
   runtimeQueue=Promise.resolve();
-  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,observe=observeDesktop,activateTarget=activateDesktopTarget,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
+  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
     if(!stateDir||!profile||!runtime||!transport)throw new Error('Desktop controller requires stateDir, profile, runtime and transport');
     if(!Number.isInteger(supervisorHeartbeatMs)||supervisorHeartbeatMs<1||supervisorHeartbeatMs>5000)throw new Error('Invalid supervisor heartbeat interval');
-    Object.assign(this,{stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,supervisorHeartbeatMs});
+    Object.assign(this,{stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs});
     this.socketPath=socketPath||join(this.stateDir,'desktop.sock');
     this.transport.on?.('failure',()=>{void this.transportFailed();});
-    this.supervisor={create:params=>this.createActor(params),read:async id=>({state:this.actors.has(id)?'running':'stopped'}),register:params=>this.registration(params.ownedId),promote:params=>this.promote(params),cancelPromotion:id=>this.cancelPromotion(id),demote:params=>this.demote(params),destroy:(id,options)=>this.retire(id,options),verifyExited:async id=>this.ledger.leases[id]?.state==='ended'&&safeCompletion(this.ledger.leases[id]),clipboardRead:id=>this.clipboard(id),clipboardWrite:(id,text)=>this.clipboard(id,text)};
+    this.supervisor={create:params=>this.createActor(params),read:async id=>({state:this.actors.has(id)?'running':'stopped'}),register:params=>this.registration(params.ownedId),promote:params=>this.promote(params),cancelPromotion:id=>this.cancelPromotion(id),demote:params=>this.demote(params),destroy:(id,options)=>this.retire(id,options),verifyExited:async id=>this.ledger.leases[id]?.state==='ended'&&safeCompletion(this.ledger.leases[id]),clipboardRead:id=>this.clipboard(id),clipboardWrite:(id,text)=>this.clipboard(id,text),focusRead:id=>this.focus(id)};
     this.gateway=gatewayFactory({...gatewayOptions,supervisor:this.supervisor,noVncAssetsDir,prefix:'/browser/',completionDisposition:'retained',capabilities:{clipboard:'utf8'},maxProbes:1,promotionMs:120_000,onEnded:(session,status)=>this.ended(session,status)});
     this.rpc=new DesktopRpcServer({socketPath:this.socketPath,handler:(method,params,context)=>this.request(method,params,context),onDisconnect:keys=>this.disconnected(keys),onLockLost:()=>{this.poison();this.ready=false;void this.gateway.close();}});
   }
@@ -258,6 +259,8 @@ export class DesktopController {
     if(status?.mode==='cleanup_failed'){row.state='recovery_required';row.recoveryStage ||= 'gateway_cleanup';this.poison();}
     try{await this.persist();}catch(error){row.state='recovery_required';row.recoveryStage='completion_persistence';row.recoveryCode='journal_persistence';this.poison();await this.persist().catch(()=>{});throw error;}
   }
+  // Read-only, so it skips the runtime queue: a tap's focus check must not wait behind input retirement.
+  async focus(id){const row=this.ledger.leases[id];if(!row||row.state!=='control'||this.gate.holder!==id||this.gate.poisonReason)throw new Error('Focus requires current human control');return this.readFocus(this.runtime);}
   async clipboard(id,text){const row=this.ledger.leases[id];if(!row||row.state!=='control'||this.gate.holder!==id||this.gate.poisonReason)throw new Error('Clipboard requires current human control');return this.runtimeOperation(async()=>{if(row.state!=='control')throw new Error('Clipboard authority ended');return text===undefined?this.runtime.clipboardRead({leaseId:id,epoch:row.epoch}):this.runtime.clipboardWrite(text,{leaseId:id,epoch:row.epoch});});}
   owned(owner,id){ownerParts(owner);const row=this.ledger.leases[id];if(!row||row.owner!==owner)throw new Error('Lease belongs to another owner session');return row;}
   status(row){

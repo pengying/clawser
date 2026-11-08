@@ -1081,6 +1081,20 @@ test('an unexpected drop reconnects in watch mode with the same cookie and requi
   assert.equal(await evaluate('document.querySelector("#keyboard").disabled'), true, 'remote input stays off until control is retaken');
 });
 
+test('Take control hides the controls once control connects, and a drop brings them back', { skip: !existsSync(chromePath) }, async (t) => {
+  const { evaluate, waitFor } = await openProbeFixture(t, { signalPromotionClose: true, credentialsDemoting: 2 });
+  await waitFor('fixture.rfbs.length === 1 && document.querySelector("#control").disabled === false', 'watch connection became ready');
+  const shown = () => evaluate('({ toolbar: !document.querySelector("#toolbar").hidden, restore: !document.querySelector("#restore").hidden })');
+  assert.deepEqual(await shown(), { toolbar: true, restore: false }, 'watch mode shows the controls');
+  await evaluate('document.querySelector("#control").click()');
+  await waitFor('fixture.rfbs.length === 2 && /Control connected/.test(document.querySelector("#status").textContent)', 'control connected');
+  assert.deepEqual(await shown(), { toolbar: false, restore: true }, 'the controls fold away so the whole browser is free to use');
+  assert.equal(await evaluate('document.activeElement.id'), 'restore', 'focus moves to the tab that brings the controls back');
+  await evaluate('fixture.rfbs[1].drop()');
+  await waitFor('/Reconnecting in watch mode/.test(document.querySelector("#status").textContent)', 'drop shows a watch reconnect');
+  assert.deepEqual(await shown(), { toolbar: true, restore: false }, 'losing control shows the controls again, with Take control in reach');
+});
+
 test('a reopened claimed link resumes in watch mode with its existing cookie', { skip: !existsSync(chromePath) }, async (t) => {
   const { evaluate, waitFor } = await openProbeFixture(t, { claimReused: true });
   await waitFor('fixture.rfbs.length === 1 && /Watching/.test(document.querySelector("#status").textContent)', 'reopened link resumed with the cookie');

@@ -35,6 +35,17 @@ function security(res) {
   res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
 }
 
+const FOCUS_MODES = new Set(['text', 'decimal', 'numeric', 'tel', 'search', 'email', 'url']);
+// Only these fields reach the viewer, whatever the focus reader returns.
+function focusAnswer(state) {
+  // Selection is a strict yes, so Copy can be offered. Nothing about the selected text passes.
+  const selected = state?.selected === true ? { selected: true } : {};
+  if (state?.kind === 'editable' && FOCUS_MODES.has(state.inputMode)) return { kind: 'editable', inputMode: state.inputMode, multiline: state.multiline === true, ...selected };
+  if (state?.kind === 'none') return { kind: 'none', ...selected };
+  if (state?.kind === 'browser-ui') return { kind: 'browser-ui' };
+  return { kind: 'unknown' };
+}
+
 function sendJson(res, status, value, headers = {}) {
   if (res.writableEnded) return;
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...headers });
@@ -134,7 +145,8 @@ export class NoVncProbeGateway {
     if (completionDisposition !== undefined && completionDisposition !== 'retained') throw new Error('Invalid completion disposition');
     this.prefix = prefix;
     this.completionDisposition = completionDisposition;
-    this.capabilities = { ...(capabilities.clipboard === 'utf8' ? { clipboard: 'utf8' } : {}) };
+    this.capabilities = { ...(capabilities.clipboard === 'utf8' ? { clipboard: 'utf8' } : {}),
+      ...(typeof supervisor?.focusRead === 'function' ? { focus: true } : {}) };
     this.onEnded = onEnded;
     this.allowLanHttp = allowLanHttp;
     this.publicBaseUrl = publicBaseUrl ? validateOrigin(publicBaseUrl, allowLanHttp) : undefined;
@@ -294,10 +306,12 @@ export class NoVncProbeGateway {
     session.attempts.push(this.now());
   }
 
-  authorize(req, session) {
-    this.recordAttempt(session);
-    if (['ending', 'ended', 'cleanup_failed'].includes(session.mode)) throw problem('Probe access ended', 410);
-    if (!matches(cookieValue(req), session.sessionHash)) throw problem('Invalid viewer session', 401);
+  // countSuccess false still counts every failed attempt. The viewer checks focus after each tap,
+  // so counting those would use up the limit that guards against guessing the cookie.
+  authorize(req, session, { countSuccess = true } = {}) {
+    if (countSuccess) this.recordAttempt(session);
+    if (['ending', 'ended', 'cleanup_failed'].includes(session.mode)) { if (!countSuccess) this.recordAttempt(session); throw problem('Probe access ended', 410); }
+    if (!matches(cookieValue(req), session.sessionHash)) { if (!countSuccess) this.recordAttempt(session); throw problem('Invalid viewer session', 401); }
     if (session.expiresAt <= this.now()) { void this.end(session, 'expired'); throw problem('Probe expired', 410); }
     return session;
   }
@@ -317,7 +331,7 @@ export class NoVncProbeGateway {
         return `${prefix}` + suffix;
       };
       const page = url.pathname.match(new RegExp('^' + routePath('([a-f0-9]{32})/$')));
-      const action = url.pathname.match(new RegExp('^' + routePath('([a-f0-9]{32})/(claim|credentials|control|done|clipboard)$')));
+      const action = url.pathname.match(new RegExp('^' + routePath('([a-f0-9]{32})/(claim|credentials|control|done|clipboard|focus)$')));
       if (req.method === 'GET' && page) {
         const session = this.sessionFor(page[1]);
         if (['ending', 'ended', 'cleanup_failed'].includes(session.mode)) throw problem('Probe access ended', 410);
@@ -344,6 +358,11 @@ export class NoVncProbeGateway {
         const failed = session.mode === 'cleanup_failed';
         return sendJson(res, failed ? 503 : 200, { mode: session.mode, reason: session.reason || 'done',
           ...(this.completionDisposition ? { disposition: this.completionDisposition } : {}) });
+      }
+      if (action[2] === 'focus') {
+        if (!this.capabilities.focus) throw problem('Not found', 404);
+        this.authorize(req, session, { countSuccess: false });
+        return await this.focus(res, session);
       }
       this.authorize(req, session);
       this.observeIngress(req, session);
@@ -418,6 +437,15 @@ export class NoVncProbeGateway {
     }, Math.max(1, session.reconnectBy - this.now()));
     session.promotionTimer.unref();
     sendJson(res, 200, { mode: 'control-pending', password: session.credentials.control, generation: session.generation, reconnectBy: session.reconnectBy, ...this.viewerCapabilities(session) });
+  }
+
+  async focus(res, session) {
+    if (session.mode !== 'control') throw problem('Take control before reading focus', 409);
+    const generation = session.generation;
+    let state;
+    try { state = await this.supervisor.focusRead(session.ownedId); } catch { state = undefined; }
+    if (session.mode !== 'control' || session.generation !== generation) throw problem('Control ended', 409);
+    sendJson(res, 200, focusAnswer(state));
   }
 
   async clipboard(res, session, input) {
