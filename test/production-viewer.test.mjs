@@ -25,13 +25,14 @@ async function fixture(t, options = {}) {
   const invite = await gateway.createProbe({ ttlSeconds: 60, permission: options.permission || 'control' });
   const url = new URL(invite.url), base = url.origin + url.pathname;
   const post = (action, body = {}, cookie) => fetch(base + action, { method: 'POST', headers: { origin: url.origin, 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, body: JSON.stringify(body) });
-  const claim = await post('claim', { token: url.hash.slice(8) });
-  const cookie = claim.headers.get('set-cookie')?.split(';')[0];
+  let cookie;
+  const claim = async () => { const reply = await post('claim', { token: url.hash.slice(8) }); cookie = reply.headers.get('set-cookie')?.split(';')[0]; return reply; };
+  if (options.claim !== false) await claim();
   const open = async generation => {
-    const ws = new WebSocket(base.replace('http:', 'ws:') + 'stream/' + generation, { origin: url.origin, headers: { cookie } });
+    const ws = new WebSocket(base.replace('http:', 'ws:') + 'stream/' + generation, { origin: url.origin, headers: cookie ? { cookie } : {} });
     ws.on('error', () => {}); t.after(() => ws.terminate()); await once(ws, 'open'); return ws;
   };
-  return { gateway, invite, base, post: (action, body) => post(action, body, cookie), cookie, open, destroys: () => destroys };
+  return { gateway, invite, base, claim, post: (action, body) => post(action, body, cookie), get cookie() { return cookie; }, open, destroys: () => destroys };
 }
 
 test('production prefix serves the viewer, routes assets, and scopes its cookie', async t => {
@@ -179,4 +180,61 @@ test('focus checks with a wrong cookie still count toward the guessing limit', a
   for (let attempt = 0; attempt < 31; attempt++) statuses.push((await wrong()).status);
   assert.equal(statuses[0], 401);
   assert.equal(statuses.at(-1), 429);
+});
+
+// Someone who learns a handoff's id, but not its cookie, can send as many requests as they like.
+// Those wrong guesses are throttled on their own. They never use up what the owner needs.
+async function controlled(ctx) {
+  const watch = await (await ctx.post('credentials')).json(); const oldSocket = await ctx.open(watch.generation);
+  const oldClosed = once(oldSocket, 'close');
+  const control = await (await ctx.post('control')).json(); await oldClosed;
+  return { control, socket: await ctx.open(control.generation) };
+}
+const guess = (ctx, action, body = {}) => fetch(ctx.base + action, { method: 'POST', headers: { origin: new URL(ctx.base).origin, 'content-type': 'application/json', cookie: 'novnc_probe=wrong' }, body: JSON.stringify(body) });
+
+test('a flood of wrong cookies is throttled without blocking the owner', async t => {
+  const ctx = await fixture(t, { supervisor: { async focusRead() { return { kind: 'none' }; } } });
+  const statuses = [];
+  for (let attempt = 0; attempt < 60; attempt++) statuses.push((await guess(ctx, attempt % 2 ? 'credentials' : 'done')).status);
+  assert.equal(statuses[0], 401);
+  assert.ok(statuses.slice(-10).every(status => status === 429), 'the guesser is throttled: ' + statuses.slice(-10));
+  const { control } = await controlled(ctx);
+  assert.equal(control.mode, 'control-pending', 'credentials, Take control and the stream still work for the owner');
+  assert.equal((await ctx.post('clipboard', { action: 'write', text: 'still works' })).status, 200);
+  assert.equal((await ctx.post('focus')).status, 200);
+  const done = await ctx.post('done');
+  assert.equal(done.status, 200, 'Done still works');
+  assert.equal((await done.json()).mode, 'ended');
+});
+
+test('wrong invitation tokens cannot use up the real claim', async t => {
+  let claimed;
+  const ctx = await fixture(t, { claim: false });
+  for (let attempt = 0; attempt < 60; attempt++) {
+    const reply = await fetch(ctx.base + 'claim', { method: 'POST', headers: { origin: new URL(ctx.base).origin, 'content-type': 'application/json' }, body: JSON.stringify({ token: 'wrong' + attempt }) });
+    assert.ok([401, 429].includes(reply.status), String(reply.status));
+  }
+  claimed = await ctx.claim();
+  assert.equal(claimed.status, 200, 'the real invitation still claims');
+});
+
+test('a guesser who used up their budget recovers after a minute, and the budget does not grow without limit', async t => {
+  let clock = Date.now();
+  const ctx = await fixture(t, { gateway: { now: () => clock } });
+  for (let attempt = 0; attempt < 200; attempt++) await guess(ctx, 'credentials');
+  assert.equal((await guess(ctx, 'credentials')).status, 429);
+  const session = ctx.gateway.sessions.get(ctx.invite.id);
+  assert.ok(JSON.stringify(session).length < 8000, 'throttling state stays small however many requests arrive');
+  clock += 61_000;
+  assert.equal((await guess(ctx, 'credentials')).status, 401, 'the guess is checked again after the window passes');
+});
+
+test('the owner has a generous budget of their own, and Done is never refused for it', async t => {
+  const ctx = await fixture(t);
+  const statuses = [];
+  for (let request = 0; request < 400; request++) statuses.push((await ctx.post('credentials')).status);
+  assert.equal(statuses[0], 200);
+  assert.equal(statuses.at(-1), 429, 'a runaway viewer is still bounded');
+  assert.ok(statuses.slice(0, 100).every(status => status === 200), 'ordinary use never meets the limit');
+  assert.equal((await ctx.post('done')).status, 200, 'Done does not share the request budget');
 });
