@@ -10,15 +10,16 @@
 </head>
 <body>
   <main id="viewport" aria-label="Remote browser"><div id="stage"><section id="screen" aria-label="Browser display"></section></div></main>
-  <aside id="toolbar" class="controls" aria-label="Browser controls">
-    <div class="toolbar-top"><button id="drag-handle" aria-label="Move controls. Use arrow keys to reposition." title="Drag to move controls" type="button">⠿</button><span id="mode">Private watch session</span><button id="collapse" type="button" aria-label="Hide controls" title="Hide controls">‹</button></div>
-    <div class="actions"><button id="control" type="button" disabled>Take control</button><button id="done" type="button">Done</button></div>
-    <div class="actions zoom" aria-label="Display zoom"><button id="zoom-out" type="button" aria-label="Zoom out">−</button><output id="zoom-level" aria-live="polite">Fit</output><button id="zoom-in" type="button" aria-label="Zoom in">+</button><button id="zoom-fit" type="button">Fit</button><button id="zoom-actual" type="button">100%</button></div>
-    <div class="actions"><button id="keyboard" type="button" disabled aria-pressed="false">Keyboard</button><button id="copy" title="Copy the current selection from the browser to this device" type="button" disabled>Copy</button><button id="paste" title="Paste this device’s clipboard into the focused browser field" type="button" disabled>Paste</button><button id="drag-once" type="button" disabled aria-pressed="false" title="Use the next touch to drag a slider, selection, or puzzle. Returns to scrolling after release.">Drag once</button></div>
-    <p id="status" role="status" aria-live="polite">Authenticating…</p>
-    <p class="notice">Swipe to scroll. Pinch to zoom. Double-tap a word to select it and copy. Touch and hold in a field to paste, or hold and drag to select more. Use Drag once for sliders.</p>
-  </aside>
-  <button id="restore" type="button" aria-label="Show browser controls" hidden>Controls ›</button>
+  <header id="bar" aria-label="Browser controls">
+    <div class="bar-row">
+      <div id="bar-left"><span id="bar-status" role="img" aria-label="Watching" data-state="watching"><svg id="icon-watching" class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg><svg id="icon-control" class="ico" viewBox="0 0 24 24" aria-hidden="true" hidden><path d="M9.5 9.5l4 10.5 1.7-4.4 4.3-1.8z"/><path d="M5 5l2 2M9.5 2.5V5.5M2.5 9.5H5.5M14 5l-2 2"/></svg></span></div>
+      <div id="bar-center"><button id="control" class="txt go" type="button" disabled>Take control</button><div id="input-mode" hidden></div></div>
+      <div id="bar-right"><button id="keyboard" class="ib" type="button" disabled aria-pressed="false" aria-label="Keyboard" hidden><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="6" width="20" height="13" rx="2.4"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 15h10"/></svg></button><button id="more" class="ib" type="button" aria-label="More controls" aria-expanded="false"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h.01M12 12h.01M18 12h.01" stroke-width="3.2"/></svg></button><button id="done" class="txt" type="button">Done</button></div>
+    </div>
+    <button id="zoom-out" type="button" aria-label="Zoom out" hidden>−</button><output id="zoom-level" aria-live="polite" hidden>Fit</output><button id="zoom-in" type="button" aria-label="Zoom in" hidden>+</button><button id="zoom-fit" type="button" hidden>Fit</button><button id="zoom-actual" type="button" hidden>100%</button><button id="copy" title="Copy the current selection from the browser to this device" type="button" disabled hidden>Copy</button><button id="paste" title="Paste this device’s clipboard into the focused browser field" type="button" disabled hidden>Paste</button>
+  </header>
+  <button id="bar-tab" type="button" aria-label="Show controls" hidden><span class="tab-shape"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></span></button>
+  <p id="status" role="status" aria-live="polite">Authenticating…</p>
   <div id="quick-actions" hidden><button id="quick-copy" type="button" title="Copy the selected text to this device" hidden>Copy</button><button id="quick-paste" type="button" title="Paste this device’s clipboard into the focused field" hidden>Paste</button></div>
   <dialog id="clipboard-dialog" aria-labelledby="clipboard-title"><form method="dialog"><div class="clipboard-content"><h2 id="clipboard-title">Clipboard</h2><p id="clipboard-help"></p><textarea id="clipboard-text" aria-label="Clipboard text" rows="6" spellcheck="false"></textarea></div><div class="actions clipboard-actions"><button id="clipboard-send" type="button">Paste into browser</button><button type="submit">Close</button></div></form></dialog>
   <textarea id="keyboard-input" aria-label="Remote keyboard input" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" tabindex="-1"></textarea>

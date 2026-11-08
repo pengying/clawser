@@ -2,7 +2,6 @@ const screen = document.getElementById('screen');
 const control = document.getElementById('control');
 const done = document.getElementById('done');
 const status = document.getElementById('status');
-const mode = document.getElementById('mode');
 const base = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
 const requestTimeoutMs = 12_000;
 const assetTimeoutMs = 12_000;
@@ -24,7 +23,8 @@ let expiresAt = 0;
 let remoteClipboard = '';
 const viewport = document.getElementById('viewport');
 const stage = document.getElementById('stage');
-const toolbar = document.getElementById('toolbar');
+const bar = document.getElementById('bar');
+const barTab = document.getElementById('bar-tab');
 const keyboardInput = document.getElementById('keyboard-input');
 let zoomMode = 'fit';
 let displayScale = 1;
@@ -80,7 +80,7 @@ async function reconnectWatch() {
   if (reconnecting || accessEnded) return;
   reconnecting = true;
   status.textContent = 'Connection interrupted. Reconnecting in watch mode…';
-  mode.textContent = 'Private watch session';
+  setBarState('watching');
   try {
     for (;;) {
       const config = await watchCredentials(true);
@@ -122,7 +122,7 @@ function openConnection(config) {
     if (connection.retiring || accessEnded) return;
     connected = true;
     status.textContent = config.mode === 'watch' ? 'Watching. Take control to interact.' : 'Control connected.';
-    mode.textContent = config.mode === 'watch' ? 'Private watch session' : 'Private control session';
+    setBarState(config.mode === 'watch' ? 'watching' : 'control');
     control.disabled = config.mode !== 'watch' || config.permission === 'watch';
     controlReady = config.mode !== 'watch';
     updateInputControls();
@@ -139,7 +139,7 @@ function openConnection(config) {
     controlReady = false;
     updateInputControls();
     // Losing control puts Take control and the status line back in reach.
-    if (config.mode !== 'watch') showToolbar();
+    if (config.mode !== 'watch') showBar();
     control.disabled = true;
     disconnectedResolve();
     if (!connected) readyReject(Object.assign(new Error('The VNC connection closed before it became ready'), { closedBeforeReady: true }));
@@ -168,7 +168,7 @@ async function requestCleanup(context = 'Viewer access ended.') {
   }
   done.disabled = true;
   done.textContent = 'Finishing…';
-  showToolbar();
+  showBar();
   cleanupInFlight = (async () => {
     try {
       const result = await post('done');
@@ -231,7 +231,7 @@ control.addEventListener('click', async () => {
     const next = openConnection({ ...config, mode: 'control' });
     await next.ready;
     // Control is what the owner asked for, so give the whole screen to the browser.
-    if (controlReady && !accessEnded && next === activeConnection) collapseToolbar();
+    if (controlReady && !accessEnded && next === activeConnection) { hideBar(); barTab.focus(); }
   } catch (error) {
     try { previous?.instance.disconnect(); } catch {}
     await failAndCleanup(error.message);
@@ -270,7 +270,7 @@ async function bootstrap() {
 void bootstrap();
 
 function updateInputControls() {
-  for (const id of ['keyboard', 'paste', 'drag-once']) document.getElementById(id).disabled = !controlReady || accessEnded;
+  for (const id of ['keyboard', 'paste']) document.getElementById(id).disabled = !controlReady || accessEnded;
   document.getElementById('copy').disabled = !controlReady || accessEnded;
   if (!controlReady || accessEnded) { cancelTouchInput(); keyboardInput.blur(); }
   updateQuickActions();
@@ -322,10 +322,10 @@ document.getElementById('zoom-fit').addEventListener('click', () => zoomTo('fit'
 document.getElementById('zoom-actual').addEventListener('click', () => zoomTo(1));
 document.getElementById('zoom-in').addEventListener('click', () => zoomTo(displayScale * 1.25));
 document.getElementById('zoom-out').addEventListener('click', () => zoomTo(displayScale / 1.25));
-new ResizeObserver(() => { updateDisplay(); keepToolbarVisible(); }).observe(viewport);
+new ResizeObserver(() => updateDisplay()).observe(viewport);
 new MutationObserver(() => updateDisplay()).observe(screen, { childList: true, subtree: true, attributes: true, attributeFilter: ['width', 'height'] });
 
-function toolbarBounds() {
+function visibleBounds() {
   const visual = window.visualViewport;
   const style = getComputedStyle(document.documentElement);
   const safe = edge => parseFloat(style.getPropertyValue(`--safe-${edge}`)) || 0;
@@ -334,70 +334,50 @@ function toolbarBounds() {
     height: (visual?.height || innerHeight) - safe('top') - safe('bottom') };
 }
 
-function moveToolbar(left, top) {
-  const bounds = toolbarBounds();
-  toolbar.style.left = Math.max(bounds.left + 8, Math.min(left, bounds.left + bounds.width - toolbar.offsetWidth - 8)) + 'px';
-  toolbar.style.top = Math.max(bounds.top + 8, Math.min(top, bounds.top + bounds.height - toolbar.offsetHeight - 8)) + 'px';
+function barHidden() { return bar.classList.contains('bar-hidden'); }
+// While watching, Take control is the one thing to do, so the bar stays down.
+// A hidden bar is inert: its buttons leave the focus order, and a tap during the slide reaches the tab beneath.
+function hideBar() {
+  if (!controlReady || barHidden()) return;
+  bar.classList.add('bar-hidden');
+  bar.inert = true;
+  barTab.hidden = false;
 }
-
-function keepToolbarVisible() {
-  if (toolbar.hidden) return;
-  const bounds = toolbarBounds();
-  toolbar.style.maxHeight = Math.max(100, bounds.height - 16) + 'px';
-  const rect = toolbar.getBoundingClientRect();
-  moveToolbar(rect.left, rect.top);
-}
-
-const handle = document.getElementById('drag-handle');
-let toolbarDrag;
-handle.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0) return;
-  const rect = toolbar.getBoundingClientRect();
-  toolbarDrag = { x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
-  handle.setPointerCapture(event.pointerId);
-  event.preventDefault();
-});
-handle.addEventListener('pointermove', (event) => {
-  if (!toolbarDrag) return;
-  moveToolbar(toolbarDrag.left + event.clientX - toolbarDrag.x, toolbarDrag.top + event.clientY - toolbarDrag.y);
-});
-handle.addEventListener('pointerup', () => { toolbarDrag = undefined; });
-handle.addEventListener('pointercancel', () => { toolbarDrag = undefined; });
-handle.addEventListener('keydown', (event) => {
-  const direction = { ArrowLeft: [-20, 0], ArrowRight: [20, 0], ArrowUp: [0, -20], ArrowDown: [0, 20] }[event.key];
-  if (!direction) return;
-  event.preventDefault();
-  const rect = toolbar.getBoundingClientRect();
-  moveToolbar(rect.left + direction[0], rect.top + direction[1]);
-});
-
-function collapseToolbar() {
-  if (toolbar.hidden) return;
-  const restore = document.getElementById('restore');
-  const rect = toolbar.getBoundingClientRect();
-  restore.style.top = Math.max(8, Math.min(rect.top, innerHeight - 52)) + 'px';
-  const right = rect.left + rect.width / 2 > innerWidth / 2;
-  restore.style.left = right ? 'auto' : '0';
-  restore.style.right = right ? '0' : 'auto';
-  restore.style.borderRadius = right ? '12px 0 0 12px' : '0 12px 12px 0';
-  toolbar.hidden = true;
-  restore.hidden = false;
-  restore.focus();
-}
-function showToolbar() {
-  if (!toolbar.hidden) return;
-  toolbar.hidden = false;
-  document.getElementById('restore').hidden = true;
-  keepToolbarVisible();
+function showBar() {
+  if (!barHidden()) return;
+  bar.classList.remove('bar-hidden');
+  bar.inert = false;
+  barTab.hidden = true;
   hideQuickActions();
 }
-document.getElementById('collapse').addEventListener('click', collapseToolbar);
-document.getElementById('restore').addEventListener('click', () => {
-  showToolbar();
-  document.getElementById('collapse').focus();
+barTab.addEventListener('click', () => {
+  showBar();
+  [...bar.querySelectorAll('button')].find(button => !button.disabled && button.getClientRects().length)?.focus();
 });
-window.visualViewport?.addEventListener('resize', () => { keepToolbarVisible(); placeQuickActions(); });
-window.visualViewport?.addEventListener('scroll', () => { keepToolbarVisible(); placeQuickActions(); });
+function setBarState(state) {
+  const inControl = state === 'control';
+  const badge = document.getElementById('bar-status');
+  badge.dataset.state = state;
+  badge.setAttribute('aria-label', inControl ? 'In control' : 'Watching');
+  document.getElementById('icon-watching').hidden = inControl;
+  document.getElementById('icon-control').hidden = !inControl;
+  control.hidden = inControl;
+  document.getElementById('input-mode').hidden = !inControl;
+  document.getElementById('keyboard').hidden = !inControl;
+}
+window.visualViewport?.addEventListener('resize', placeQuickActions);
+window.visualViewport?.addEventListener('scroll', placeQuickActions);
+
+// Messages pop up under the bar and fade after a few seconds. One that needs the owner stays until the next message.
+const lastingStatus = /could not|failed|ended|another tab|Retry/i;
+let statusTimer;
+function popUpStatus() {
+  clearTimeout(statusTimer);
+  status.classList.remove('faded');
+  if (!lastingStatus.test(status.textContent)) statusTimer = setTimeout(() => status.classList.add('faded'), 4000);
+}
+new MutationObserver(popUpStatus).observe(status, { childList: true, characterData: true, subtree: true });
+popUpStatus();
 
 function sendChord(keysym, code) {
   if (!controlReady || accessEnded) return;
@@ -413,7 +393,7 @@ function keepClipboardVisible() {
   if (!clipboardDialog.open) return;
   // The on-screen keyboard can shrink only visualViewport, leaving the native
   // dialog's layout-viewport centering and CSS viewport units unchanged.
-  const bounds = toolbarBounds();
+  const bounds = visibleBounds();
   const compact = bounds.height < 120;
   const gutter = compact ? 4 : 8;
   clipboardDialog.classList.toggle('clipboard-compact', compact);
@@ -530,7 +510,7 @@ let quickOffer;
 let touchCount = 0;
 function placeQuickActions() {
   if (quickActions.hidden || !quickOffer) return;
-  const bounds = toolbarBounds(), rect = quickActions.getBoundingClientRect(), gap = 12;
+  const bounds = visibleBounds(), rect = quickActions.getBoundingClientRect(), gap = 12;
   const left = Math.max(bounds.left + 8, Math.min(quickOffer.x - rect.width / 2, bounds.left + bounds.width - rect.width - 8));
   // Above the finger, or below it when there is no room above. Always inside the area the keyboard leaves visible.
   let top = quickOffer.y - rect.height - gap;
@@ -656,24 +636,13 @@ keyboardInput.addEventListener('blur', () => {
 });
 
 let touchGesture;
-let dragOnce = false;
 const holdDelayMs = 250;
 const midpoint = (touches) => ({ x: (touches[0].clientX + touches[1].clientX) / 2, y: (touches[0].clientY + touches[1].clientY) / 2 });
 const touchDistance = (touches) => Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
-function setDragOnce(enabled) {
-  dragOnce = enabled;
-  document.getElementById('drag-once').setAttribute('aria-pressed', String(enabled));
-}
-document.getElementById('drag-once').addEventListener('click', () => {
-  if (!controlReady || accessEnded) return;
-  setDragOnce(!dragOnce);
-  status.textContent = dragOnce ? 'Next touch drags in the browser. Lift or pinch to finish.' : 'Swipe to scroll. Pinch to zoom.';
-});
-
 function mouseOptions(x, y, buttons) {
   return { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, buttons };
 }
-const holdsButton = gesture => gesture.kind === 'drag' || gesture.kind === 'hold';
+const holdsButton = gesture => gesture.kind === 'hold';
 function beginHold(gesture) {
   if (gesture !== touchGesture || gesture.moved || !controlReady || accessEnded) return;
   gesture.kind = 'hold';
@@ -685,7 +654,7 @@ function releaseTouchDrag(gesture = touchGesture) {
   clearTimeout(gesture?.holdTimer);
   if (!gesture?.remoteDown) return;
   gesture.remoteDown = false;
-  if (controlReady && !accessEnded) status.textContent = (gesture.kind === 'hold' ? 'Hold released.' : 'Drag finished.') + ' Swipe to scroll. Pinch to zoom.';
+  if (controlReady && !accessEnded) status.textContent = 'Hold released. Swipe to scroll. Pinch to zoom.';
   // Route up through noVNC's window capture proxy so it also removes the
   // capture overlay and flushes any queued held-button movement.
   window.dispatchEvent(new MouseEvent('mouseup', mouseOptions(gesture.lastX, gesture.lastY, 0)));
@@ -693,12 +662,10 @@ function releaseTouchDrag(gesture = touchGesture) {
 function cancelTouchInput() {
   releaseTouchDrag();
   touchGesture = undefined;
-  setDragOnce(false);
 }
 document.addEventListener('visibilitychange', () => { if (document.hidden) cancelTouchInput(); });
 function beginPinch(touches) {
   releaseTouchDrag();
-  setDragOnce(false);
   const point = midpoint(touches), rect = screen.getBoundingClientRect();
   // Discard scrolling remainders immediately; no wheel event runs on release.
   touchGesture = { pinch: true, distance: touchDistance(touches), scale: displayScale,
@@ -758,17 +725,11 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
     else if (!touchGesture) {
       const canvas = screen.querySelector('canvas'), size = framebufferSize();
       if (!canvas || !size) return;
-      const kind = dragOnce && controlReady && !accessEnded ? 'drag'
-        : displayScale > fitScale(size) + 0.001 ? 'pan' : 'scroll';
+      const kind = displayScale > fitScale(size) + 0.001 ? 'pan' : 'scroll';
       touchGesture = { pinch: false, kind, canvas, x: touches[0].clientX, y: touches[0].clientY,
         lastX: touches[0].clientX, lastY: touches[0].clientY,
         left: viewport.scrollLeft, top: viewport.scrollTop, moved: false, wheelX: 0, wheelY: 0 };
-      if (kind === 'drag') {
-        setDragOnce(false);
-        touchGesture.remoteDown = true;
-        status.textContent = 'Dragging in the browser. Lift to finish; pinch to cancel.';
-        canvas.dispatchEvent(new MouseEvent('mousedown', mouseOptions(touchGesture.x, touchGesture.y, 1)));
-      } else if (controlReady && !accessEnded) touchGesture.holdTimer = setTimeout(beginHold, holdDelayMs, touchGesture);
+      if (controlReady && !accessEnded) touchGesture.holdTimer = setTimeout(beginHold, holdDelayMs, touchGesture);
     }
     return;
   }
@@ -809,3 +770,6 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
   window.dispatchEvent(new MouseEvent('mouseup', mouseOptions(point.x, point.y, 0)));
   checkFocusAfterTap((point.y - gesture.canvas.getBoundingClientRect().top) / displayScale, point.repeat ? { offer: { x: point.x, y: point.y, touch: touchCount } } : {});
 }, { capture: true, passive: false });
+
+// probe.js is a module, so tests reach these through window. Each does only what the owner can do with a tap.
+window.__viewer = { hideBar, showBar, barHidden, zoomTo };

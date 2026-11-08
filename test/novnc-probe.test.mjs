@@ -780,6 +780,8 @@ test('viewer serves pinned noVNC with local scaling, explicit clipboard controls
   assert.match(html, /id="control"/);
   assert.match(html, /id="done"/);
   assert.match(html, /id="clipboard-dialog"/);
+  assert.match(html, /id="bar"/);
+  assert.doesNotMatch(html, /id="drag-once"|id="restore"/);
   assert.doesNotMatch(html, /id="release"/i);
 
   const clientResponse = await fetch(`${ctx.gateway.localUrl}/probe/novnc/assets/probe.js`);
@@ -1084,15 +1086,37 @@ test('an unexpected drop reconnects in watch mode with the same cookie and requi
 test('Take control hides the controls once control connects, and a drop brings them back', { skip: !existsSync(chromePath) }, async (t) => {
   const { evaluate, waitFor } = await openProbeFixture(t, { signalPromotionClose: true, credentialsDemoting: 2 });
   await waitFor('fixture.rfbs.length === 1 && document.querySelector("#control").disabled === false', 'watch connection became ready');
-  const shown = () => evaluate('({ toolbar: !document.querySelector("#toolbar").hidden, restore: !document.querySelector("#restore").hidden })');
-  assert.deepEqual(await shown(), { toolbar: true, restore: false }, 'watch mode shows the controls');
+  const shown = () => evaluate(`({ bar: !document.querySelector('#bar').classList.contains('bar-hidden'), tab: !document.querySelector('#bar-tab').hidden })`);
+  assert.deepEqual(await shown(), { bar: true, tab: false }, 'watch mode shows the controls');
   await evaluate('document.querySelector("#control").click()');
   await waitFor('fixture.rfbs.length === 2 && /Control connected/.test(document.querySelector("#status").textContent)', 'control connected');
-  assert.deepEqual(await shown(), { toolbar: false, restore: true }, 'the controls fold away so the whole browser is free to use');
-  assert.equal(await evaluate('document.activeElement.id'), 'restore', 'focus moves to the tab that brings the controls back');
+  assert.deepEqual(await shown(), { bar: false, tab: true }, 'the controls fold away so the whole browser is free to use');
+  assert.equal(await evaluate('document.activeElement.id'), 'bar-tab', 'focus moves to the tab that brings the controls back');
   await evaluate('fixture.rfbs[1].drop()');
   await waitFor('/Reconnecting in watch mode/.test(document.querySelector("#status").textContent)', 'drop shows a watch reconnect');
-  assert.deepEqual(await shown(), { toolbar: true, restore: false }, 'losing control shows the controls again, with Take control in reach');
+  assert.deepEqual(await shown(), { bar: true, tab: false }, 'losing control shows the controls again, with Take control in reach');
+});
+
+test('the top bar shows Watching with Take control centered, and In control with Keyboard', { skip: !existsSync(chromePath) }, async (t) => {
+  const { evaluate, waitFor } = await openProbeFixture(t, { signalPromotionClose: true, credentialsDemoting: 2 });
+  await waitFor('fixture.rfbs.length === 1 && document.querySelector("#control").disabled === false', 'watch ready');
+  const bar = () => evaluate(`(() => { const c = document.querySelector('#control').getBoundingClientRect(), b = document.querySelector('#bar').getBoundingClientRect();
+    return { status: document.querySelector('#bar-status').getAttribute('aria-label'), top: b.top, centerOffset: Math.abs((c.left + c.right) / 2 - innerWidth / 2),
+      keyboard: !document.querySelector('#keyboard').hidden, control: !document.querySelector('#control').hidden }; })()`);
+  const watching = await bar();
+  assert.equal(watching.status, 'Watching');
+  assert.equal(watching.top, 0, 'the bar is flush with the top edge');
+  assert.ok(watching.centerOffset <= 1, 'Take control sits in the exact center');
+  assert.equal(watching.keyboard, false, 'Keyboard is not offered while watching');
+  await evaluate('__viewer.hideBar()');
+  assert.equal(await evaluate('document.querySelector("#bar-tab").hidden'), true, 'the bar never hides while watching');
+  await evaluate('document.querySelector("#control").click()');
+  await waitFor('fixture.rfbs.length === 2 && /Control connected/.test(document.querySelector("#status").textContent)', 'control connected');
+  await evaluate('__viewer.showBar()');
+  const control = await bar();
+  assert.equal(control.status, 'In control');
+  assert.equal(control.control, false, 'Take control is gone once in control');
+  assert.equal(control.keyboard, true);
 });
 
 test('a reopened claimed link resumes in watch mode with its existing cookie', { skip: !existsSync(chromePath) }, async (t) => {

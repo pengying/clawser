@@ -217,11 +217,11 @@ test('rendered noVNC targets map to framebuffer coordinates on the RFB wire', {
         viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio },
         document: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
         doneVisible: document.querySelector('#done').getBoundingClientRect().bottom <= innerHeight,
-        controlsVisible: document.querySelector('.controls').getBoundingClientRect().bottom <= innerHeight,
+        barVisible: document.querySelector('#bar').getBoundingClientRect().bottom <= innerHeight,
         screen: { left: document.querySelector('#viewport').getBoundingClientRect().left, top: document.querySelector('#viewport').getBoundingClientRect().top, width: document.querySelector('#viewport').clientWidth, height: document.querySelector('#viewport').clientHeight } };
     })()`);
     await captureEvidence(cdp, `viewer-${scenario.name.replaceAll(' ', '-')}`);
-    await evaluate(`document.querySelector('#collapse').click()`);
+    await evaluate('__viewer.hideBar()');
     const results = [];
     for (const [x, y] of targets) {
       const before = peer.pointers.length;
@@ -238,18 +238,18 @@ test('rendered noVNC targets map to framebuffer coordinates on the RFB wire', {
     t.diagnostic(JSON.stringify({ geometry, results }));
     assert.ok(results.every(({ error }) => error && error.every((value) => Math.abs(value) <= 2)), 'visible target clicks must land within two framebuffer pixels');
     assert.ok(geometry.document.width <= geometry.viewport.width && geometry.document.height <= geometry.viewport.height, 'viewer stays within the viewport');
-    await evaluate(`document.querySelector('#restore').click()`);
-    assert.ok(geometry.doneVisible && geometry.controlsVisible, 'overlay actions remain visible');
+    await evaluate('__viewer.showBar()');
+    assert.ok(geometry.doneVisible && geometry.barVisible, 'overlay actions remain visible');
     assert.deepEqual(geometry.screen, { left: 0, top: 0, width: scenario.width, height: scenario.height }, 'browser viewport fills the screen');
     assert.ok(geometry.scale <= 1, 'fit never upscales above 100%');
-    await evaluate(`document.querySelector('#collapse').click()`);
-    assert.equal(await evaluate(`document.querySelector('#toolbar').hidden && !document.querySelector('#restore').hidden`), true, 'collapsed actions leave a restore tab');
-    await evaluate(`document.querySelector('#restore').click()`);
-    assert.equal(await evaluate(`document.querySelector('#toolbar').hidden`), false);
+    await evaluate('__viewer.hideBar()');
+    assert.equal(await evaluate(`__viewer.barHidden() && !document.querySelector('#bar-tab').hidden`), true, 'a hidden bar leaves the tab that shows it');
+    await evaluate('__viewer.showBar()');
+    assert.equal(await evaluate('__viewer.barHidden()'), false);
     await evaluate(`document.querySelector('#zoom-in').click()`);
     await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     assert.ok(await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale) > ${geometry.scale}`), 'zoom button increases the noVNC display scale');
-    await evaluate(`document.querySelector('#zoom-fit').click()`);
+    await evaluate("__viewer.zoomTo('fit')");
     assert.equal(peers.at(-1), peer, 'resizing keeps the RFB session');
     await evaluate(`document.querySelector('#done').click()`);
     await waitFor(`document.querySelector('#status').textContent.includes('Test browser destroyed.')`, 'Done still completes');
@@ -266,19 +266,6 @@ test('overlay, clipboard, mobile keyboard and pinch keep input intentional', {
   await cdp.send('Page.navigate', { url });
   await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'real RFB connected');
   const peer = peers.at(-1);
-  const toolbarBefore = await evaluate(`(() => { const r=document.querySelector('#toolbar').getBoundingClientRect();return {left:r.left,top:r.top}; })()`);
-  const handle = await evaluate(`(() => { const r=document.querySelector('#drag-handle').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`);
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1, ...handle });
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', button: 'left', buttons: 1, x: handle.x+40, y:handle.y+90 });
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1, x: handle.x+40, y:handle.y+90 });
-  const toolbarAfter = await evaluate(`(() => { const r=document.querySelector('#toolbar').getBoundingClientRect();return {left:r.left,top:r.top,right:r.right,bottom:r.bottom}; })()`);
-  assert.ok(toolbarAfter.left >= toolbarBefore.left+30 && toolbarAfter.top >= toolbarBefore.top+80, 'drag handle moves the overlay');
-  assert.ok(toolbarAfter.right <= 390 && toolbarAfter.bottom <= 844, 'moved actions remain within the narrow viewport');
-  await evaluate(`document.documentElement.style.setProperty('--safe-left', '40px'); for(let n=0;n<10;n++) document.querySelector('#drag-handle').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowLeft'}));`);
-  const safePosition = await evaluate(`({ left: document.querySelector('#toolbar').getBoundingClientRect().left, style: document.querySelector('#toolbar').style.left, safe: getComputedStyle(document.documentElement).getPropertyValue('--safe-left'), animation: getComputedStyle(document.querySelector('#toolbar')).translate })`);
-  t.diagnostic(JSON.stringify({safePosition}));
-  assert.ok(safePosition.left >= 48, 'keyboard repositioning respects the device safe area');
-  await evaluate(`document.documentElement.style.removeProperty('--safe-left')`);
   await evaluate(`window.clipboardReads = 0; window.clipboardWrites = []; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText: async () => { window.clipboardReads++; return 'local paste'; }, writeText: async text => window.clipboardWrites.push(text) } });`);
   assert.equal(await evaluate('window.clipboardReads'), 0, 'local clipboard is never read on connect');
   await evaluate(`document.querySelector('#paste').click()`);
@@ -308,7 +295,7 @@ test('overlay, clipboard, mobile keyboard and pinch keep input intentional', {
   await evaluate(`document.querySelector('#keyboard-input').dispatchEvent(new CompositionEvent('compositionend', { data: '中文😀' }))`);
   for (let n = 0; n < 100 && peer.keys.length < keysBefore + 6; n++) await pause(10);
   assert.deepEqual(peer.keys.slice(keysBefore).filter(key => key.down).map(key => key.keysym), [0x1004e2d, 0x1006587, 0x101f600], 'committed Unicode is sent once, preserving supplementary characters');
-  await evaluate(`document.querySelector('#keyboard-input').blur(); document.querySelector('#collapse').click()`);
+  await evaluate(`document.querySelector('#keyboard-input').blur(); __viewer.hideBar()`);
   const before = peer.pointers.length, beforeKeys = peer.keys.length;
   const touch = (type, points) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([x, y], id) => ({ x, y, id, radiusX: 1, radiusY: 1, force: 1 })) });
   const initialScale = await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`);
@@ -348,7 +335,9 @@ test('overlay, clipboard, mobile keyboard and pinch keep input intentional', {
   t.diagnostic(JSON.stringify({ scaleBeforeSqueeze, afterSqueeze: await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`), captureAfterTap: await evaluate(`({active: Boolean(document.captureElement), proxy: document.querySelector('#noVNC_mouse_capture_elem')?.style.display})`) }));
   await waitFor(`Number(document.querySelector('#zoom-level').dataset.scale) < ${scaleBeforeSqueeze * 0.55}`, 'squeezing zooms out');
   assert.equal(peer.pointers.length, beforeSqueeze, 'squeezing sends no remote pointer events');
-  await evaluate(`document.querySelector('#restore').click(); document.querySelector('#done').click()`);
+  await press({ cdp, evaluate }, '#bar-tab');
+  await waitFor('!__viewer.barHidden()', 'a tap on the tab brings the bar back');
+  await evaluate(`document.querySelector('#done').click()`);
   await waitFor(`document.querySelector('#status').textContent.includes('Test browser destroyed.')`, 'Done completes');
 });
 
@@ -434,7 +423,7 @@ test('mobile scrolling reaches RFB before finger-up and stops immediately for pi
   await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
   await cdp.send('Page.navigate', { url });
   await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'RFB connected');
-  await evaluate(`document.querySelector('#collapse').click()`);
+  await evaluate('__viewer.hideBar()');
   const peer = peers.at(-1);
   const touch = (type, points) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([x, y], id) => ({ x, y, id, radiusX: 1, radiusY: 1, force: 1 })) });
   const wheels = () => peer.pointers.filter(event => event.mask & 0x78);
@@ -454,7 +443,7 @@ test('mobile scrolling reaches RFB before finger-up and stops immediately for pi
   await pause(100);
   assert.equal(peer.pointers.length, beforePinch, 'second finger immediately stops scrolling with no release replay');
   assert.deepEqual(peer.keys, [], 'pinch never sends remote Ctrl+wheel keys');
-  await evaluate(`document.querySelector('#zoom-fit').click()`);
+  await evaluate("__viewer.zoomTo('fit')");
   const beforeSmallPinch = peer.pointers.length;
   await touch('touchStart', [[145, 422]]);
   await touch('touchMove', [[145, 418]]);
@@ -463,72 +452,10 @@ test('mobile scrolling reaches RFB before finger-up and stops immediately for pi
   await touch('touchEnd', []);
   await pause(100);
   assert.equal(peer.pointers.length, beforeSmallPinch, 'pinch before the movement threshold sends no remote input');
-  await evaluate(`document.querySelector('#restore').click(); document.querySelector('#done').click()`);
-  await waitFor(`document.querySelector('#status').textContent.includes('Test browser destroyed.')`, 'Done completes');
-});
-
-test('Drag once sends mapped mouse down/move/up and releases on pinch, cancel and Done', {
-  skip: !assets ? 'set NOVNC_ASSETS_DIR to the noVNC 1.7.0 source tree' : !existsSync(chromePath) ? 'Chrome unavailable' : false,
-}, async (t) => {
-  const { cdp, evaluate, waitFor, peers, url } = await fixture(t);
-  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
-  await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
-  await cdp.send('Page.navigate', { url });
-  await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'RFB connected');
-  assert.equal(await evaluate(`Boolean(document.querySelector('#drag-once'))`), true, 'overlay exposes a one-use native drag action');
-  await evaluate(`document.querySelector('#zoom-actual').click(); document.querySelector('#collapse').click()`);
-  const peer = peers.at(-1);
-  const touch = (type, points) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([x, y], id) => ({ x, y, id, radiusX: 1, radiusY: 1, force: 1 })) });
-  const arm = async () => {
-    await evaluate(`document.querySelector('#drag-once').click()`);
-    assert.equal(await evaluate(`document.querySelector('#drag-once').getAttribute('aria-pressed')`), 'true');
-  };
-  const released = async (before, description) => {
-    for (let n = 0; n < 100 && !peer.pointers.slice(before).some(event => event.mask === 0); n++) await pause(10);
-    assert.equal(peer.pointers.at(-1)?.mask, 0, description);
-    assert.equal(await evaluate('Boolean(document.captureElement)'), false, 'upstream mouse capture is released');
-    assert.equal(await evaluate(`document.querySelector('#drag-once').getAttribute('aria-pressed')`), 'false', 'drag mode automatically resets');
-  };
-  const rect = await evaluate(`(() => {const r=document.querySelector('canvas').getBoundingClientRect();return {left:r.left,top:r.top,scale:Number(document.querySelector('#zoom-level').dataset.scale)};})()`);
-  await arm();
-  let before = peer.pointers.length;
-  await touch('touchStart', [[145, 422]]);
-  for (let n = 0; n < 100 && !peer.pointers.slice(before).some(event => event.mask === 1); n++) await pause(10);
-  assert.ok(peer.pointers.slice(before).some(event => event.mask === 1), 'armed touch immediately holds the native mouse button');
-  await touch('touchMove', [[195, 437]]);
-  await touch('touchMove', [[245, 452]]);
-  await touch('touchEnd', []);
-  await released(before, 'completed drag releases the remote mouse button');
-  const events = peer.pointers.slice(before), down = events.find(event => event.mask === 1), up = events.at(-1);
-  assert.ok(events.filter(event => event.mask === 1).length >= 2, 'drag includes held-button movement');
-  assert.ok(Math.abs(down.x-(145-rect.left)/rect.scale)<=2 && Math.abs(down.y-(422-rect.top)/rect.scale)<=2, 'drag start maps through noVNC scale and pan');
-  assert.ok(Math.abs(up.x-(245-rect.left)/rect.scale)<=2 && Math.abs(up.y-(452-rect.top)/rect.scale)<=2, 'drag endpoint maps through noVNC scale and pan');
-  before = peer.pointers.length;
-  await touch('touchStart', [[195, 422]]);
-  await pause(50);
-  assert.equal(peer.pointers.length, before, 'the next ordinary touch does not inherit drag mode');
-  await touch('touchEnd', []);
-  await released(before, 'ordinary tap after drag releases capture');
-  await arm(); before = peer.pointers.length;
-  await touch('touchStart', [[145, 422]]);
-  await touch('touchMove', [[175, 422]]);
-  await touch('touchStart', [[175, 422], [245, 422]]);
-  await released(before, 'adding a second finger releases the drag before pinch');
-  const beforePinch = peer.pointers.length;
-  await touch('touchMove', [[125, 422], [295, 422]]);
-  await touch('touchEnd', []);
-  await pause(100);
-  assert.equal(peer.pointers.length, beforePinch, 'post-drag pinch produces no extra mouse or wheel input');
-  await arm(); before = peer.pointers.length;
-  await touch('touchStart', [[195, 422]]);
-  await touch('touchCancel', []);
-  await released(before, 'touch cancellation releases the drag');
-  await arm(); before = peer.pointers.length;
-  await touch('touchStart', [[195, 422]]);
+  await press({ cdp, evaluate }, '#bar-tab');
+  await waitFor('!__viewer.barHidden()', 'a tap on the tab brings the bar back');
   await evaluate(`document.querySelector('#done').click()`);
   await waitFor(`document.querySelector('#status').textContent.includes('Test browser destroyed.')`, 'Done completes');
-  await released(before, 'Done releases the remote button before ending access');
-  await touch('touchEnd', []);
 });
 
 test('a stationary touch holds the remote button until lift; taps still click and early swipes still scroll', {
@@ -539,7 +466,7 @@ test('a stationary touch holds the remote button until lift; taps still click an
   await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
   await cdp.send('Page.navigate', { url });
   await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'RFB connected');
-  await evaluate(`document.querySelector('#collapse').click()`);
+  await evaluate('__viewer.hideBar()');
   const peer = peers.at(-1), status = () => evaluate(`document.querySelector('#status').textContent`);
   const touch = (type, points) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([x, y], id) => ({ x, y, id, radiusX: 1, radiusY: 1, force: 1 })) });
   const pressed = async (before) => {
@@ -604,13 +531,20 @@ test('a stationary touch holds the remote button until lift; taps still click an
   await touch('touchEnd', []);
 });
 
+// A real touch on one of the viewer's own buttons, as a finger would press it.
+async function press({ cdp, evaluate }, selector) {
+  const [x, y] = await evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y, id: 0, radiusX: 1, radiusY: 1, force: 1 }] });
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+}
+
 async function phone(t, focus, options = {}) {
   const ctx = await fixture(t, { focus, ...options });
   await ctx.cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
   await ctx.cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
   await ctx.cdp.send('Page.navigate', { url: ctx.url });
   await ctx.waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'RFB connected');
-  await ctx.evaluate(`document.querySelector('#collapse').click()`);
+  await ctx.evaluate('__viewer.hideBar()');
   const touch = (type, points) => ctx.cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([x, y], id) => ({ x, y, id, radiusX: 1, radiusY: 1, force: 1 })) });
   // Taps at a framebuffer point, so a test can aim at the browser toolbar or the page.
   const tap = async (fx, fy) => {
@@ -618,11 +552,6 @@ async function phone(t, focus, options = {}) {
     await touch('touchStart', [[x, y]]); await touch('touchEnd', []);
   };
   const keyboard = () => ctx.evaluate(`({ open: document.activeElement?.id === 'keyboard-input', inputMode: document.querySelector('#keyboard-input').inputMode, pressed: document.querySelector('#keyboard').getAttribute('aria-pressed') })`);
-  // A real touch on one of the viewer's own buttons, as a finger would press it.
-  const press = async selector => {
-    const [x, y] = await ctx.evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
-    await touch('touchStart', [[x, y]]); await touch('touchEnd', []);
-  };
   const shown = selector => ctx.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); const r = e.getBoundingClientRect(); return !e.hidden && r.width > 0 && r.height > 0; })()`);
   // The phone point for a framebuffer point, then a finger held still there, as for a long press.
   const point = (fx, fy) => ctx.evaluate(`(() => { const r = document.querySelector('canvas').getBoundingClientRect(), s = r.width / ${width}; return [r.left + ${fx} * s, r.top + ${fy} * s]; })()`);
@@ -631,7 +560,7 @@ async function phone(t, focus, options = {}) {
   const pill = () => ctx.evaluate(`(() => { const e = document.querySelector('#quick-actions'), r = e.getBoundingClientRect();
     return { visible: !e.hidden, copy: !document.querySelector('#quick-copy').hidden, paste: !document.querySelector('#quick-paste').hidden,
       left: r.left, right: r.right, top: r.top, bottom: r.bottom, height: r.height, width: r.width }; })()`);
-  return { ...ctx, tap, keyboard, press, shown, point, hold, doubleTap, pill };
+  return { ...ctx, tap, keyboard, press: selector => press(ctx, selector), shown, point, hold, doubleTap, pill };
 }
 const noVncSkip = !assets ? 'set NOVNC_ASSETS_DIR to the noVNC 1.7.0 source tree' : !existsSync(chromePath) ? 'Chrome unavailable' : false;
 
@@ -655,10 +584,12 @@ test('a tap that focuses a remote text field opens the keyboard with that field�
 
 test('a keyboard the owner opened stays open when a tap lands outside a field', { skip: noVncSkip }, async t => {
   const focus = { answer: { kind: 'none' }, requests: 0 };
-  const { tap, keyboard, evaluate } = await phone(t, focus);
-  await evaluate(`document.querySelector('#restore').click(); document.querySelector('#keyboard').click()`);
+  const { tap, keyboard, press, evaluate, waitFor } = await phone(t, focus);
+  await press('#bar-tab');
+  await waitFor('!__viewer.barHidden()', 'a tap on the tab brings the bar back');
+  await evaluate(`document.querySelector('#keyboard').click()`);
   assert.equal((await keyboard()).open, true);
-  // The toolbar stays open, as it is while someone types. This tap lands below it.
+  // The bar stays open, as it is while someone types. This tap lands below it.
   await tap(640, 680);
   for (let n = 0; n < 100 && focus.requests < 1; n++) await pause(20);
   assert.ok(focus.requests >= 1, 'the tap was checked');
