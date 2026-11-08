@@ -6,6 +6,10 @@
 - After each tap, the viewer asks the gateway what the agent's browser has focused. The controller reads that from Chrome in an isolated script context, within 1.5 seconds. Only the kind of field and its keyboard type reach the viewer, never its contents, name or the page address. The check answers only while the owner holds control.
 - These checks don't count toward the per-handoff limit on requests, so typing into a long form can't use it up. Requests with a wrong cookie still count.
 - The Keyboard button still works everywhere. Use it when a tap doesn't open the keyboard: in Chrome's own dialogs and menus, while a JavaScript dialog is open, and on phones that only open a keyboard during the tap itself, such as iPhones.
+- Take control now folds the noVNC viewer's controls away once control connects, so the whole browser is in view. The Controls tab at the edge brings them back. They come back on their own when control drops or the handoff ends, so Take control and the status line are in reach again.
+- Copy and Paste no longer need the controls open. While the agent's browser has text selected, a Copy button floats over the browser. While the phone's keyboard is open, a Paste button sits above it and pastes without closing the keyboard. Each confirms with "Copied" or "Pasted".
+- The focus check also says whether any text is selected, as a yes or no. The selected text itself never leaves the browser until the owner presses Copy. A selection in a password field doesn't count, since Chrome won't copy it.
+- A double tap now selects a word. Chrome counts a double-click only when both clicks land within a few pixels, and two finger taps rarely do. A second tap within 400 ms and 12 pixels of the first now clicks exactly where the first one did.
 
 ## 0.7.3
 

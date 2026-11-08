@@ -38,8 +38,11 @@ function security(res) {
 const FOCUS_MODES = new Set(['text', 'decimal', 'numeric', 'tel', 'search', 'email', 'url']);
 // Only these fields reach the viewer, whatever the focus reader returns.
 function focusAnswer(state) {
-  if (state?.kind === 'editable' && FOCUS_MODES.has(state.inputMode)) return { kind: 'editable', inputMode: state.inputMode, multiline: state.multiline === true };
-  if (state?.kind === 'browser-ui' || state?.kind === 'none') return { kind: state.kind };
+  // Selection is a strict yes, so Copy can be offered. Nothing about the selected text passes.
+  const selected = state?.selected === true ? { selected: true } : {};
+  if (state?.kind === 'editable' && FOCUS_MODES.has(state.inputMode)) return { kind: 'editable', inputMode: state.inputMode, multiline: state.multiline === true, ...selected };
+  if (state?.kind === 'none') return { kind: 'none', ...selected };
+  if (state?.kind === 'browser-ui') return { kind: 'browser-ui' };
   return { kind: 'unknown' };
 }
 

@@ -18,8 +18,18 @@ function focusProbe(modes, textTypes) {
     node.tagName === 'INPUT' && textTypes.includes(node.type) || node.isContentEditable);
   const inputMode = !editable ? undefined : modes.includes(node.inputMode) ? node.inputMode
     : node.type === 'number' ? 'decimal' : modes.includes(node.type) ? node.type : 'text';
+  // Whether any text is selected, as a yes or no. Chrome never copies from a password field.
+  let selected = false;
+  const field = node?.tagName === 'INPUT' || node?.tagName === 'TEXTAREA';
+  if (field && node.type === 'password') selected = false;
+  else if (field && node.selectionStart !== null) selected = node.selectionStart !== node.selectionEnd;
+  else {
+    const selection = (node?.ownerDocument || document).getSelection();
+    selected = !!selection && selection.rangeCount > 0 && !selection.isCollapsed;
+  }
   return { visible: document.visibilityState === 'visible', focused: document.hasFocus(), frame,
-    ...(editable ? { inputMode, multiline: node.tagName === 'TEXTAREA' || node.isContentEditable } : {}) };
+    ...(editable ? { inputMode, multiline: node.tagName === 'TEXTAREA' || node.isContentEditable } : {}),
+    ...(selected ? { selected: true } : {}) };
 }
 const EXPRESSION = '(' + focusProbe + ')(' + JSON.stringify([...MODES]) + ',' + JSON.stringify([...TEXT_TYPES]) + ')';
 
@@ -36,9 +46,13 @@ async function inspect(target, origin, deadline) {
   } catch { return undefined; } finally { page.close(); }
 }
 
-const editable = state => ({ kind: 'editable', inputMode: state.inputMode, multiline: state.multiline });
+const selection = state => state.selected ? { selected: true } : {};
+const answer = state => state.inputMode
+  ? { kind: 'editable', inputMode: state.inputMode, multiline: state.multiline, ...selection(state) }
+  : { kind: 'none', ...selection(state) };
 
-// Answers one question for the viewer: does the agent's browser have a text field focused, and which keyboard fits it.
+// Answers two questions for the viewer: does the agent's browser have a text field focused, and which keyboard fits it,
+// and is any text selected that Copy could take.
 // unknown means it could not tell, for example while a JavaScript dialog blocks the page.
 export async function readFocus(runtime, { timeoutMs = 1500 } = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -58,11 +72,10 @@ export async function readFocus(runtime, { timeoutMs = 1500 } = {}) {
   if (!shown.length) return { kind: pages.some(({ tab }) => !byId.get(tab.id)) ? 'unknown' : 'none' };
   const front = shown.find(({ state }) => state.focused) || shown[0];
   if (!front.state.focused) return { kind: 'browser-ui' };
-  if (front.state.inputMode) return editable(front.state);
-  if (!front.state.frame) return { kind: 'none' };
+  if (front.state.inputMode || !front.state.frame) return answer(front.state);
   // A cross-site frame runs as its own target. Its document has focus when one of its fields does.
   const frames = targets.filter(({ tab }) => tab.type === 'iframe').map(({ tab }) => byId.get(tab.id));
-  const inner = frames.find(state => state?.focused && state.inputMode);
-  if (inner) return editable(inner);
+  const inner = frames.find(state => state?.focused && (state.inputMode || state.selected));
+  if (inner) return answer(inner);
   return { kind: frames.some(state => !state) ? 'unknown' : 'none' };
 }

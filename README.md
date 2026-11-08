@@ -122,9 +122,15 @@ A noVNC link shares the **whole browser**: every tab, dialog and the browser's
 clipboard during control. The CDP viewer shares the **selected tab**. Choose a
 browser whose contents you intend to share.
 
-To move text, take control and use the viewer's **Copy** and **Paste** buttons.
-Copy sends the browser's current selection to your phone. Paste sends your
-phone's clipboard text to the focused field. When the phone blocks clipboard
+Once you take control, the noVNC viewer folds its controls away so the whole
+browser is in view. Tap **Controls** at the edge of the screen to bring them
+back. They come back on their own if control ends.
+
+To move text, use **Copy** and **Paste**. Copy sends the browser's current
+selection to your phone. Paste sends your phone's clipboard text to the focused
+field. To select text, double-tap a word, or touch and hold, then drag. While
+text is selected, a Copy button floats over the browser. While the keyboard is
+open, a Paste button sits above it. Both are also in the controls. When the phone blocks clipboard
 access, a text box opens to copy or paste by hand. Only plain text moves. There
 is no file transfer and no automatic clipboard sync. In the CDP viewer, your
 phone's own paste works in a focused field, but nothing is copied back. Phone

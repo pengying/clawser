@@ -138,6 +138,8 @@ function openConnection(config) {
   instance.addEventListener('disconnect', () => {
     controlReady = false;
     updateInputControls();
+    // Losing control puts Take control and the status line back in reach.
+    if (config.mode !== 'watch') showToolbar();
     control.disabled = true;
     disconnectedResolve();
     if (!connected) readyReject(Object.assign(new Error('The VNC connection closed before it became ready'), { closedBeforeReady: true }));
@@ -166,6 +168,7 @@ async function requestCleanup(context = 'Viewer access ended.') {
   }
   done.disabled = true;
   done.textContent = 'Finishing…';
+  showToolbar();
   cleanupInFlight = (async () => {
     try {
       const result = await post('done');
@@ -227,6 +230,8 @@ control.addEventListener('click', async () => {
     if (accessEnded) return;
     const next = openConnection({ ...config, mode: 'control' });
     await next.ready;
+    // Control is what the owner asked for, so give the whole screen to the browser.
+    if (controlReady && !accessEnded && next === activeConnection) collapseToolbar();
   } catch (error) {
     try { previous?.instance.disconnect(); } catch {}
     await failAndCleanup(error.message);
@@ -267,7 +272,8 @@ void bootstrap();
 function updateInputControls() {
   for (const id of ['keyboard', 'paste', 'drag-once']) document.getElementById(id).disabled = !controlReady || accessEnded;
   document.getElementById('copy').disabled = !controlReady || accessEnded;
-  if (!controlReady || accessEnded) { cancelTouchInput(); keyboardInput.blur(); }
+  if (!controlReady || accessEnded) { cancelTouchInput(); keyboardInput.blur(); selectionReady = false; }
+  updateQuickActions();
 }
 
 function framebufferSize() {
@@ -365,7 +371,8 @@ handle.addEventListener('keydown', (event) => {
   moveToolbar(rect.left + direction[0], rect.top + direction[1]);
 });
 
-document.getElementById('collapse').addEventListener('click', () => {
+function collapseToolbar() {
+  if (toolbar.hidden) return;
   const restore = document.getElementById('restore');
   const rect = toolbar.getBoundingClientRect();
   restore.style.top = Math.max(8, Math.min(rect.top, innerHeight - 52)) + 'px';
@@ -376,15 +383,22 @@ document.getElementById('collapse').addEventListener('click', () => {
   toolbar.hidden = true;
   restore.hidden = false;
   restore.focus();
-});
-document.getElementById('restore').addEventListener('click', () => {
+  updateQuickActions();
+}
+function showToolbar() {
+  if (!toolbar.hidden) return;
   toolbar.hidden = false;
   document.getElementById('restore').hidden = true;
   keepToolbarVisible();
+  updateQuickActions();
+}
+document.getElementById('collapse').addEventListener('click', collapseToolbar);
+document.getElementById('restore').addEventListener('click', () => {
+  showToolbar();
   document.getElementById('collapse').focus();
 });
-window.visualViewport?.addEventListener('resize', keepToolbarVisible);
-window.visualViewport?.addEventListener('scroll', keepToolbarVisible);
+window.visualViewport?.addEventListener('resize', () => { keepToolbarVisible(); placeQuickActions(); });
+window.visualViewport?.addEventListener('scroll', () => { keepToolbarVisible(); placeQuickActions(); });
 
 function sendChord(keysym, code) {
   if (!controlReady || accessEnded) return;
@@ -449,28 +463,32 @@ async function pasteText(text) {
   status.textContent = 'Text pasted into the browser.';
 }
 
-document.getElementById('paste').addEventListener('click', async () => {
-  if (!controlReady || accessEnded) return;
+// Returns true once the text reached the browser.
+async function pasteFromDevice() {
+  if (!controlReady || accessEnded) return false;
   let text;
   try {
     // Never read the local clipboard until the user explicitly chooses Paste.
     text = await navigator.clipboard.readText();
-  } catch { if (!accessEnded) showClipboard('', true); return; }
-  try { await pasteText(text); }
+  } catch { if (!accessEnded) showClipboard('', true); return false; }
+  try { await pasteText(text); return true; }
   catch (error) {
-    if (accessEnded) return;
+    if (accessEnded) return false;
     status.textContent = 'Paste failed: ' + ''.concat(error.message);
     showClipboard(text, true);
+    return false;
   }
-});
+}
+document.getElementById('paste').addEventListener('click', () => void pasteFromDevice());
 document.getElementById('clipboard-send').addEventListener('click', async () => {
   try {
     await pasteText(clipboardText.value);
     clipboardDialog.close();
   } catch (error) { document.getElementById('clipboard-help').textContent = 'Paste failed: ' + ''.concat(error.message); }
 });
-document.getElementById('copy').addEventListener('click', async () => {
-  if (!controlReady || accessEnded) return;
+// Returns true once the text is on this device's clipboard.
+async function copyToDevice() {
+  if (!controlReady || accessEnded) return false;
   const connection = activeConnection;
   let text;
   if (connection.capabilities.clipboard === 'utf8') {
@@ -479,7 +497,7 @@ document.getElementById('copy').addEventListener('click', async () => {
     await new Promise(resolve => setTimeout(resolve, 150));
     if (accessEnded || connection !== activeConnection) return;
     try { text = (await post('clipboard', { action: 'read' })).text; }
-    catch (error) { if (!accessEnded) status.textContent = 'Copy failed: ' + ''.concat(error.message); return; }
+    catch (error) { if (!accessEnded) status.textContent = 'Copy failed: ' + ''.concat(error.message); return false; }
   } else {
     // Give Chrome's Copy action time to publish the current selection to RFB.
     let listener, timer;
@@ -493,12 +511,47 @@ document.getElementById('copy').addEventListener('click', async () => {
     clearTimeout(timer);
     connection.instance.removeEventListener('clipboard', listener);
   }
-  if (accessEnded || connection !== activeConnection) return;
+  if (accessEnded || connection !== activeConnection) return false;
   try {
     await navigator.clipboard.writeText(text);
     status.textContent = 'Copied to this device.';
-  } catch { showClipboard(text, false); }
-});
+    return true;
+  } catch { showClipboard(text, false); return false; }
+}
+document.getElementById('copy').addEventListener('click', () => void copyToDevice());
+
+// Copy and Paste float over the browser while they are useful, since the controls are folded away during control:
+// Paste while this device's keyboard is open, and Copy while the agent's browser has text selected.
+const quickActions = document.getElementById('quick-actions');
+const quickCopy = document.getElementById('quick-copy');
+const quickPaste = document.getElementById('quick-paste');
+let selectionReady = false;
+function placeQuickActions() {
+  if (quickActions.hidden) return;
+  const bounds = toolbarBounds(), rect = quickActions.getBoundingClientRect();
+  quickActions.style.left = Math.max(bounds.left + 8, bounds.left + bounds.width - rect.width - 8) + 'px';
+  quickActions.style.top = Math.max(bounds.top + 8, bounds.top + bounds.height - rect.height - 8) + 'px';
+}
+function updateQuickActions() {
+  // The open controls already hold Copy and Paste.
+  const live = controlReady && !accessEnded && toolbar.hidden;
+  quickPaste.hidden = !(live && document.activeElement === keyboardInput);
+  quickCopy.hidden = !(live && selectionReady);
+  quickActions.hidden = quickPaste.hidden && quickCopy.hidden;
+  placeQuickActions();
+}
+function flashLabel(button, text, label) {
+  button.textContent = text;
+  clearTimeout(button.labelTimer);
+  button.labelTimer = setTimeout(() => { button.textContent = label; }, 1500);
+}
+for (const button of [quickCopy, quickPaste]) {
+  // Keep this device's keyboard open, as the Keyboard button does.
+  button.addEventListener('pointerdown', event => event.preventDefault());
+  button.addEventListener('mousedown', event => event.preventDefault());
+}
+quickCopy.addEventListener('click', async () => { if (await copyToDevice()) flashLabel(quickCopy, 'Copied', 'Copy'); });
+quickPaste.addEventListener('click', async () => { if (await pasteFromDevice()) flashLabel(quickPaste, 'Pasted', 'Paste'); });
 
 // A real editable buffer supports Android/Gboard input and IME composition.
 // Compare committed code points rather than keycodes or UTF-16 code units.
@@ -552,34 +605,47 @@ document.getElementById('keyboard').addEventListener('click', () => {
 // After a tap, ask the gateway what the agent's browser focused, and open or close this keyboard to match.
 // Phones open a keyboard only shortly after a tap, so this runs once per tap and never on its own.
 // It closes only a keyboard it opened itself, never one the owner opened with the Keyboard button.
+// A tap that lands while a check is running gets one more check afterwards, so a double tap's selection is seen.
+// After a hold or drag, which is how text gets selected, only the Copy button follows the answer.
 const toolbarBandPx = 100;
 let autoKeyboard = false;
-let focusCheck;
-function checkFocusAfterTap(framebufferY) {
+let focusCheck, focusRecheck;
+function checkFocusAfterTap(framebufferY, { keyboard = true } = {}) {
   const connection = activeConnection;
-  if (!connection?.capabilities.focus || focusCheck || !controlReady || accessEnded) return;
+  if (!connection?.capabilities.focus || !controlReady || accessEnded) return;
+  if (focusCheck) { focusRecheck = { framebufferY, keyboard: keyboard || focusRecheck?.keyboard === true }; return; }
   focusCheck = (async () => {
     let answer;
     for (const wait of [150, 350]) {
       await new Promise(resolve => setTimeout(resolve, wait));
       if (!controlReady || accessEnded || connection !== activeConnection) return;
       try { answer = await post('focus'); } catch { return; }
-      if (answer.kind !== 'none') break;
+      if (answer.kind !== 'none' || answer.selected) break;
     }
     if (!controlReady || accessEnded || connection !== activeConnection) return;
+    selectionReady = answer.selected === true;
+    updateQuickActions();
+    if (!keyboard) return;
     if (answer.kind === 'editable') { openKeyboard(answer.inputMode); autoKeyboard = true; }
     else if (answer.kind === 'browser-ui' && framebufferY < toolbarBandPx) { openKeyboard('url'); autoKeyboard = true; }
     else if (answer.kind === 'none' && autoKeyboard && document.activeElement === keyboardInput) keyboardInput.blur();
-  })().finally(() => { focusCheck = undefined; });
+  })().finally(() => {
+    focusCheck = undefined;
+    const next = focusRecheck;
+    focusRecheck = undefined;
+    if (next) checkFocusAfterTap(next.framebufferY, next);
+  });
 }
 keyboardInput.addEventListener('focus', () => {
   document.getElementById('keyboard').setAttribute('aria-pressed', 'true');
   if (activeConnection) activeConnection.instance.focusOnClick = false;
+  updateQuickActions();
 });
 keyboardInput.addEventListener('blur', () => {
   autoKeyboard = false;
   document.getElementById('keyboard').setAttribute('aria-pressed', 'false');
   if (activeConnection) activeConnection.instance.focusOnClick = controlReady;
+  updateQuickActions();
 });
 
 let touchGesture;
@@ -655,6 +721,19 @@ function scrollTouch(gesture) {
   }
 }
 
+// Chrome counts a double-click only when both clicks land within a couple of pixels, far finer than two finger taps.
+// A second tap soon after and close to the first clicks exactly where the first did, so a double tap selects a word.
+const repeatTapMs = 400, repeatTapSlopPx = 12;
+let lastTap;
+function repeatTapPoint(gesture) {
+  const now = performance.now(), view = { scale: displayScale, left: viewport.scrollLeft, top: viewport.scrollTop };
+  const repeat = lastTap && now - lastTap.at < repeatTapMs && Math.hypot(gesture.x - lastTap.x, gesture.y - lastTap.y) <= repeatTapSlopPx &&
+    lastTap.view.scale === view.scale && lastTap.view.left === view.left && lastTap.view.top === view.top;
+  const point = repeat ? { x: lastTap.x, y: lastTap.y } : { x: gesture.x, y: gesture.y };
+  lastTap = { ...point, at: now, view };
+  return point;
+}
+
 // Capture touch before noVNC's gesture recognizer. Listen at window because
 // native dragging creates a capture overlay outside the viewport, and a second
 // finger can start on that overlay. Ordinary desktop mouse events are untouched.
@@ -712,9 +791,11 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
   const gesture = touchGesture;
   releaseTouchDrag(gesture);
   touchGesture = undefined;
+  if (holdsButton(gesture) && controlReady && !accessEnded) checkFocusAfterTap(0, { keyboard: false });
   if (gesture.pinch || holdsButton(gesture) || gesture.moved || !controlReady || accessEnded) return;
-  gesture.canvas.dispatchEvent(new MouseEvent('mousedown', mouseOptions(gesture.x, gesture.y, 1)));
+  const point = repeatTapPoint(gesture);
+  gesture.canvas.dispatchEvent(new MouseEvent('mousedown', mouseOptions(point.x, point.y, 1)));
   // noVNC's window capture proxy must receive mouseup to release its overlay.
-  window.dispatchEvent(new MouseEvent('mouseup', mouseOptions(gesture.x, gesture.y, 0)));
-  checkFocusAfterTap((gesture.y - gesture.canvas.getBoundingClientRect().top) / displayScale);
+  window.dispatchEvent(new MouseEvent('mouseup', mouseOptions(point.x, point.y, 0)));
+  checkFocusAfterTap((point.y - gesture.canvas.getBoundingClientRect().top) / displayScale);
 }, { capture: true, passive: false });

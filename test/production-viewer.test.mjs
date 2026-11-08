@@ -134,6 +134,26 @@ test('a focus answer outside the allowed kinds becomes unknown', async t => {
   }
 });
 
+test('a focus answer says whether text is selected, and nothing more about it', async t => {
+  let answer;
+  const ctx = await fixture(t, { supervisor: { async focusRead() { return answer; } } });
+  const watch = await (await ctx.post('credentials')).json(); const oldSocket = await ctx.open(watch.generation);
+  const oldClosed = once(oldSocket, 'close');
+  const control = await (await ctx.post('control')).json(); await oldClosed; await ctx.open(control.generation);
+  const cases = [
+    [{ kind: 'none', selected: true, text: 'leak' }, { kind: 'none', selected: true }],
+    [{ kind: 'editable', inputMode: 'text', multiline: false, selected: true }, { kind: 'editable', inputMode: 'text', multiline: false, selected: true }],
+    [{ kind: 'none', selected: 'the selected words' }, { kind: 'none' }],
+    [{ kind: 'none', selected: false }, { kind: 'none' }],
+    [{ kind: 'browser-ui', selected: true }, { kind: 'browser-ui' }],
+    [{ kind: 'unknown', selected: true }, { kind: 'unknown' }],
+  ];
+  for ([answer] of cases) {
+    const expected = cases.find(([state]) => state === answer)[1];
+    assert.deepEqual(await (await ctx.post('focus')).json(), expected, JSON.stringify(answer));
+  }
+});
+
 test('a gateway without a focus reader keeps the focus capability off', async t => {
   const ctx = await fixture(t);
   const watch = await (await ctx.post('credentials')).json(); const oldSocket = await ctx.open(watch.generation);

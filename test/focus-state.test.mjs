@@ -29,6 +29,7 @@ const PAGE = `<!doctype html><body style="margin:0">
   <input id="secret" type="password" value="hunter2" style="position:absolute;left:10px;top:186px;width:260px;height:24px">
   <button id="plain" style="position:absolute;left:10px;top:218px;width:260px;height:24px">Plain</button>
   <input id="locked" readonly value="fixed" style="position:absolute;left:10px;top:250px;width:260px;height:24px">
+  <p id="words" style="position:absolute;left:10px;top:282px;width:260px;margin:0">quiet words to select</p>
   <iframe id="frame" src="/inner" style="position:absolute;left:300px;top:10px;width:300px;height:60px"></iframe>
   <iframe id="cross" src="http://localhost:PORT/inner" style="position:absolute;left:300px;top:90px;width:300px;height:60px"></iframe>
 </body>`;
@@ -126,6 +127,31 @@ test('the focused field is reported with its keyboard type and never its content
   assert.deepEqual(await readFocus(chrome.runtime), { kind: 'editable', inputMode: 'numeric', multiline: false }, 'cross-site frame');
   await chrome.focusElement('document.getElementById("plain")');
   assert.deepEqual(await readFocus(chrome.runtime), { kind: 'none' }, 'focus left the cross-site frame');
+});
+
+test('selected text is reported as a yes, never as the text', { skip, timeout: 120_000 }, async t => {
+  const chrome = await windowedChrome(t);
+  const read = async (expected, message) => {
+    const focus = await readFocus(chrome.runtime);
+    assert.deepEqual(focus, expected, message);
+    assert.doesNotMatch(JSON.stringify(focus), /hello|quiet|words|fixed|hunter2/, 'no selected text leaves the browser');
+  };
+  await chrome.focusElement('document.getElementById("name")');
+  await chrome.evaluate('document.getElementById("name").value = "hello world"; document.getElementById("name").setSelectionRange(0, 5)');
+  await read({ kind: 'editable', inputMode: 'text', multiline: false, selected: true }, 'part of a field is selected');
+  await chrome.evaluate('document.getElementById("name").setSelectionRange(5, 5)');
+  await read({ kind: 'editable', inputMode: 'text', multiline: false }, 'a caret is not a selection');
+  await chrome.focusElement('document.getElementById("secret")');
+  await chrome.evaluate('document.getElementById("secret").select()');
+  await read({ kind: 'editable', inputMode: 'text', multiline: false }, 'Chrome never copies from a password field, so offer no Copy');
+  await chrome.focusElement('document.getElementById("locked")');
+  await chrome.evaluate('document.getElementById("locked").select()');
+  await read({ kind: 'none', selected: true }, 'a read-only field can still be copied from');
+  await chrome.focusElement('document.getElementById("plain")');
+  await chrome.evaluate('getSelection().selectAllChildren(document.getElementById("words"))');
+  await read({ kind: 'none', selected: true }, 'page text is selected');
+  await chrome.evaluate('getSelection().removeAllRanges()');
+  await read({ kind: 'none' }, 'the selection was cleared');
 });
 
 test('Chrome toolbar focus is reported as browser UI, and the page again after Escape', { skip, timeout: 120_000 }, async t => {
