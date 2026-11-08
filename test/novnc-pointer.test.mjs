@@ -624,7 +624,14 @@ async function phone(t, focus, options = {}) {
     await touch('touchStart', [[x, y]]); await touch('touchEnd', []);
   };
   const shown = selector => ctx.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); const r = e.getBoundingClientRect(); return !e.hidden && r.width > 0 && r.height > 0; })()`);
-  return { ...ctx, tap, keyboard, press, shown };
+  // The phone point for a framebuffer point, then a finger held still there, as for a long press.
+  const point = (fx, fy) => ctx.evaluate(`(() => { const r = document.querySelector('canvas').getBoundingClientRect(), s = r.width / ${width}; return [r.left + ${fx} * s, r.top + ${fy} * s]; })()`);
+  const hold = async (fx, fy, ms = 450) => { const [x, y] = await point(fx, fy); await touch('touchStart', [[x, y]]); await pause(ms); await touch('touchEnd', []); return [x, y]; };
+  const doubleTap = async (fx, fy) => { const [x, y] = await point(fx, fy); for (const dx of [0, 2]) { await touch('touchStart', [[x + dx, y]]); await touch('touchEnd', []); } return [x, y]; };
+  const pill = () => ctx.evaluate(`(() => { const e = document.querySelector('#quick-actions'), r = e.getBoundingClientRect();
+    return { visible: !e.hidden, copy: !document.querySelector('#quick-copy').hidden, paste: !document.querySelector('#quick-paste').hidden,
+      left: r.left, right: r.right, top: r.top, bottom: r.bottom, height: r.height, width: r.width }; })()`);
+  return { ...ctx, tap, keyboard, press, shown, point, hold, doubleTap, pill };
 }
 const noVncSkip = !assets ? 'set NOVNC_ASSETS_DIR to the noVNC 1.7.0 source tree' : !existsSync(chromePath) ? 'Chrome unavailable' : false;
 
@@ -714,37 +721,48 @@ test('a double tap lands both clicks on one spot, so the browser sees a double-c
   assert.ok(Math.abs(far.x - 900) <= 2, 'a quick tap somewhere else stays where it landed');
 });
 
-test('Copy appears when the agent’s browser has text selected, and copies it to this device', { skip: noVncSkip }, async t => {
+test('a plain tap never offers Copy or Paste; a double tap on selected text offers Copy just above the finger', { skip: noVncSkip }, async t => {
   const focus = { answer: { kind: 'none', selected: true }, requests: 0 };
-  const { tap, press, shown, evaluate, waitFor, clipboardRequests } = await phone(t, focus, { clipboardBridge: true });
+  const { tap, doubleTap, press, pill, evaluate, waitFor, clipboardRequests } = await phone(t, focus, { clipboardBridge: true });
   await evaluate(`window.clipboardWrites = []; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText: async () => '', writeText: async text => window.clipboardWrites.push(text) } })`);
-  assert.equal(await shown('#quick-copy'), false, 'no Copy before anything is selected');
   await tap(640, 400);
-  await waitFor(`!document.querySelector('#quick-copy').hidden`, 'Copy appears for a selection');
-  assert.equal(await shown('#quick-copy'), true);
-  assert.equal(await evaluate(`document.querySelector('#toolbar').hidden`), true, 'the controls stay folded away');
+  for (let n = 0; n < 100 && focus.requests < 1; n++) await pause(20);
+  await pause(700);
+  assert.equal((await pill()).visible, false, 'a tap is not a request for Copy');
+  await pause(500);
+  const [x, y] = await doubleTap(640, 400);
+  await waitFor(`!document.querySelector('#quick-actions').hidden`, 'Copy appears after a double tap selects text');
+  const bar = await pill();
+  assert.deepEqual([bar.copy, bar.paste], [true, false], 'page text offers Copy only');
+  assert.ok(bar.height <= 40 && bar.width <= 120, 'a small bar, not a big button: ' + JSON.stringify(bar));
+  assert.ok(bar.bottom <= y && y - bar.bottom <= 40 && bar.left <= x && bar.right >= x, 'it sits just above the finger: ' + JSON.stringify({ bar, x, y }));
   await press('#quick-copy');
   await waitFor('window.clipboardWrites.length === 1', 'the selection reached this device');
-  assert.deepEqual(await evaluate('window.clipboardWrites'), ['远程复制😀']);
   assert.deepEqual(clipboardRequests, [{ action: 'read' }]);
-  assert.equal(await evaluate(`document.querySelector('#quick-copy').textContent`), 'Copied', 'the chip confirms, since the status line is folded away');
-  focus.answer = { kind: 'none' };
-  await tap(640, 500);
-  await waitFor(`document.querySelector('#quick-copy').hidden`, 'Copy goes away once nothing is selected');
+  await waitFor(`document.querySelector('#quick-actions').hidden`, 'the bar goes away after copying, as on Android');
+  await doubleTap(640, 400);
+  await waitFor(`!document.querySelector('#quick-actions').hidden`, 'Copy is offered again');
+  await tap(300, 200);
+  assert.equal((await pill()).visible, false, 'the next touch on the browser dismisses it');
 });
 
-test('Paste sits above the open keyboard and pastes without closing it', { skip: noVncSkip }, async t => {
+test('touch and hold in a text field offers Paste just above the finger, and a tap in the field does not', { skip: noVncSkip }, async t => {
   const focus = { answer: { kind: 'editable', inputMode: 'text', multiline: false }, requests: 0 };
-  const { tap, press, shown, evaluate, waitFor, clipboardRequests, peers } = await phone(t, focus, { clipboardBridge: true });
+  const { tap, hold, press, pill, evaluate, waitFor, clipboardRequests, peers } = await phone(t, focus, { clipboardBridge: true });
   await evaluate(`Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText: async () => 'from my phone', writeText: async () => {} } })`);
-  assert.equal(await shown('#quick-paste'), false, 'no Paste while the keyboard is closed');
   await tap(640, 400);
-  await waitFor(`document.activeElement?.id === 'keyboard-input'`, 'the keyboard opened for the field');
+  await waitFor(`document.activeElement?.id === 'keyboard-input'`, 'a tap in the field opens the keyboard');
+  await pause(700);
+  assert.equal((await pill()).visible, false, 'an open keyboard alone does not offer Paste');
   // The phone keyboard covers the lower part of the screen.
   await evaluate(`window.visibleArea = { width: 390, height: 444, offsetLeft: 0, offsetTop: 0 }; for (const key of Object.keys(visibleArea)) Object.defineProperty(visualViewport, key, { configurable: true, get: () => visibleArea[key] }); visualViewport.dispatchEvent(new Event('resize'));`);
-  await waitFor(`!document.querySelector('#quick-paste').hidden`, 'Paste appears with the keyboard');
-  const rect = await evaluate(`(() => { const r = document.querySelector('#quick-paste').getBoundingClientRect(); return { top: r.top, bottom: r.bottom, height: r.height }; })()`);
-  assert.ok(rect.bottom <= 444 && rect.top >= 0 && rect.height >= 44, 'Paste is a full-size button above the keyboard: ' + JSON.stringify(rect));
+  const [x, y] = await hold(640, 300);
+  await waitFor(`!document.querySelector('#quick-actions').hidden`, 'Paste appears after a hold in the field');
+  const bar = await pill();
+  assert.deepEqual([bar.copy, bar.paste], [false, true], 'an empty field offers Paste only');
+  assert.ok(bar.height <= 40 && bar.width <= 120, 'a small bar: ' + JSON.stringify(bar));
+  assert.ok(bar.bottom <= y && y - bar.bottom <= 40 && bar.left <= x && bar.right >= x, 'just above the finger: ' + JSON.stringify({ bar, x, y }));
+  assert.ok(bar.top >= 0 && bar.bottom <= 444, 'above the keyboard');
   const keysBefore = peers.at(-1).keys.length;
   await press('#quick-paste');
   for (let n = 0; n < 100 && clipboardRequests.length < 1; n++) await pause(10);
@@ -752,6 +770,16 @@ test('Paste sits above the open keyboard and pastes without closing it', { skip:
   for (let n = 0; n < 100 && !peers.at(-1).keys.slice(keysBefore).some(key => key.down && key.keysym === 0x76); n++) await pause(10);
   assert.ok(peers.at(-1).keys.slice(keysBefore).some(key => key.down && key.keysym === 0x76), 'Ctrl+V reached the browser');
   assert.equal(await evaluate(`document.activeElement?.id`), 'keyboard-input', 'the keyboard stays open for more typing');
-  await evaluate(`document.querySelector('#keyboard-input').blur()`);
-  await waitFor(`document.querySelector('#quick-paste').hidden`, 'Paste goes away with the keyboard');
+  await waitFor(`document.querySelector('#quick-actions').hidden`, 'the bar goes away after pasting');
+  focus.answer = { kind: 'editable', inputMode: 'text', multiline: true, selected: true };
+  await hold(640, 300);
+  await waitFor(`!document.querySelector('#quick-actions').hidden`, 'a hold that selects text in a field offers both');
+  assert.deepEqual(await evaluate(`[!document.querySelector('#quick-copy').hidden, !document.querySelector('#quick-paste').hidden]`), [true, true]);
+  // A hold near the bottom still keeps the bar on screen, above the keyboard.
+  focus.answer = { kind: 'editable', inputMode: 'text', multiline: false };
+  await tap(100, 100);
+  await hold(640, 690);
+  await waitFor(`!document.querySelector('#quick-actions').hidden`, 'Paste for a hold low in the screen');
+  const low = await pill();
+  assert.ok(low.top >= 0 && low.bottom <= 444, 'kept inside the visible area: ' + JSON.stringify(low));
 });

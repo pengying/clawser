@@ -272,7 +272,7 @@ void bootstrap();
 function updateInputControls() {
   for (const id of ['keyboard', 'paste', 'drag-once']) document.getElementById(id).disabled = !controlReady || accessEnded;
   document.getElementById('copy').disabled = !controlReady || accessEnded;
-  if (!controlReady || accessEnded) { cancelTouchInput(); keyboardInput.blur(); selectionReady = false; }
+  if (!controlReady || accessEnded) { cancelTouchInput(); keyboardInput.blur(); }
   updateQuickActions();
 }
 
@@ -383,14 +383,13 @@ function collapseToolbar() {
   toolbar.hidden = true;
   restore.hidden = false;
   restore.focus();
-  updateQuickActions();
 }
 function showToolbar() {
   if (!toolbar.hidden) return;
   toolbar.hidden = false;
   document.getElementById('restore').hidden = true;
   keepToolbarVisible();
-  updateQuickActions();
+  hideQuickActions();
 }
 document.getElementById('collapse').addEventListener('click', collapseToolbar);
 document.getElementById('restore').addEventListener('click', () => {
@@ -520,38 +519,49 @@ async function copyToDevice() {
 }
 document.getElementById('copy').addEventListener('click', () => void copyToDevice());
 
-// Copy and Paste float over the browser while they are useful, since the controls are folded away during control:
-// Paste while this device's keyboard is open, and Copy while the agent's browser has text selected.
+// A small Copy / Paste bar, as a phone shows over its own text. It opens only when the owner asks for it the
+// way a phone does: a touch and hold, or a double tap. It sits just above the finger, offers Copy when the agent's
+// browser has text selected and Paste in a text field, and goes away at the next touch or once used.
 const quickActions = document.getElementById('quick-actions');
 const quickCopy = document.getElementById('quick-copy');
 const quickPaste = document.getElementById('quick-paste');
-let selectionReady = false;
+let quickOffer;
+// Counts touches on the browser, so a bar asked for by an earlier touch never opens after a later one.
+let touchCount = 0;
 function placeQuickActions() {
-  if (quickActions.hidden) return;
-  const bounds = toolbarBounds(), rect = quickActions.getBoundingClientRect();
-  quickActions.style.left = Math.max(bounds.left + 8, bounds.left + bounds.width - rect.width - 8) + 'px';
-  quickActions.style.top = Math.max(bounds.top + 8, bounds.top + bounds.height - rect.height - 8) + 'px';
+  if (quickActions.hidden || !quickOffer) return;
+  const bounds = toolbarBounds(), rect = quickActions.getBoundingClientRect(), gap = 12;
+  const left = Math.max(bounds.left + 8, Math.min(quickOffer.x - rect.width / 2, bounds.left + bounds.width - rect.width - 8));
+  // Above the finger, or below it when there is no room above. Always inside the area the keyboard leaves visible.
+  let top = quickOffer.y - rect.height - gap;
+  if (top < bounds.top + 8) top = quickOffer.y + gap + 24;
+  top = Math.max(bounds.top + 8, Math.min(top, bounds.top + bounds.height - rect.height - 8));
+  quickActions.style.left = left + 'px';
+  quickActions.style.top = top + 'px';
 }
-function updateQuickActions() {
-  // The open controls already hold Copy and Paste.
-  const live = controlReady && !accessEnded && toolbar.hidden;
-  quickPaste.hidden = !(live && document.activeElement === keyboardInput);
-  quickCopy.hidden = !(live && selectionReady);
-  quickActions.hidden = quickPaste.hidden && quickCopy.hidden;
+function hideQuickActions() {
+  quickOffer = undefined;
+  quickActions.hidden = true;
+}
+function offerQuickActions(x, y, answer) {
+  const copy = answer.selected === true, paste = answer.kind === 'editable';
+  if (!controlReady || accessEnded || (!copy && !paste)) { hideQuickActions(); return; }
+  quickOffer = { x, y };
+  quickCopy.hidden = !copy;
+  quickPaste.hidden = !paste;
+  quickActions.hidden = false;
   placeQuickActions();
 }
-function flashLabel(button, text, label) {
-  button.textContent = text;
-  clearTimeout(button.labelTimer);
-  button.labelTimer = setTimeout(() => { button.textContent = label; }, 1500);
+function updateQuickActions() {
+  if (!controlReady || accessEnded) hideQuickActions();
 }
 for (const button of [quickCopy, quickPaste]) {
   // Keep this device's keyboard open, as the Keyboard button does.
   button.addEventListener('pointerdown', event => event.preventDefault());
   button.addEventListener('mousedown', event => event.preventDefault());
 }
-quickCopy.addEventListener('click', async () => { if (await copyToDevice()) flashLabel(quickCopy, 'Copied', 'Copy'); });
-quickPaste.addEventListener('click', async () => { if (await pasteFromDevice()) flashLabel(quickPaste, 'Pasted', 'Paste'); });
+quickCopy.addEventListener('click', async () => { hideQuickActions(); await copyToDevice(); });
+quickPaste.addEventListener('click', async () => { hideQuickActions(); await pasteFromDevice(); });
 
 // A real editable buffer supports Android/Gboard input and IME composition.
 // Compare committed code points rather than keycodes or UTF-16 code units.
@@ -606,14 +616,14 @@ document.getElementById('keyboard').addEventListener('click', () => {
 // Phones open a keyboard only shortly after a tap, so this runs once per tap and never on its own.
 // It closes only a keyboard it opened itself, never one the owner opened with the Keyboard button.
 // A tap that lands while a check is running gets one more check afterwards, so a double tap's selection is seen.
-// After a hold or drag, which is how text gets selected, only the Copy button follows the answer.
+// After a hold or drag the keyboard is left as it is. A hold or a double tap also offers the Copy / Paste bar at offer.
 const toolbarBandPx = 100;
 let autoKeyboard = false;
 let focusCheck, focusRecheck;
-function checkFocusAfterTap(framebufferY, { keyboard = true } = {}) {
+function checkFocusAfterTap(framebufferY, { keyboard = true, offer } = {}) {
   const connection = activeConnection;
   if (!connection?.capabilities.focus || !controlReady || accessEnded) return;
-  if (focusCheck) { focusRecheck = { framebufferY, keyboard: keyboard || focusRecheck?.keyboard === true }; return; }
+  if (focusCheck) { focusRecheck = { framebufferY, keyboard: keyboard || focusRecheck?.keyboard === true, offer: offer || focusRecheck?.offer }; return; }
   focusCheck = (async () => {
     let answer;
     for (const wait of [150, 350]) {
@@ -623,8 +633,7 @@ function checkFocusAfterTap(framebufferY, { keyboard = true } = {}) {
       if (answer.kind !== 'none' || answer.selected) break;
     }
     if (!controlReady || accessEnded || connection !== activeConnection) return;
-    selectionReady = answer.selected === true;
-    updateQuickActions();
+    if (offer && offer.touch === touchCount) offerQuickActions(offer.x, offer.y, answer);
     if (!keyboard) return;
     if (answer.kind === 'editable') { openKeyboard(answer.inputMode); autoKeyboard = true; }
     else if (answer.kind === 'browser-ui' && framebufferY < toolbarBandPx) { openKeyboard('url'); autoKeyboard = true; }
@@ -639,13 +648,11 @@ function checkFocusAfterTap(framebufferY, { keyboard = true } = {}) {
 keyboardInput.addEventListener('focus', () => {
   document.getElementById('keyboard').setAttribute('aria-pressed', 'true');
   if (activeConnection) activeConnection.instance.focusOnClick = false;
-  updateQuickActions();
 });
 keyboardInput.addEventListener('blur', () => {
   autoKeyboard = false;
   document.getElementById('keyboard').setAttribute('aria-pressed', 'false');
   if (activeConnection) activeConnection.instance.focusOnClick = controlReady;
-  updateQuickActions();
 });
 
 let touchGesture;
@@ -729,8 +736,9 @@ function repeatTapPoint(gesture) {
   const now = performance.now(), view = { scale: displayScale, left: viewport.scrollLeft, top: viewport.scrollTop };
   const repeat = lastTap && now - lastTap.at < repeatTapMs && Math.hypot(gesture.x - lastTap.x, gesture.y - lastTap.y) <= repeatTapSlopPx &&
     lastTap.view.scale === view.scale && lastTap.view.left === view.left && lastTap.view.top === view.top;
-  const point = repeat ? { x: lastTap.x, y: lastTap.y } : { x: gesture.x, y: gesture.y };
-  lastTap = { ...point, at: now, view };
+  const point = repeat ? { x: lastTap.x, y: lastTap.y, repeat: true } : { x: gesture.x, y: gesture.y };
+  // A third tap starts a new pair rather than repeating again.
+  lastTap = repeat ? undefined : { ...point, at: now, view };
   return point;
 }
 
@@ -744,6 +752,8 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
   const touches = event.touches;
   if (type === 'touchcancel') { cancelTouchInput(); return; }
   if (type === 'touchstart') {
+    touchCount++;
+    hideQuickActions();
     if (touches.length >= 2) beginPinch(touches);
     else if (!touchGesture) {
       const canvas = screen.querySelector('canvas'), size = framebufferSize();
@@ -791,11 +801,11 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
   const gesture = touchGesture;
   releaseTouchDrag(gesture);
   touchGesture = undefined;
-  if (holdsButton(gesture) && controlReady && !accessEnded) checkFocusAfterTap(0, { keyboard: false });
+  if (holdsButton(gesture) && controlReady && !accessEnded) checkFocusAfterTap(0, { keyboard: false, offer: { x: gesture.lastX, y: gesture.lastY, touch: touchCount } });
   if (gesture.pinch || holdsButton(gesture) || gesture.moved || !controlReady || accessEnded) return;
   const point = repeatTapPoint(gesture);
   gesture.canvas.dispatchEvent(new MouseEvent('mousedown', mouseOptions(point.x, point.y, 1)));
   // noVNC's window capture proxy must receive mouseup to release its overlay.
   window.dispatchEvent(new MouseEvent('mouseup', mouseOptions(point.x, point.y, 0)));
-  checkFocusAfterTap((point.y - gesture.canvas.getBoundingClientRect().top) / displayScale);
+  checkFocusAfterTap((point.y - gesture.canvas.getBoundingClientRect().top) / displayScale, point.repeat ? { offer: { x: point.x, y: point.y, touch: touchCount } } : {});
 }, { capture: true, passive: false });

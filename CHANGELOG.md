@@ -1,5 +1,10 @@
 # Changes
 
+## 0.7.5
+
+- Fix a way to block a handoff's owner. Each handoff had one budget of 30 requests a minute, charged before the cookie was checked. Anyone who learned a handoff's id could fill it with wrong guesses, and the owner's own requests, Take control, the stream and Done then failed for up to a minute at a time. They still could not see or control the browser. The gateway now checks the cookie or invitation first. A refused guess spends a guess budget of 30 a minute. A valid request spends a separate budget of 240 a minute, and Done spends none, so wrong guesses can no longer block the owner or the real invitation claim.
+- Copy and Paste in the noVNC viewer now work as on a phone. Double-tap a word, or touch and hold, then drag, and a small Copy bar appears just above the finger. Touch and hold in a text field for Paste. A plain tap or an open keyboard no longer shows them. The bar goes away at the next touch, or once used. It replaces the larger floating buttons from 0.7.4.
+
 ## 0.7.4
 
 - The noVNC viewer now opens the phone's keyboard when a tap puts the cursor in a text field, and picks the matching layout, such as a number pad for a phone number or a code. It closes the keyboard again when a tap lands outside a field, unless the owner opened it with the Keyboard button. A tap on Chrome's address bar opens it with the web address layout.
