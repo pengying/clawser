@@ -54,9 +54,9 @@ jobs:
       - name: Prepare installed browser files
         timeout-minutes: 3
         run: node .github/scripts/prepare-browser.mjs
-      # The runner image ships Xvfb. xproof and the windowed browser tests need these libraries alongside it.
+      # The runner image ships Xvfb. xproof needs these libraries, and the windowed browser tests also need a window manager.
       - name: Install the X client libraries
-        run: sudo apt-get update && sudo apt-get install -y libxres1 libxtst6 libxi6
+        run: sudo apt-get update && sudo apt-get install -y libxres1 libxtst6 libxi6 openbox
       - name: Unit and disposable browser tests
         env:
           CLAWSER_BROWSER_DIAGNOSTICS_DIR: ${{ runner.temp }}/clawser-browser-diagnostics

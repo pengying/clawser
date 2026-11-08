@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, execFile } from 'node:child_process';
+import { spawn, execFile, execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
@@ -13,7 +13,9 @@ import { readFocus } from '../src/focus-state.mjs';
 import { skip as noX, startX } from '../runtime/desktop/test/xvfb.mjs';
 
 const chromePath = process.env.CHROME_BIN || '/usr/bin/google-chrome-stable';
-const skip = noX || (!existsSync(chromePath) ? 'Chrome unavailable' : false);
+const hasOpenbox = (() => { try { execFileSync('which', ['openbox'], { stdio: 'ignore' }); return true; } catch { return false; } })();
+// Without a window manager, a click never gives Chrome's window keyboard focus. Setup always runs openbox.
+const skip = noX || (!existsSync(chromePath) ? 'Chrome unavailable' : !hasOpenbox ? 'needs openbox' : false);
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const execute = promisify(execFile);
 
@@ -37,6 +39,8 @@ async function windowedChrome(t) {
   const server = createServer((req, res) => { res.setHeader('Content-Type', 'text/html'); res.end(req.url.startsWith('/inner') ? INNER : PAGE); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const profile = await mkdtemp(join(tmpdir(), 'focus-state-'));
+  const wm = spawn('openbox', [], { env: display.env, stdio: 'ignore' });
+  await pause(500);
   const chrome = spawn(chromePath, ['--no-sandbox', '--disable-dev-shm-usage', '--no-first-run', '--no-default-browser-check',
     '--ozone-platform=x11', '--password-store=basic', '--window-position=0,0', '--window-size=640,480',
     '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
@@ -45,6 +49,7 @@ async function windowedChrome(t) {
   t.after(async () => {
     for (const page of pages) page.close();
     if (chrome.exitCode === null && chrome.signalCode === null) { const exited = once(chrome, 'exit'); chrome.kill('SIGTERM'); await exited; }
+    if (wm.exitCode === null && wm.signalCode === null) { const exited = once(wm, 'exit'); wm.kill('SIGTERM'); await exited; }
     server.close();
     await display.stop();
     await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
