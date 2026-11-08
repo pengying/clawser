@@ -275,6 +275,7 @@ function updateInputControls() {
   document.getElementById('copy').disabled = !controlReady || accessEnded;
   if (!controlReady || accessEnded) { cancelTouchInput(); keyboardInput.blur(); }
   updateQuickActions();
+  drawPointer();
 }
 
 function framebufferSize() {
@@ -310,6 +311,7 @@ function updateDisplay(anchor) {
   const label = document.getElementById('zoom-level');
   label.value = zoomMode === 'fit' ? 'Fit' : Math.round(displayScale * 100) + '%';
   label.dataset.scale = String(displayScale);
+  drawPointer();
   document.getElementById('zoom-toggle').setAttribute('aria-label', zoomMode === 'fit' ? 'Actual size' : 'Fit to screen');
 }
 
@@ -660,8 +662,103 @@ let touchGesture;
 const holdDelayMs = 250;
 const midpoint = (touches) => ({ x: (touches[0].clientX + touches[1].clientX) / 2, y: (touches[0].clientY + touches[1].clientY) / 2 });
 const touchDistance = (touches) => Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
-function mouseOptions(x, y, buttons) {
-  return { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, buttons };
+function mouseOptions(x, y, buttons, button = 0) {
+  return { bubbles: true, cancelable: true, clientX: x, clientY: y, button, buttons };
+}
+
+// Trackpad mode. pointer is the on-screen arrow in framebuffer pixels, fractions allowed.
+let inputMode = 'touch';
+let pointer = null;
+let lastTouchTapFb = null;
+let padGesture;
+const pointerEl = document.getElementById('pointer');
+const canvasEl = () => screen.querySelector('canvas');
+const toScreen = fb => { const r = canvasEl().getBoundingClientRect(); return { x: r.left + fb.x * displayScale, y: r.top + fb.y * displayScale }; };
+const toFramebuffer = pt => { const r = canvasEl().getBoundingClientRect(); return { x: (pt.x - r.left) / displayScale, y: (pt.y - r.top) / displayScale }; };
+function drawPointer() {
+  const show = inputMode === 'trackpad' && controlReady && !accessEnded && pointer && canvasEl();
+  pointerEl.toggleAttribute('hidden', !show);
+  if (!show) return;
+  const at = toScreen(pointer);
+  pointerEl.style.transform = `translate(${at.x - 1.5}px, ${at.y - 1.5}px)`;
+}
+function setInputMode(next) {
+  inputMode = next;
+  cancelTouchInput();
+  if (next === 'trackpad' && !pointer && framebufferSize()) {
+    const b = visibleBounds();
+    const spot = lastTouchTapFb || toFramebuffer({ x: b.left + b.width / 2, y: b.top + b.height / 2 });
+    pointer = movePointer(spot, { dx: 0, dy: 0 }, displayScale, framebufferSize());
+  }
+  drawPointer();
+}
+viewport.addEventListener('scroll', drawPointer);
+function sendButton(x, y, button, down) {
+  const buttons = button === 2 ? 2 : 1;
+  const at = toScreen({ x, y });
+  if (down) canvasEl().dispatchEvent(new PointerEvent('mousedown', mouseOptions(at.x, at.y, buttons, button)));
+  // Route up through window so noVNC also removes its capture overlay.
+  else window.dispatchEvent(new PointerEvent('mouseup', mouseOptions(at.x, at.y, 0, button)));
+}
+function movePointerTo(x, y, buttons = 0) {
+  pointer = movePointer({ x, y }, { dx: 0, dy: 0 }, displayScale, framebufferSize());
+  drawPointer();
+  if (!controlReady || accessEnded) return;
+  const at = toScreen(pointer);
+  canvasEl().dispatchEvent(new PointerEvent('mousemove', mouseOptions(at.x, at.y, buttons)));
+}
+
+const padTapMs = 250, padDoubleMs = 350, padMoveSlop = 4, padTapSlop = 8, padTwoSlop = 10;
+let lastPadTap;
+function trackpadTouch(type, touches) {
+  const now = performance.now();
+  if (type === 'touchstart') {
+    if (!pointer) setInputMode('trackpad');
+    if (!padGesture) {
+      padGesture = { at: now, starts: new Map(), last: null, moved: false, two: false, travel: 0, twoTravel: 0 };
+      padGesture.last = { x: touches[0].clientX, y: touches[0].clientY, at: now };
+    }
+    if (touches.length >= 2) padGesture.two = true;
+    for (const t of touches) if (!padGesture.starts.has(t.identifier)) padGesture.starts.set(t.identifier, { x: t.clientX, y: t.clientY });
+    return;
+  }
+  const gesture = padGesture;
+  if (!gesture) return;
+  if (type === 'touchmove') {
+    for (const t of touches) {
+      const s = gesture.starts.get(t.identifier);
+      if (s) gesture.travel = Math.max(gesture.travel, Math.hypot(t.clientX - s.x, t.clientY - s.y));
+    }
+    if (gesture.two) {
+      // 4b: two fingers that travel scroll or pinch here.
+      return;
+    }
+    const t = touches[0], dx = t.clientX - gesture.last.x, dy = t.clientY - gesture.last.y, dt = now - gesture.last.at;
+    gesture.last = { x: t.clientX, y: t.clientY, at: now };
+    const s = gesture.starts.get(t.identifier);
+    if (!gesture.moved && s && Math.hypot(t.clientX - s.x, t.clientY - s.y) > padMoveSlop) gesture.moved = true;
+    if (gesture.moved) {
+      const next = movePointer(pointer, accelerate(dx, dy, dt), displayScale, framebufferSize());
+      movePointerTo(next.x, next.y);
+    }
+    return;
+  }
+  if (touches.length) return;
+  padGesture = undefined;
+  if (now - gesture.at > padTapMs) return;
+  if (gesture.two) {
+    if (gesture.travel > padTwoSlop) return;
+    sendButton(pointer.x, pointer.y, 2, true);
+    sendButton(pointer.x, pointer.y, 2, false);
+    return;
+  }
+  if (gesture.travel > padTapSlop) return;
+  const second = lastPadTap && now - lastPadTap < padDoubleMs;
+  lastPadTap = second ? undefined : now;
+  sendButton(pointer.x, pointer.y, 0, true);
+  sendButton(pointer.x, pointer.y, 0, false);
+  const at = toScreen(pointer);
+  checkFocusAfterTap(pointer.y, second ? { offer: { x: at.x, y: at.y, touch: touchCount } } : {});
 }
 const holdsButton = gesture => gesture.kind === 'hold';
 function beginHold(gesture) {
@@ -669,7 +766,7 @@ function beginHold(gesture) {
   gesture.kind = 'hold';
   gesture.remoteDown = true;
   status.textContent = 'Holding… Lift to release.';
-  gesture.canvas.dispatchEvent(new MouseEvent('mousedown', mouseOptions(gesture.x, gesture.y, 1)));
+  gesture.canvas.dispatchEvent(new PointerEvent('mousedown', mouseOptions(gesture.x, gesture.y, 1)));
 }
 function releaseTouchDrag(gesture = touchGesture) {
   clearTimeout(gesture?.holdTimer);
@@ -678,11 +775,12 @@ function releaseTouchDrag(gesture = touchGesture) {
   if (controlReady && !accessEnded) status.textContent = 'Hold released. Swipe to scroll. Pinch to zoom.';
   // Route up through noVNC's window capture proxy so it also removes the
   // capture overlay and flushes any queued held-button movement.
-  window.dispatchEvent(new MouseEvent('mouseup', mouseOptions(gesture.lastX, gesture.lastY, 0)));
+  window.dispatchEvent(new PointerEvent('mouseup', mouseOptions(gesture.lastX, gesture.lastY, 0)));
 }
 function cancelTouchInput() {
   releaseTouchDrag();
   touchGesture = undefined;
+  padGesture = undefined;
 }
 document.addEventListener('visibilitychange', () => { if (document.hidden) cancelTouchInput(); });
 function beginPinch(touches) {
@@ -734,7 +832,7 @@ function repeatTapPoint(gesture) {
 // native dragging creates a capture overlay outside the viewport, and a second
 // finger can start on that overlay. Ordinary desktop mouse events are untouched.
 for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) window.addEventListener(type, (event) => {
-  if (!touchGesture && !event.composedPath().includes(viewport)) return;
+  if (!touchGesture && !padGesture && !event.composedPath().includes(viewport)) return;
   event.preventDefault();
   event.stopImmediatePropagation();
   const touches = event.touches;
@@ -745,6 +843,7 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
     // While the sheet is open a tap on the page only closes it. The whole gesture is swallowed.
     if (touchGesture?.swallowed) return;
     if (sheetOpen() && !touchGesture) { closeSheet(); touchGesture = { swallowed: true }; return; }
+    if (inputMode === 'trackpad' && controlReady && !accessEnded) return trackpadTouch(type, touches);
     if (touches.length >= 2) beginPinch(touches);
     else if (!touchGesture) {
       const canvas = screen.querySelector('canvas'), size = framebufferSize();
@@ -757,6 +856,7 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
     }
     return;
   }
+  if (!touchGesture?.swallowed && inputMode === 'trackpad' && controlReady && !accessEnded) return trackpadTouch(type, touches);
   if (!touchGesture) return;
   if (type === 'touchmove') {
     if (touchGesture.swallowed) return;
@@ -770,7 +870,7 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
       gesture.wheelY += gesture.lastY - y;
       gesture.lastX = x; gesture.lastY = y;
       if (holdsButton(gesture)) {
-        if (gesture.remoteDown) window.dispatchEvent(new MouseEvent('mousemove', mouseOptions(x, y, 1)));
+        if (gesture.remoteDown) window.dispatchEvent(new PointerEvent('mousemove', mouseOptions(x, y, 1)));
         return;
       }
       const dx = x - gesture.x, dy = y - gesture.y;
@@ -791,11 +891,12 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
   if (holdsButton(gesture) && controlReady && !accessEnded) checkFocusAfterTap(0, { keyboard: false, offer: { x: gesture.lastX, y: gesture.lastY, touch: touchCount } });
   if (gesture.pinch || holdsButton(gesture) || gesture.moved || !controlReady || accessEnded) return;
   const point = repeatTapPoint(gesture);
-  gesture.canvas.dispatchEvent(new MouseEvent('mousedown', mouseOptions(point.x, point.y, 1)));
+  lastTouchTapFb = toFramebuffer(point);
+  gesture.canvas.dispatchEvent(new PointerEvent('mousedown', mouseOptions(point.x, point.y, 1)));
   // noVNC's window capture proxy must receive mouseup to release its overlay.
-  window.dispatchEvent(new MouseEvent('mouseup', mouseOptions(point.x, point.y, 0)));
+  window.dispatchEvent(new PointerEvent('mouseup', mouseOptions(point.x, point.y, 0)));
   checkFocusAfterTap((point.y - gesture.canvas.getBoundingClientRect().top) / displayScale, point.repeat ? { offer: { x: point.x, y: point.y, touch: touchCount } } : {});
 }, { capture: true, passive: false });
 
 // probe.js is a module, so tests reach these through window. Each does only what the owner can do with a tap.
-window.__viewer = { hideBar, showBar, barHidden, zoomTo, openSheet, closeSheet, sheetOpen, setHint };
+window.__viewer = { hideBar, showBar, barHidden, zoomTo, openSheet, closeSheet, sheetOpen, setHint, setInputMode, pointer: () => pointer };

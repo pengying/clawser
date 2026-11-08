@@ -560,8 +560,14 @@ async function phone(t, focus, options = {}) {
   const pill = () => ctx.evaluate(`(() => { const e = document.querySelector('#quick-actions'), r = e.getBoundingClientRect();
     return { visible: !e.hidden, copy: !document.querySelector('#quick-copy').hidden, paste: !document.querySelector('#quick-paste').hidden,
       left: r.left, right: r.right, top: r.top, bottom: r.bottom, height: r.height, width: r.width }; })()`);
-  return { ...ctx, tap, keyboard, press: selector => press(ctx, selector), shown, point, hold, doubleTap, pill };
+  return { ...ctx, touch, tap, keyboard, press: selector => press(ctx, selector), shown, point, hold, doubleTap, pill };
 }
+async function trackpadPhone(t) {
+  const ctx = await phone(t, undefined);
+  await ctx.evaluate("__viewer.setInputMode('trackpad')");
+  return ctx;
+}
+const settle = () => pause(300);
 const noVncSkip = !assets ? 'set NOVNC_ASSETS_DIR to the noVNC 1.7.0 source tree' : !existsSync(chromePath) ? 'Chrome unavailable' : false;
 
 test('the ⋯ sheet holds zoom, Copy and Paste as icons, and a tap on the page only closes it', { skip: noVncSkip }, async t => {
@@ -736,4 +742,79 @@ test('touch and hold in a text field offers Paste just above the finger, and a t
   await waitFor(`!document.querySelector('#quick-actions').hidden`, 'Paste for a hold low in the screen');
   const low = await pill();
   assert.ok(low.top >= 0 && low.bottom <= 444, 'kept inside the visible area: ' + JSON.stringify(low));
+});
+
+test('Trackpad: sliding moves the pointer without clicking, and a tap clicks at the pointer', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers } = await trackpadPhone(t);
+  const scaleAtFit = await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  const start = await evaluate('__viewer.pointer()');
+  await touch('touchStart', [[200, 600]]); await touch('touchMove', [[230, 600]]); await touch('touchMove', [[260, 600]]); await touch('touchEnd', []);
+  await settle();
+  const moved = await evaluate('__viewer.pointer()');
+  assert.ok(moved.x > start.x + 50 / scaleAtFit, 'the pointer moved right by about the finger travel');
+  assert.ok(peer.pointers.slice(before).every(e => (e.mask & 7) === 0), 'sliding never presses a button');
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await settle();
+  const click = peer.pointers.slice(before).filter(e => e.mask === 1);
+  assert.equal(click.length, 1);
+  assert.ok(Math.abs(click[0].x - moved.x) <= 1 && Math.abs(click[0].y - moved.y) <= 1, 'the tap clicks at the pointer, not under the finger');
+});
+
+test('Trackpad: a slide sends hover moves to the desktop with no button', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  const start = await evaluate('__viewer.pointer()');
+  await touch('touchStart', [[200, 600]]); await touch('touchMove', [[230, 600]]); await touch('touchMove', [[260, 600]]); await touch('touchEnd', []);
+  await settle();
+  const fresh = peer.pointers.slice(before);
+  assert.ok(fresh.some(e => e.mask === 0 && e.x !== Math.floor(start.x)), 'a hover move reached the desktop');
+});
+
+test('Trackpad: a two-finger tap right-clicks at the pointer', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  const pointer = await evaluate('__viewer.pointer()');
+  await touch('touchStart', [[150, 600]]); await touch('touchStart', [[150, 600], [230, 600]]); await touch('touchEnd', []);
+  await settle();
+  const masks = [];
+  for (const e of peer.pointers.slice(before)) if (!(masks.length === 0 && e.mask === 0) && masks.at(-1) !== e.mask) masks.push(e.mask);
+  assert.deepEqual(masks, [4, 0]);
+  const right = peer.pointers.slice(before).find(e => e.mask === 4);
+  assert.ok(Math.abs(right.x - pointer.x) <= 1 && Math.abs(right.y - pointer.y) <= 1, 'the right click lands at the pointer');
+});
+
+test('Trackpad: the pointer reaches single desktop pixels at Fit', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), seen = new Set();
+  for (let n = 0; n < 6; n++) {
+    await touch('touchStart', [[200, 600]]); await touch('touchMove', [[205, 600]]); await touch('touchEnd', []);
+    await settle();
+    seen.add(Math.floor((await evaluate('__viewer.pointer()')).x));
+  }
+  assert.equal(seen.size, 6, 'six slides of 5 px reach six distinct desktop pixels');
+  const final = await evaluate('__viewer.pointer()');
+  const before = peer.pointers.length;
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await settle();
+  assert.equal(peer.pointers.slice(before).find(e => e.mask === 1).x, Math.floor(final.x));
+});
+
+test('Trackpad: two quick taps land both clicks on one desktop pixel', { skip: noVncSkip }, async t => {
+  const { touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await pause(100);
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await settle();
+  const clicks = peer.pointers.slice(before).filter(e => e.mask === 1);
+  assert.equal(clicks.length, 2);
+  assert.deepEqual([clicks[0].x, clicks[0].y], [clicks[1].x, clicks[1].y]);
+});
+
+test('Trackpad: the pointer shows only in Trackpad mode while in control', { skip: noVncSkip }, async t => {
+  const { evaluate, shown } = await trackpadPhone(t);
+  assert.equal(await shown('#pointer'), true);
+  await evaluate("__viewer.setInputMode('touch')");
+  assert.equal(await shown('#pointer'), false);
 });
