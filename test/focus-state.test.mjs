@@ -30,13 +30,14 @@ const PAGE = `<!doctype html><body style="margin:0">
   <button id="plain" style="position:absolute;left:10px;top:218px;width:260px;height:24px">Plain</button>
   <input id="locked" readonly value="fixed" style="position:absolute;left:10px;top:250px;width:260px;height:24px">
   <iframe id="frame" src="/inner" style="position:absolute;left:300px;top:10px;width:300px;height:60px"></iframe>
+  <iframe id="cross" src="http://localhost:PORT/inner" style="position:absolute;left:300px;top:90px;width:300px;height:60px"></iframe>
 </body>`;
 const INNER = '<!doctype html><body style="margin:0"><input id="card" inputmode="numeric" value="4242" style="width:260px;height:24px"></body>';
 
 // A windowed Chrome on a private display, so Chrome's own toolbar exists and can take focus.
 async function windowedChrome(t) {
   const display = await startX({ numbered: true });
-  const server = createServer((req, res) => { res.setHeader('Content-Type', 'text/html'); res.end(req.url.startsWith('/inner') ? INNER : PAGE); });
+  const server = createServer((req, res) => { res.setHeader('Content-Type', 'text/html'); res.end(req.url.startsWith('/inner') ? INNER : PAGE.replace('PORT', server.address().port)); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const profile = await mkdtemp(join(tmpdir(), 'focus-state-'));
   const wm = spawn('openbox', [], { env: display.env, stdio: 'ignore' });
@@ -70,8 +71,21 @@ async function windowedChrome(t) {
   pages.push(page);
   const evaluate = async expression => (await page.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })).result.value;
   for (let attempt = 0; attempt < 200 && !(await evaluate('document.readyState === "complete" && !!document.getElementById("frame").contentDocument?.getElementById("card")')); attempt++) await pause(50);
-  // A slow host can still be mapping the window when the page is ready, and a click before that is lost.
   for (let attempt = 0; attempt < 200 && !(await evaluate('document.visibilityState === "visible" && document.hasFocus()')); attempt++) await pause(50);
+  let crossTarget;
+  for (let attempt = 0; attempt < 200 && !crossTarget; attempt++) {
+    crossTarget = (await tabs()).find(tab => tab.type === 'iframe' && tab.url.startsWith('http://localhost'));
+    if (!crossTarget) await pause(50);
+  }
+  assert.ok(crossTarget, 'the cross-site frame runs as its own target');
+  const cross = await new CdpConnection({ commandTimeoutMs: 10_000 }).connect(crossTarget.webSocketDebuggerUrl);
+  pages.push(cross);
+  // Focus goes straight to the element. Clicking by screen position depends on how each Chrome build lays out its window.
+  const focusElement = async (selector, connection = page) => {
+    const reply = await connection.send('Runtime.evaluate', { expression: selector + '.focus()', userGesture: true });
+    assert.ok(!reply.exceptionDetails, selector);
+    await pause(100);
+  };
   // Real X input, as the viewer's taps reach Chrome through x11vnc.
   const x = script => execute('python3', ['-c', `import ctypes,time
 x=ctypes.CDLL('libX11.so.6'); t=ctypes.CDLL('libXtst.so.6'); x.XOpenDisplay.restype=ctypes.c_void_p
@@ -85,14 +99,7 @@ def click(px,py):
   t.XTestFakeMotionEvent(d,-1,px,py,0); t.XTestFakeButtonEvent(d,1,1,0); t.XTestFakeButtonEvent(d,1,0,0); x.XFlush(d)
 ${script}
 time.sleep(0.4)`], { env: display.env });
-  const clickElement = async selector => {
-    // A field inside a frame reports its box relative to that frame, so add the frame's own offset.
-    const box = JSON.parse(await evaluate(`JSON.stringify((() => { const node = ${selector}, r = node.getBoundingClientRect();
-      const frame = node.ownerDocument.defaultView.frameElement?.getBoundingClientRect() || { x: 0, y: 0 };
-      return { x: frame.x + r.x + 10, y: frame.y + r.y + r.height / 2, left: screenX, top: screenY + outerHeight - innerHeight }; })())`));
-    await x(`click(${Math.round(box.left + box.x)}, ${Math.round(box.top + box.y)})`);
-  };
-  return { runtime: { cdpUrl, tabs }, evaluate, x, clickElement, page, cdpUrl };
+  return { runtime: { cdpUrl, tabs }, evaluate, x, focusElement, page, cross, cdpUrl };
 }
 
 test('the focused field is reported with its keyboard type and never its contents', { skip, timeout: 120_000 }, async t => {
@@ -109,26 +116,26 @@ test('the focused field is reported with its keyboard type and never its content
     ['document.getElementById("frame").contentDocument.getElementById("card")', { kind: 'editable', inputMode: 'numeric', multiline: false }],
   ];
   for (const [selector, expected] of cases) {
-    await chrome.clickElement(selector);
+    await chrome.focusElement(selector);
     const focus = await readFocus(chrome.runtime);
-    if (focus.kind !== expected.kind) {
-      const later = await pause(1500).then(() => readFocus(chrome.runtime));
-      t.diagnostic('focus miss on ' + selector + ': ' + await chrome.evaluate('JSON.stringify({ active: document.activeElement?.id || document.activeElement?.tagName, hasFocus: document.hasFocus(), visible: document.visibilityState, screenX, screenY, outerWidth, outerHeight, innerWidth, innerHeight })') +
-        ' later=' + JSON.stringify(later) + ' window=' + (await chrome.x('import subprocess; print(subprocess.run(["xprop","-root","_NET_ACTIVE_WINDOW"],capture_output=True,text=True).stdout.strip())').then(r => r.stdout.trim(), e => 'xprop ' + e.message)));
-    }
     assert.deepEqual(focus, expected, selector);
     assert.doesNotMatch(JSON.stringify(focus), /hunter2|4242|fixed|name|phone|secret|card/, 'no field contents or names leave the browser');
   }
+  // A cross-site frame, such as a hosted card form, runs as its own target.
+  await chrome.focusElement('document.getElementById("card")', chrome.cross);
+  assert.deepEqual(await readFocus(chrome.runtime), { kind: 'editable', inputMode: 'numeric', multiline: false }, 'cross-site frame');
+  await chrome.focusElement('document.getElementById("plain")');
+  assert.deepEqual(await readFocus(chrome.runtime), { kind: 'none' }, 'focus left the cross-site frame');
 });
 
 test('Chrome toolbar focus is reported as browser UI, and the page again after Escape', { skip, timeout: 120_000 }, async t => {
   const chrome = await windowedChrome(t);
-  await chrome.clickElement('document.getElementById("name")');
+  await chrome.focusElement('document.getElementById("name")');
   assert.equal((await readFocus(chrome.runtime)).kind, 'editable');
   await chrome.x("key('Control_L', 'l')");
   assert.deepEqual(await readFocus(chrome.runtime), { kind: 'browser-ui' });
   await chrome.x("key('Escape'); key('Escape')");
-  await chrome.clickElement('document.getElementById("plain")');
+  await chrome.focusElement('document.getElementById("plain")');
   assert.deepEqual(await readFocus(chrome.runtime), { kind: 'none' });
 });
 
