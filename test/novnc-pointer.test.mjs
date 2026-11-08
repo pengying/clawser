@@ -564,6 +564,29 @@ async function phone(t, focus, options = {}) {
 }
 const noVncSkip = !assets ? 'set NOVNC_ASSETS_DIR to the noVNC 1.7.0 source tree' : !existsSync(chromePath) ? 'Chrome unavailable' : false;
 
+test('the ⋯ sheet holds zoom, Copy and Paste as icons, and a tap on the page only closes it', { skip: noVncSkip }, async t => {
+  const { evaluate, press, tap, point, peers } = await phone(t, undefined);
+  await evaluate('__viewer.showBar()');
+  await press('#more');
+  assert.equal(await evaluate(`document.querySelector('#more').getAttribute('aria-expanded')`), 'true');
+  const sizes = await evaluate(`[...document.querySelectorAll('#more-sheet button')].map(b => { const r = b.getBoundingClientRect(); return { label: b.getAttribute('aria-label'), w: r.width, h: r.height }; })`);
+  assert.deepEqual(sizes.map(s => s.label), ['Zoom out', 'Zoom in', 'Actual size', 'Copy', 'Paste']);
+  assert.ok(sizes.every(s => s.w >= 44 && s.h >= 44), 'every sheet button is a full finger target');
+  await press('#zoom-toggle');
+  assert.equal(await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`), 1, 'the toggle goes to 100%');
+  assert.equal(await evaluate(`document.querySelector('#zoom-toggle').getAttribute('aria-label')`), 'Fit to screen');
+  // The brief's tap(960, 900) falls outside the 1280x720 framebuffer, so aim at a point that is on the phone and below the bar.
+  const [px, py] = await point(640, 420);
+  const barBottom = await evaluate(`document.querySelector('#bar').getBoundingClientRect().bottom`);
+  assert.ok(px >= 0 && px <= 390 && py <= 844 && py > barBottom + 4, `the tap point (${px}, ${py}) is on screen below the bar (${barBottom})`);
+  const before = peers.at(-1).pointers.length;
+  await tap(640, 420);
+  await new Promise(r => setTimeout(r, 300));
+  assert.equal(peers.at(-1).pointers.length, before, 'a tap on the page while the sheet is open sends nothing');
+  assert.equal(await evaluate('__viewer.sheetOpen()'), false, 'that tap closes the sheet');
+  assert.equal(await evaluate('__viewer.barHidden()'), false, 'and does not hide the bar');
+});
+
 test('a tap that focuses a remote text field opens the keyboard with that field’s layout', { skip: noVncSkip }, async t => {
   const focus = { answer: { kind: 'editable', inputMode: 'tel', multiline: false }, requests: 0 };
   const { tap, keyboard, waitFor, peers } = await phone(t, focus);

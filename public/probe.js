@@ -307,10 +307,9 @@ function updateDisplay(anchor) {
   viewport.scrollLeft = zoomMode === 'fit' ? 0 : left + pixel.x * displayScale - point.x;
   viewport.scrollTop = zoomMode === 'fit' ? 0 : top + pixel.y * displayScale - point.y;
   const label = document.getElementById('zoom-level');
-  label.value = Math.round(displayScale * 100) + '%';
+  label.value = zoomMode === 'fit' ? 'Fit' : Math.round(displayScale * 100) + '%';
   label.dataset.scale = String(displayScale);
-  document.getElementById('zoom-fit').setAttribute('aria-pressed', String(zoomMode === 'fit'));
-  document.getElementById('zoom-actual').setAttribute('aria-pressed', String(zoomMode === 1));
+  document.getElementById('zoom-toggle').setAttribute('aria-label', zoomMode === 'fit' ? 'Actual size' : 'Fit to screen');
 }
 
 function zoomTo(scale, anchor) {
@@ -318,8 +317,7 @@ function zoomTo(scale, anchor) {
   updateDisplay(anchor);
 }
 
-document.getElementById('zoom-fit').addEventListener('click', () => zoomTo('fit'));
-document.getElementById('zoom-actual').addEventListener('click', () => zoomTo(1));
+document.getElementById('zoom-toggle').addEventListener('click', () => zoomTo(zoomMode === 'fit' ? 1 : 'fit'));
 document.getElementById('zoom-in').addEventListener('click', () => zoomTo(displayScale * 1.25));
 document.getElementById('zoom-out').addEventListener('click', () => zoomTo(displayScale / 1.25));
 new ResizeObserver(() => updateDisplay()).observe(viewport);
@@ -339,6 +337,7 @@ function barHidden() { return bar.classList.contains('bar-hidden'); }
 // A hidden bar is inert: its buttons leave the focus order, and a tap during the slide reaches the tab beneath.
 function hideBar() {
   if (!controlReady || barHidden()) return;
+  closeSheet();
   bar.classList.add('bar-hidden');
   bar.inert = true;
   barTab.hidden = false;
@@ -350,6 +349,27 @@ function showBar() {
   barTab.hidden = true;
   hideQuickActions();
 }
+const moreButton = document.getElementById('more'), moreSheet = document.getElementById('more-sheet');
+function sheetOpen() { return !moreSheet.hidden; }
+function openSheet() {
+  showBar();
+  moreSheet.hidden = false;
+  moreButton.setAttribute('aria-expanded', 'true');
+  moreButton.setAttribute('aria-pressed', 'true');
+}
+function closeSheet() {
+  moreSheet.hidden = true;
+  moreButton.setAttribute('aria-expanded', 'false');
+  moreButton.setAttribute('aria-pressed', 'false');
+}
+moreButton.addEventListener('click', () => (sheetOpen() ? closeSheet() : openSheet()));
+function setHint(mode) {
+  document.getElementById('hint').textContent = mode === 'trackpad'
+    ? 'Slide to move · tap to click · two fingers to right-click or scroll'
+    : 'Swipe to scroll · pinch to zoom · hold, then drag';
+}
+// Status pop-ups sit just under the bar's real bottom edge, which moves when the sheet opens.
+new ResizeObserver(() => document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px')).observe(bar);
 barTab.addEventListener('click', () => {
   showBar();
   [...bar.querySelectorAll('button')].find(button => !button.disabled && button.getClientRects().length)?.focus();
@@ -721,6 +741,9 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
   if (type === 'touchstart') {
     touchCount++;
     hideQuickActions();
+    // While the sheet is open a tap on the page only closes it. The whole gesture is swallowed.
+    if (touchGesture?.swallowed) return;
+    if (sheetOpen() && !touchGesture) { closeSheet(); touchGesture = { swallowed: true }; return; }
     if (touches.length >= 2) beginPinch(touches);
     else if (!touchGesture) {
       const canvas = screen.querySelector('canvas'), size = framebufferSize();
@@ -735,6 +758,7 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
   }
   if (!touchGesture) return;
   if (type === 'touchmove') {
+    if (touchGesture.swallowed) return;
     if (touches.length >= 2) {
       if (!touchGesture.pinch) beginPinch(touches);
       const center = midpoint(touches);
@@ -762,6 +786,7 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
   const gesture = touchGesture;
   releaseTouchDrag(gesture);
   touchGesture = undefined;
+  if (gesture.swallowed) return;
   if (holdsButton(gesture) && controlReady && !accessEnded) checkFocusAfterTap(0, { keyboard: false, offer: { x: gesture.lastX, y: gesture.lastY, touch: touchCount } });
   if (gesture.pinch || holdsButton(gesture) || gesture.moved || !controlReady || accessEnded) return;
   const point = repeatTapPoint(gesture);
@@ -772,4 +797,4 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
 }, { capture: true, passive: false });
 
 // probe.js is a module, so tests reach these through window. Each does only what the owner can do with a tap.
-window.__viewer = { hideBar, showBar, barHidden, zoomTo };
+window.__viewer = { hideBar, showBar, barHidden, zoomTo, openSheet, closeSheet, sheetOpen, setHint };
