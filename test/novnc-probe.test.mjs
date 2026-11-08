@@ -1119,6 +1119,18 @@ test('the top bar shows Watching with Take control centered, and In control with
   assert.equal(control.keyboard, true);
 });
 
+// The fixture caps page timers at 70 ms, so the 4 s fade has long since run by the time each check reads the pop-up.
+test('the close-this-tab ending stays on screen while ordinary messages fade', { skip: !existsSync(chromePath) }, async (t) => {
+  const { evaluate, waitFor } = await openProbeFixture(t);
+  await waitFor('fixture.rfbs.length === 1 && /Watching/.test(document.querySelector("#status").textContent)', 'watch ready');
+  await waitFor('document.querySelector("#status").classList.contains("faded")', 'an ordinary message fades');
+  await evaluate('document.querySelector("#done").click()');
+  await waitFor('/close this tab/.test(document.querySelector("#status").textContent)', 'Done reached its ending');
+  await pause(300);
+  assert.deepEqual(await evaluate('({ text: document.querySelector("#status").textContent, faded: document.querySelector("#status").classList.contains("faded") })'),
+    { text: 'Test browser destroyed. You can close this tab.', faded: false }, 'the ending is the last thing the owner needs to see, so it stays');
+});
+
 test('a reopened claimed link resumes in watch mode with its existing cookie', { skip: !existsSync(chromePath) }, async (t) => {
   const { evaluate, waitFor } = await openProbeFixture(t, { claimReused: true });
   await waitFor('fixture.rfbs.length === 1 && /Watching/.test(document.querySelector("#status").textContent)', 'reopened link resumed with the cookie');

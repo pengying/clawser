@@ -369,7 +369,7 @@ window.visualViewport?.addEventListener('resize', placeQuickActions);
 window.visualViewport?.addEventListener('scroll', placeQuickActions);
 
 // Messages pop up under the bar and fade after a few seconds. One that needs the owner stays until the next message.
-const lastingStatus = /could not|failed|ended|another tab|Retry/i;
+const lastingStatus = /could not|failed|ended|another tab|Retry|close this tab/i;
 let statusTimer;
 function popUpStatus() {
   clearTimeout(statusTimer);
