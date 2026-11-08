@@ -1,5 +1,12 @@
 # Changes
 
+## 0.7.4
+
+- The noVNC viewer now opens the phone's keyboard when a tap puts the cursor in a text field, and picks the matching layout, such as a number pad for a phone number or a code. It closes the keyboard again when a tap lands outside a field, unless the owner opened it with the Keyboard button. A tap on Chrome's address bar opens it with the web address layout.
+- After each tap, the viewer asks the gateway what the agent's browser has focused. The controller reads that from Chrome in an isolated script context, within 1.5 seconds. Only the kind of field and its keyboard type reach the viewer, never its contents, name or the page address. The check answers only while the owner holds control.
+- These checks don't count toward the per-handoff limit on requests, so typing into a long form can't use it up. Requests with a wrong cookie still count.
+- The Keyboard button still works everywhere. Use it when a tap doesn't open the keyboard: in Chrome's own dialogs and menus, while a JavaScript dialog is open, and on phones that only open a keyboard during the tap itself, such as iPhones.
+
 ## 0.7.3
 
 - Fix handoff links that showed a black screen on some Android phones and then ended with "Viewer assets did not load in time". When noVNC 1.7.0 loads, it tests the browser's H.264 video decoder and waits for the result with no time limit. Some Android hardware decoders never answer, so the viewer never loaded and gave up after 12 seconds. The gateway now serves noVNC with a 2 second limit on that test. A decoder that hasn't answered counts as no H.264, and noVNC uses its other encodings. The gateway refuses to serve a noVNC whose test code differs from the pinned 1.7.0, rather than serving it with no limit.
