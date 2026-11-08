@@ -134,7 +134,7 @@ async function fixture(t, { clipboardBridge = false, retained = false, focus } =
         response.setHeader('Content-Type', 'text/javascript');
         return response.end(await readFile(file));
       }
-      const file = path.endsWith('/probe.css') ? 'probe.css' : path.endsWith('/probe.js') ? 'probe.js' : 'probe.html';
+      const file = path.endsWith('/probe.css') ? 'probe.css' : path.endsWith('/probe.js') ? 'probe.js' : path.endsWith('/trackpad.js') ? 'trackpad.js' : 'probe.html';
       response.setHeader('Content-Type', file.endsWith('.css') ? 'text/css' : file.endsWith('.js') ? 'text/javascript' : 'text/html');
       response.end(await readFile(new URL(`../public/${file}`, import.meta.url)));
     } catch (error) { response.writeHead(500); response.end(String(error)); }

@@ -1,3 +1,4 @@
+import { accelerate, movePointer, followPointer } from './trackpad.js';
 const screen = document.getElementById('screen');
 const control = document.getElementById('control');
 const done = document.getElementById('done');

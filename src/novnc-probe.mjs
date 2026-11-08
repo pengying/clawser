@@ -356,6 +356,7 @@ export class NoVncProbeGateway {
       }
       if (req.method === 'GET' && url.pathname === routePath('assets/probe.js')) return await this.servePublic(res, 'probe.js', 'text/javascript');
       if (req.method === 'GET' && url.pathname === routePath('assets/probe.css')) return await this.servePublic(res, 'probe.css', 'text/css');
+      if (req.method === 'GET' && url.pathname === routePath('assets/trackpad.js')) return await this.servePublic(res, 'trackpad.js', 'text/javascript');
       if (req.method === 'GET' && url.pathname.startsWith(routePath('novnc/'))) return await this.serveNoVnc(res, url.pathname.slice(routePath('novnc/').length));
       if (req.method !== 'POST' || !action) { req.resume(); throw problem('Not found', 404); }
       if (!this.originAllowed(req)) { req.resume(); throw problem('Origin denied', 403); }

@@ -794,6 +794,9 @@ test('viewer serves pinned noVNC with local scaling, explicit clipboard controls
   assert.match(client, /clipboardPasteFrom/);
   assert.doesNotMatch(client, /setDesktopSize|post\(['"]release['"]/i);
 
+  const trackpadResponse = await fetch(`${ctx.gateway.localUrl}/probe/novnc/assets/trackpad.js`);
+  assert.equal(trackpadResponse.status, 200);
+
   const styleResponse = await fetch(`${ctx.gateway.localUrl}/probe/novnc/assets/probe.css`);
   assert.equal(styleResponse.status, 200);
   assert.match(await styleResponse.text(), /touch-action/);
@@ -958,6 +961,10 @@ async function openProbeFixture(t, options = {}) {
       if (request.url === '/probe/novnc/assets/probe.js') {
         response.setHeader('Content-Type', 'text/javascript');
         return response.end(await readFile(new URL('../public/probe.js', import.meta.url)));
+      }
+      if (request.url === '/probe/novnc/assets/trackpad.js') {
+        response.setHeader('Content-Type', 'text/javascript');
+        return response.end(await readFile(new URL('../public/trackpad.js', import.meta.url)));
       }
       if (request.url === '/probe/novnc/assets/probe.css') {
         response.setHeader('Content-Type', 'text/css');
