@@ -1,6 +1,6 @@
 {
   "name": "@pengying/clawser",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "description": "Clawser: secure human takeover links for the agent's browser through noVNC, with an optional one-tab CDP viewer",
   "type": "module",
   "main": "./index.mjs",

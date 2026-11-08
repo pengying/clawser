@@ -35,6 +35,11 @@ function security(res) {
   res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
 }
 
+// Per handoff, per minute. The cookie and invitation are 256-bit secrets, so guessing is hopeless at any rate;
+// the guess limit only bounds the work a flood can cause. The request limit stops a runaway viewer.
+const GUESS_LIMIT = 30;
+const REQUEST_LIMIT = 240;
+
 const FOCUS_MODES = new Set(['text', 'decimal', 'numeric', 'tel', 'search', 'email', 'url']);
 // Only these fields reach the viewer, whatever the focus reader returns.
 function focusAnswer(state) {
@@ -212,7 +217,7 @@ export class NoVncProbeGateway {
     const id = randomBytes(16).toString('hex');
     const inviteSecret = token();
     const expiresAt = this.now() + ttlSeconds * 1000;
-    const session = { id, expiresAt, permission, mode: 'creating', generation: 0, inviteHash: digest(inviteSecret), attempts: [], clipboardWork: new Set() };
+    const session = { id, expiresAt, permission, mode: 'creating', generation: 0, inviteHash: digest(inviteSecret), budgets: { guesses: [], requests: [] }, clipboardWork: new Set() };
     session.transport = { funnelIngress: false, viewerBytesSent: 0, viewerBytesReceived: 0, peakBufferedAmount: 0, rttSamples: [] };
     this.sessions.set(id, session);
     const creation = this.finishCreation(session, inviteSecret);
@@ -299,26 +304,37 @@ export class NoVncProbeGateway {
     return session;
   }
 
-  recordAttempt(session) {
+  // Each handoff keeps separate one minute budgets, so one kind of traffic can't use up another's:
+  // guesses is wrong cookies and invitation tokens, requests is the owner's own calls, and Done has none.
+  // A budget holds at most its limit of timestamps, so a flood cannot grow it.
+  spend(session, budget, limit) {
     const cutoff = this.now() - 60_000;
-    session.attempts = session.attempts.filter((at) => at > cutoff);
-    if (session.attempts.length >= 30) throw problem('Authentication rate exceeded', 429);
-    session.attempts.push(this.now());
+    const times = session.budgets[budget].filter((at) => at > cutoff);
+    session.budgets[budget] = times;
+    if (times.length >= limit) throw problem(budget === 'guesses' ? 'Authentication rate exceeded' : 'Request rate exceeded', 429);
+    times.push(this.now());
   }
 
-  // countSuccess false still counts every failed attempt. The viewer checks focus after each tap,
-  // so counting those would use up the limit that guards against guessing the cookie.
+  // The cookie is checked first, so only a refused guess spends the guess budget. A valid cookie always passes.
+  checkCookie(req, session) {
+    if (matches(cookieValue(req), session.sessionHash)) return;
+    this.spend(session, 'guesses', GUESS_LIMIT);
+    throw problem('Invalid viewer session', 401);
+  }
+
+  // countSuccess false lets a valid request through without spending the request budget.
+  // The viewer checks focus after each tap, which would otherwise use that budget up during a long form.
   authorize(req, session, { countSuccess = true } = {}) {
-    if (countSuccess) this.recordAttempt(session);
-    if (['ending', 'ended', 'cleanup_failed'].includes(session.mode)) { if (!countSuccess) this.recordAttempt(session); throw problem('Probe access ended', 410); }
-    if (!matches(cookieValue(req), session.sessionHash)) { if (!countSuccess) this.recordAttempt(session); throw problem('Invalid viewer session', 401); }
+    if (['ending', 'ended', 'cleanup_failed'].includes(session.mode)) throw problem('Probe access ended', 410);
+    this.checkCookie(req, session);
     if (session.expiresAt <= this.now()) { void this.end(session, 'expired'); throw problem('Probe expired', 410); }
+    if (countSuccess) this.spend(session, 'requests', REQUEST_LIMIT);
     return session;
   }
 
+  // Done must always work for the owner, so it spends no request budget. Ending is idempotent.
   authorizeCleanup(req, session) {
-    this.recordAttempt(session);
-    if (!matches(cookieValue(req), session.sessionHash)) throw problem('Invalid viewer session', 401);
+    this.checkCookie(req, session);
     return session;
   }
 
@@ -395,8 +411,10 @@ export class NoVncProbeGateway {
   }
 
   claim(res, session, input) {
-    this.recordAttempt(session);
-    if (session.mode !== 'unclaimed' || !matches(input?.token, session.inviteHash)) throw problem('Invalid, claimed, or expired invitation', 401);
+    if (session.mode !== 'unclaimed' || !matches(input?.token, session.inviteHash)) {
+      this.spend(session, 'guesses', GUESS_LIMIT);
+      throw problem('Invalid, claimed, or expired invitation', 401);
+    }
     const secret = token();
     delete session.inviteHash;
     session.sessionHash = digest(secret);
