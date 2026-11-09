@@ -57,11 +57,11 @@ The validated host is **Linux x86_64**, **Node.js >=24.16 <25 or >=26.1**, and
 cover 2026.10.4 and 2026.10.7. Other operating systems and ARM hosts are unverified.
 Start your OpenClaw Gateway before setup.
 
-Install the tagged **v0.8.2** release from GitHub. ClawHub availability may lag
+Install the tagged **v0.8.3** release from GitHub. ClawHub availability may lag
 GitHub.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.8.2 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.8.3 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -95,7 +95,7 @@ Finish any open handoffs, then:
 1. Install the new version:
 
    ```sh
-   openclaw plugins install git:github.com/pengying/clawser@v0.8.2 --force --accept-capabilities
+   openclaw plugins install git:github.com/pengying/clawser@v0.8.3 --force --accept-capabilities
    ```
 
 2. Check the plan with `openclaw clawser setup --dry-run`.

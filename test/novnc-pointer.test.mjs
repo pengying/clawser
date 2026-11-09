@@ -972,11 +972,21 @@ test('desktop: the bar has no Touch / Trackpad switch and no Keyboard button', {
 });
 
 test('desktop: the sheet names the copy and paste shortcuts, not touch gestures', { skip: noVncSkip }, async t => {
-  const { evaluate, errors } = await desktop(t);
-  await evaluate('__viewer.openSheet()');
-  const mac = await evaluate(`/Mac|iPhone|iPad/.test(navigator.userAgentData?.platform ?? navigator.platform)`);
-  assert.equal(await evaluate(`document.querySelector('#hint').textContent`), mac ? '\u2318C to copy \u00b7 \u2318V to paste' : 'Ctrl+C to copy \u00b7 Ctrl+V to paste');
-  assert.deepEqual(errors, []);
+  // Chrome on a Mac reports macOS through userAgentData and MacIntel through navigator.platform.
+  for (const [platform, uaPlatform, expected] of [
+    ['MacIntel', 'macOS', '\u2318C to copy \u00b7 \u2318V to paste'],
+    ['MacIntel', '', '\u2318C to copy \u00b7 \u2318V to paste'],
+    ['Win32', 'Windows', 'Ctrl+C to copy \u00b7 Ctrl+V to paste'],
+    ['Linux x86_64', 'Linux', 'Ctrl+C to copy \u00b7 Ctrl+V to paste'],
+  ]) {
+    const ctx = await fixture(t);
+    await ctx.cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+    await ctx.cdp.send('Emulation.setUserAgentOverride', { userAgent: 'Mozilla/5.0 Chrome/150.0.0.0', platform, ...(uaPlatform ? { userAgentMetadata: { platform: uaPlatform, platformVersion: '1', architecture: 'x86', model: '', mobile: false } } : {}) });
+    await ctx.cdp.send('Page.navigate', { url: ctx.url });
+    await ctx.waitFor(`document.querySelector('#status')?.textContent === 'Control connected.'`, 'RFB connected');
+    await ctx.evaluate('__viewer.openSheet()');
+    assert.equal(await ctx.evaluate(`document.querySelector('#hint').textContent`), expected, `${platform} / ${uaPlatform || 'no client hints'}`);
+  }
 });
 
 test('desktop: a stored Trackpad choice from a phone does not apply to a mouse', { skip: noVncSkip }, async t => {

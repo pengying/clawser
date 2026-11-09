@@ -1,5 +1,9 @@
 # Changes
 
+## 0.8.3
+
+- On a Mac, the ⋯ sheet now names ⌘C and ⌘V. Chrome reports a Mac as macOS, and 0.8.2 didn't recognize that name. It showed Ctrl+C and Ctrl+V there instead. The shortcuts themselves already worked.
+
 ## 0.8.2
 
 - The noVNC viewer now behaves like a desktop page when it is opened on a computer with a mouse. A click on the page closes the ⋯ sheet, as a tap does on a phone. In control, a click tucks the bar away and still clicks.

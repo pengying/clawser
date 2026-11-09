@@ -383,7 +383,7 @@ function closeSheet() {
 }
 moreButton.addEventListener('click', () => (sheetOpen() ? closeSheet() : openSheet()));
 function setHint(mode) {
-  const mac = /Mac|iPhone|iPad/.test(navigator.userAgentData?.platform ?? navigator.platform);
+  const mac = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform);
   document.getElementById('hint').textContent = usesMouse ? (mac ? '⌘C to copy · ⌘V to paste' : 'Ctrl+C to copy · Ctrl+V to paste')
     : mode === 'trackpad' ? 'Slide to move · tap to click · two fingers to right-click or scroll'
     : 'Swipe to scroll · pinch to zoom · hold, then drag';
