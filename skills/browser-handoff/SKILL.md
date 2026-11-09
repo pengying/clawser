@@ -1,6 +1,7 @@
 ---
 name: browser-handoff
 description: Use when an owner-authorized browser task needs manual CAPTCHA, password, 2FA, consent, sensitive form input, or human judgment.
+metadata: { "openclaw": { "os": ["linux"] } }
 ---
 
 # Browser Handoff
