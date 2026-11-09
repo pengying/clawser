@@ -121,7 +121,12 @@ stale state, navigation or loss of control. Browser events are not atomic with
 site focus or navigation changes. In the CDP viewer, supported native HTML
 selects and classic RGB color fields have phone controls; full native OS
 dialogs and browser UI require noVNC. CDP device paste does not synchronize or
-copy the remote clipboard.
+copy the remote clipboard. In noVNC, text pasted from the phone stays on the
+agent browser's clipboard only while control lasts. Ending control clears it.
+
+Each invitation has its own request limits. Wrong invitations and cookies count
+against one, and the owner's own calls against another, so traffic from someone
+without the link cannot lock the owner out. Done is never limited.
 
 CDP supports separate invitations for different tabs, one invite per same tab,
 and one human control session per Gateway. noVNC permits one active invitation

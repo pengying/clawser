@@ -414,6 +414,24 @@ test('GET previews do not claim invitation; POST claim is one-use and secret sta
   assert.equal(replay.status, 401);
 });
 
+test('a flood from someone without the link cannot lock the owner out', async (t) => {
+  const ctx = await setup(t);
+  const statuses = [];
+  for (let round = 0; round < 15; round++) {
+    const batch = [];
+    for (let n = 0; n < 10; n++) {
+      batch.push(fetch(new URL('/s/' + '0'.repeat(32) + '/state', ctx.server.localUrl)));
+      batch.push(ctx.post('claim', { token: 'wrong' }));
+      batch.push(fetch(`${ctx.base}/state`, { headers: { cookie: 'handoff=wrong' } }));
+    }
+    statuses.push(...(await Promise.all(batch)).map(reply => reply.status));
+  }
+  assert.ok(statuses.includes(429), 'wrong guesses are still bounded');
+  const cookie = await claim(ctx);
+  assert.equal((await fetch(`${ctx.base}/state`, { headers: { cookie } })).status, 200);
+  assert.equal((await ctx.post('done', {}, cookie)).status, 200);
+});
+
 test('cross-origin requests, missing authentication, malformed input and oversized bodies are rejected', async (t) => {
   const ctx = await setup(t);
   assert.equal((await ctx.post('claim', {}, undefined, 'https://evil.example')).status, 403);

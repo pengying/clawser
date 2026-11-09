@@ -52,11 +52,11 @@ a loopback CDP connection, and outbound HTTPS. See
 
 ## Tagged Git installation
 
-This guide describes v0.8.5. Tagged Git installation is the recommended
+This guide describes v1.0.0. Tagged Git installation is the recommended
 distribution path.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.8.5 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v1.0.0 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -73,8 +73,12 @@ and follow its activation guidance.
 OpenClaw puts each Git tag in its own folder. Clawser's user services point at
 that folder, so rerun setup after every upgrade. See [Upgrade](#upgrade).
 
-Check the [ClawHub package page](https://clawhub.ai/pengying/plugins/clawser)
-for approved registry versions. ClawHub may lag GitHub.
+ClawHub carries the same releases after its scan approves them. To install from
+ClawHub instead, run `openclaw plugins install @pengying/clawser
+--accept-capabilities`, or ask the agent to install the ClawHub plugin from your
+owner chat. Setup and the host packages stay operator steps either way. Check
+the [ClawHub package page](https://clawhub.ai/pengying/plugins/clawser) for
+approved versions.
 
 ## Choose the agent's browser
 
@@ -318,13 +322,13 @@ replace the native capability-acceptance step. Developer installation is in
 
 ## Release archive alternative
 
-Once published, download `pengying-clawser-0.8.5.tgz` and `SHA256SUMS` from the
-[v0.8.5 release](https://github.com/pengying/clawser/releases/tag/v0.8.5) into the
+Once published, download `pengying-clawser-1.0.0.tgz` and `SHA256SUMS` from the
+[v1.0.0 release](https://github.com/pengying/clawser/releases/tag/v1.0.0) into the
 same directory:
 
 ```sh
 sha256sum --check SHA256SUMS
-openclaw plugins install ./pengying-clawser-0.8.5.tgz --force --accept-capabilities
+openclaw plugins install ./pengying-clawser-1.0.0.tgz --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -341,7 +345,7 @@ file; they are not an independent publisher signature.
 2. Install the new release:
 
    ```sh
-   openclaw plugins install git:github.com/pengying/clawser@v0.8.5 --force --accept-capabilities
+   openclaw plugins install git:github.com/pengying/clawser@v1.0.0 --force --accept-capabilities
    ```
 
 3. Check the plan:
@@ -617,8 +621,8 @@ own setup receipt and is not an adoption tool for manual installations.
   setup as root.
 - **Port, configuration or ownership conflict:** compare options and receipts.
   Preserve resources and choose a separate state directory for a new installation.
-- **Tunnel not ready:** check DNS/outbound HTTPS. First-link startup allows up to
-  90 seconds. Never expose CDP/VNC or the Gateway as a replacement endpoint.
+- **Tunnel not ready:** check DNS/outbound HTTPS. The controller starts the
+  tunnel when it starts, and a cold start allows up to 90 seconds. Never expose CDP/VNC or the Gateway as a replacement endpoint.
 - **Recovery required or uncertain input:** keep automation paused. Inspect the
   original browser/controller and follow the reported recovery guidance. Do not
   retry/replay input, clear ledgers, bypass the gate or treat another link as

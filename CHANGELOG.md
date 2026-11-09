@@ -1,5 +1,13 @@
 # Changes
 
+## 1.0.0
+
+- The first handoff link no longer waits for the secure tunnel. The controller now starts the tunnel when it starts, and starts it again a few seconds after it drops. Before, the first link after each restart waited up to a minute, while Cloudflare set up a new address.
+- The agent skill now tells the agent to work the page itself before sending a link: close popups, scroll, retry another way, and read error messages. A link is the last resort. Once it does need one, it asks for the link right away.
+- Text you paste into the agent's browser from your phone no longer stays on its clipboard after control ends. Before, a pasted password or code stayed there until the next paste or a restart, where the agent or a page could read it.
+- The CDP viewer now gives each link its own request limits, as the noVNC viewer has since 0.7.5. Before, one limit of 100 requests a second covered the whole server, so a flood from someone without the link could stop the owner from opening the link, taking control or pressing Done.
+- The README is shorter. It says what Clawser is for, how to install it from ClawHub, and how to use the viewer.
+
 ## 0.8.5
 
 - Paste no longer shows a "Text pasted into the browser" notice. The text shows up in the field. A failed paste still says so.

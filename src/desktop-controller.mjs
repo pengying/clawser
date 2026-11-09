@@ -82,17 +82,29 @@ export class DesktopController {
   createGeneration=0;
   writes=Promise.resolve();
   runtimeQueue=Promise.resolve();
-  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
+  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,transportRewarmMs=5000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
     if(!stateDir||!profile||!runtime||!transport)throw new Error('Desktop controller requires stateDir, profile, runtime and transport');
     if(!Number.isInteger(supervisorHeartbeatMs)||supervisorHeartbeatMs<1||supervisorHeartbeatMs>5000)throw new Error('Invalid supervisor heartbeat interval');
-    Object.assign(this,{stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs});
+    if(!Number.isInteger(transportRewarmMs)||transportRewarmMs<0||transportRewarmMs>600_000)throw new Error('Invalid tunnel restart delay');
+    Object.assign(this,{stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs});
     this.socketPath=socketPath||join(this.stateDir,'desktop.sock');
-    this.transport.on?.('failure',()=>{void this.transportFailed();});
+    this.transport.on?.('failure',()=>{void this.transportFailed();this.scheduleTransportWarm();});
     this.supervisor={create:params=>this.createActor(params),read:async id=>({state:this.actors.has(id)?'running':'stopped'}),register:params=>this.registration(params.ownedId),promote:params=>this.promote(params),cancelPromotion:id=>this.cancelPromotion(id),demote:params=>this.demote(params),destroy:(id,options)=>this.retire(id,options),verifyExited:async id=>this.ledger.leases[id]?.state==='ended'&&safeCompletion(this.ledger.leases[id]),clipboardRead:id=>this.clipboard(id),clipboardWrite:(id,text)=>this.clipboard(id,text),focusRead:id=>this.focus(id)};
     this.gateway=gatewayFactory({...gatewayOptions,supervisor:this.supervisor,noVncAssetsDir,prefix:'/browser/',completionDisposition:'retained',capabilities:{clipboard:'utf8'},maxProbes:1,promotionMs:120_000,onEnded:(session,status)=>this.ended(session,status)});
     this.rpc=new DesktopRpcServer({socketPath:this.socketPath,handler:(method,params,context)=>this.request(method,params,context),onDisconnect:keys=>this.disconnected(keys),onLockLost:()=>{this.poison();this.ready=false;void this.gateway.close();}});
   }
   poison(){this.gate.poison();this.gate.poisonReason=recoveryMessage;}
+  // A cold tunnel takes up to a minute, so start it before the first link and again after a drop.
+  // A failed start is not retried here: the next create starts it and reports the error.
+  warmTransport(){
+    if(!this.ready||this.closePromise||typeof this.transport.ensure!=='function')return;
+    void this.transport.ensure(new URL(this.gateway.localUrl).port*1).catch(()=>{});
+  }
+  scheduleTransportWarm(){
+    clearTimeout(this.transportWarmTimer);
+    this.transportWarmTimer=setTimeout(()=>this.warmTransport(),this.transportRewarmMs);
+    this.transportWarmTimer.unref?.();
+  }
   runtimeOperation(operation){const next=this.runtimeQueue.then(operation);this.runtimeQueue=next.catch(()=>{});return next;}
   async persist(){
     if(!this.rpc?.lockHolder||this.rpc.lockHolder.lost){this.poison();throw new Error('Controller authority lock is unavailable; persistence denied');}
@@ -123,6 +135,7 @@ export class DesktopController {
       await this.persist();
       await this.gateway.start({port:this.port});
       this.ready=true;
+      this.warmTransport();
       this.supervisorHeartbeatTimer=setInterval(()=>{void this.heartbeatViewers();},this.supervisorHeartbeatMs);
       this.supervisorHeartbeatTimer.unref();
       return this;
@@ -362,5 +375,5 @@ export class DesktopController {
       default:throw new Error('Unsupported controller RPC method');
     }
   }
-  async close(){if(this.closePromise)return this.closePromise;clearInterval(this.supervisorHeartbeatTimer);this.ready=false;this.closePromise=(async()=>{await this.gateway.close();if(Object.keys(this.ledger.calls).length)this.poison();if(this.rpc.lockHolder&&!this.rpc.lockHolder.lost)await this.persist().catch(()=>{});await this.rpc.close();await this.transport.close();})();return this.closePromise;}
+  async close(){if(this.closePromise)return this.closePromise;clearInterval(this.supervisorHeartbeatTimer);clearTimeout(this.transportWarmTimer);this.ready=false;this.closePromise=(async()=>{await this.gateway.close();if(Object.keys(this.ledger.calls).length)this.poison();if(this.rpc.lockHolder&&!this.rpc.lockHolder.lost)await this.persist().catch(()=>{});await this.rpc.close();await this.transport.close();})();return this.closePromise;}
 }
