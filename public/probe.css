@@ -26,8 +26,10 @@ button:focus-visible,textarea:focus-visible{outline:3px solid #74c6ff;outline-of
 #bar .ib,#bar .txt{margin:-2px 0}
 #bar .ib{display:flex;align-items:center;justify-content:center;width:44px;height:44px;padding:5px 4px;border:0;border-radius:22px;background:transparent;background-clip:content-box;color:#dfe7ec}
 #bar .ib[aria-pressed="true"]{background-color:rgba(255,255,255,.14)}
-#bar .txt{height:44px;padding:0 7px;border:6px solid transparent;border-left:0;border-right:0;border-radius:16px/22px;background:rgba(255,255,255,.1) padding-box;color:#e9eef2;white-space:nowrap}
+#bar .txt{height:44px;padding:0 13px;border:6px solid transparent;border-left:0;border-right:0;border-radius:16px/22px;background:rgba(255,255,255,.1) padding-box;color:#e9eef2;white-space:nowrap}
 #bar .go{padding:0 18px;background-color:#54d6ad;color:#06231a}
+/* Below 412px the in-control row runs out of room; the text buttons tighten first so the switch can stay centered. */
+@media (max-width:411.98px){#bar .txt:not(.go){padding:0 7px}}
 #input-mode{display:flex;padding:2px;border-radius:19px;background:rgba(255,255,255,.08)}
 /* Each segment is laid out 42 wide with a 44x44 tap area (the 1px side margins overlap), so the switch stays 88px and
    the centered column fits beside the keyboard, more and Done buttons at 390px. */

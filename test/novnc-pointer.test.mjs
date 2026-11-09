@@ -1072,6 +1072,17 @@ test('the hidden tab brings the bar back with a tap or a pull down', { skip: noV
   assert.equal(peers.at(-1).pointers.length, before, 'none of these sent a pointer packet');
 });
 
+test('on a 412 px phone the bar keeps the mockup spacing and the switch stays centered', { skip: noVncSkip }, async t => {
+  const { evaluate, cdp } = await phone(t, undefined);
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 412, height: 915, deviceScaleFactor: 2.6, mobile: true });
+  await evaluate('__viewer.showBar()');
+  await settle();
+  const m = await evaluate(`(() => { const r = document.querySelector('#input-mode').getBoundingClientRect(); return { mid: r.left + r.width / 2, w: innerWidth, done: getComputedStyle(document.querySelector('#done')).paddingLeft }; })()`);
+  assert.equal(m.w, 412);
+  assert.equal(m.done, '13px', 'Done keeps the mockup padding where it fits');
+  assert.ok(Math.abs(m.mid - 206) <= 1, `the switch is centered (${m.mid})`);
+});
+
 test('the Touch / Trackpad switch sits in the center, and the choice survives a reload', { skip: noVncSkip }, async t => {
   const { evaluate, press, waitFor, cdp, errors } = await phone(t, undefined);
   await evaluate('__viewer.showBar()');
