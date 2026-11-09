@@ -573,6 +573,28 @@ async function trackpadPhone(t, focus) {
   return ctx;
 }
 const settle = () => pause(300);
+// The switch sits on the screen's center line whenever each side's buttons fit in their half of the row. When a side needs
+// more room (a wider system font draws Done wider), that side takes exactly what it needs and the switch moves over to it.
+async function assertSwitchPlaced(evaluate) {
+  const m = await evaluate(`(() => {
+    const rect = s => document.querySelector(s).getBoundingClientRect();
+    const shown = s => [...document.querySelector(s).children].filter(e => e.getClientRects().length).map(e => e.getBoundingClientRect());
+    const row = rect('.bar-row'), center = rect('#bar-center'), sw = rect('#input-mode'), left = rect('#bar-left'), right = rect('#bar-right');
+    const leftItems = shown('#bar-left'), rightItems = shown('#bar-right');
+    return { rowLeft: row.left, rowWidth: row.width, centerLeft: center.left, centerRight: center.right, centerWidth: center.width,
+      mid: sw.left + sw.width / 2,
+      leftEnd: Math.max(...leftItems.map(r => r.right)), rightStart: Math.min(...rightItems.map(r => r.left)),
+      leftNeed: Math.max(...leftItems.map(r => r.right)) - left.left, rightNeed: right.right - Math.min(...rightItems.map(r => r.left)) };
+  })()`);
+  const half = (m.rowWidth - m.centerWidth) / 2;
+  const detail = JSON.stringify(m);
+  assert.ok(m.leftEnd <= m.centerLeft + 0.5 && m.centerRight <= m.rightStart + 0.5, `nothing overlaps the switch: ${detail}`);
+  let expected = m.rowLeft + m.rowWidth / 2;
+  if (m.rightNeed > half + 0.5) expected = m.rowLeft + m.rowWidth - m.rightNeed - m.centerWidth / 2;
+  else if (m.leftNeed > half + 0.5) expected = m.rowLeft + m.leftNeed + m.centerWidth / 2;
+  assert.ok(Math.abs(m.mid - expected) <= 1, `the switch is centered, or moved over only as far as a side needs (${m.mid}, expected ${expected}): ${detail}`);
+  return m;
+}
 const noVncSkip = !assets ? 'set NOVNC_ASSETS_DIR to the noVNC 1.7.0 source tree' : !existsSync(chromePath) ? 'Chrome unavailable' : false;
 
 test('the ⋯ sheet holds zoom, Copy and Paste as icons, and a tap on the page only closes it', { skip: noVncSkip }, async t => {
@@ -1216,17 +1238,17 @@ test('on a 412 px phone the bar keeps the mockup spacing and the switch stays ce
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 412, height: 915, deviceScaleFactor: 2.6, mobile: true });
   await evaluate('__viewer.showBar()');
   await settle();
-  const m = await evaluate(`(() => { const r = document.querySelector('#input-mode').getBoundingClientRect(); return { mid: r.left + r.width / 2, w: innerWidth, done: getComputedStyle(document.querySelector('#done')).paddingLeft }; })()`);
+  const m = await evaluate(`({ w: innerWidth, done: getComputedStyle(document.querySelector('#done')).paddingLeft })`);
   assert.equal(m.w, 412);
   assert.equal(m.done, '13px', 'Done keeps the mockup padding where it fits');
-  assert.ok(Math.abs(m.mid - 206) <= 1, `the switch is centered (${m.mid})`);
+  await assertSwitchPlaced(evaluate);
 });
 
 test('the Touch / Trackpad switch sits in the center, and the choice survives a reload', { skip: noVncSkip }, async t => {
   const { evaluate, press, waitFor, cdp, errors } = await phone(t, undefined);
   await evaluate('__viewer.showBar()');
-  const center = await evaluate(`(() => { const r = document.querySelector('#input-mode').getBoundingClientRect(); return { mid: r.left + r.width / 2, w: r.width, btns: [...document.querySelectorAll('#input-mode button')].map(b => { const q = b.getBoundingClientRect(); return [q.width, q.height]; }) }; })()`);
-  assert.ok(Math.abs(center.mid - 195) <= 1, `the switch is centered (${center.mid})`);
+  await assertSwitchPlaced(evaluate);
+  const center = await evaluate(`({ btns: [...document.querySelectorAll('#input-mode button')].map(b => { const q = b.getBoundingClientRect(); return [q.width, q.height]; }) })`);
   assert.ok(center.btns.length === 2 && center.btns.every(([w, h]) => w >= 44 && h >= 44), 'both segments are full finger targets');
   assert.equal(await evaluate(`document.querySelector('#mode-touch').getAttribute('aria-checked')`), 'true');
   await press('#mode-trackpad');
