@@ -703,6 +703,7 @@ function checkFocusAfterTap(framebufferY, { keyboard = true, offer } = {}) {
   const connection = activeConnection;
   if (!connection?.capabilities.focus || !controlReady || accessEnded) return;
   if (focusCheck) { focusRecheck = { framebufferY, keyboard: keyboard || focusRecheck?.keyboard === true, offer: offer || focusRecheck?.offer }; return; }
+  const touch = touchCount;
   focusCheck = (async () => {
     let answer;
     for (const wait of [150, 350]) {
@@ -712,8 +713,11 @@ function checkFocusAfterTap(framebufferY, { keyboard = true, offer } = {}) {
       if (answer.kind !== 'none' || answer.selected) break;
     }
     if (!controlReady || accessEnded || connection !== activeConnection) return;
-    if (offer && offer.touch === touchCount) offerQuickActions(offer.x, offer.y, answer);
+    // A finger still sliding after a hold is dragging, and the bar would sit in its way.
+    if (offer && offer.touch === touchCount && !touchGesture?.dragging) offerQuickActions(offer.x, offer.y, answer);
     if (!keyboard) return;
+    // After a newer touch this answer is out of date. That touch decides an open keyboard, for example one the address bar opened.
+    if (touch !== touchCount && document.activeElement === keyboardInput) return;
     if (answer.kind === 'editable') { openKeyboard(answer.inputMode); autoKeyboard = true; }
     else if (answer.kind === 'browser-ui' && framebufferY < toolbarBandPx) { openKeyboard('url'); autoKeyboard = true; }
     else if (answer.kind === 'none' && autoKeyboard && document.activeElement === keyboardInput) keyboardInput.blur();
@@ -723,6 +727,27 @@ function checkFocusAfterTap(framebufferY, { keyboard = true, offer } = {}) {
     focusRecheck = undefined;
     if (next) checkFocusAfterTap(next.framebufferY, next);
   });
+}
+// Chrome's address bar, in the agent's screen pixels. Setup runs Chrome maximized at 96 dpi. The bar is then the row
+// under the tab strip, between the reload button and the profile button, at the same pixels on any screen width.
+// OpenClaw's browser tool turns on Chrome's focus emulation, and then the page reports focus even while the address bar
+// has it. The focus check cannot see this bar, so where the finger lands decides it.
+const addressBar = { top: 46, bottom: 80, left: 122, fromRight: 210 };
+function onAddressBar(fb) {
+  const size = framebufferSize();
+  return Boolean(size && fb) && fb.y >= addressBar.top && fb.y <= addressBar.bottom && fb.x >= addressBar.left && fb.x <= size.width - addressBar.fromRight;
+}
+// A tap on the address bar opens the URL keyboard straight away. A double tap there selects a word, so it also offers Copy and Paste.
+function tapAddressBar(at, repeat) {
+  openKeyboard('url');
+  autoKeyboard = true;
+  if (repeat) offerQuickActions(at.x, at.y, { kind: 'editable', selected: true });
+}
+// The Copy / Paste bar for a hold or a drag. fb is where it started, at is where the bar goes.
+// A drag that started in the address bar selected text there.
+function offerAfterHold(at, fb, dragged) {
+  if (onAddressBar(fb)) { offerQuickActions(at.x, at.y, { kind: 'editable', selected: dragged }); return; }
+  checkFocusAfterTap(0, { keyboard: false, offer: { x: at.x, y: at.y, touch: touchCount } });
 }
 keyboardInput.addEventListener('focus', () => {
   document.getElementById('keyboard').setAttribute('aria-pressed', 'true');
@@ -939,8 +964,7 @@ function trackpadTouch(type, touches) {
   padGesture = undefined;
   if (gesture.held) {
     releasePad(gesture);
-    const at = toScreen(pointer);
-    if (controlReady && !accessEnded) checkFocusAfterTap(0, { keyboard: false, offer: { x: at.x, y: at.y, touch: touchCount } });
+    if (controlReady && !accessEnded) offerAfterHold(toScreen(pointer), gesture.start, true);
     return;
   }
   if (gesture.chained && gesture.moved) return;
@@ -960,6 +984,7 @@ function trackpadTouch(type, touches) {
   sendButton(pointer.x, pointer.y, 0, true);
   sendButton(pointer.x, pointer.y, 0, false);
   const at = toScreen(pointer);
+  if (onAddressBar(pointer)) { tapAddressBar(at, second); return; }
   checkFocusAfterTap(pointer.y, second ? { offer: { x: at.x, y: at.y, touch: touchCount } } : {});
 }
 // The one place a held Trackpad button comes up. Every path that ends a gesture or a session reaches it.
@@ -984,14 +1009,15 @@ function beginHold(gesture) {
   if (gesture !== touchGesture || gesture.moved || !controlReady || accessEnded) return;
   gesture.kind = 'hold';
   gesture.remoteDown = true;
-  status.textContent = 'Holding… Lift to release.';
+  gesture.fb = toFramebuffer(gesture);
   gesture.canvas.dispatchEvent(new PointerEvent('mousedown', mouseOptions(gesture.x, gesture.y, 1)));
+  // As on Android, Copy or Paste shows while the finger is still down. Sliding instead hides it and drags.
+  offerAfterHold(gesture, gesture.fb, false);
 }
 function releaseTouchDrag(gesture = touchGesture) {
   clearTimeout(gesture?.holdTimer);
   if (!gesture?.remoteDown) return;
   gesture.remoteDown = false;
-  if (controlReady && !accessEnded) status.textContent = 'Hold released. Swipe to scroll. Pinch to zoom.';
   // Route up through noVNC's window capture proxy so it also removes the
   // capture overlay and flushes any queued held-button movement.
   window.dispatchEvent(new PointerEvent('mouseup', mouseOptions(gesture.lastX, gesture.lastY, 0)));
@@ -1117,6 +1143,7 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
       gesture.wheelY += gesture.lastY - y;
       gesture.lastX = x; gesture.lastY = y;
       if (holdsButton(gesture)) {
+        if (!gesture.dragging && Math.hypot(x - gesture.x, y - gesture.y) > 8) { gesture.dragging = true; hideQuickActions(); }
         if (gesture.remoteDown) window.dispatchEvent(new PointerEvent('mousemove', mouseOptions(x, y, 1)));
         return;
       }
@@ -1135,13 +1162,14 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
   releaseTouchDrag(gesture);
   touchGesture = undefined;
   if (gesture.swallowed) return;
-  if (holdsButton(gesture) && controlReady && !accessEnded) checkFocusAfterTap(0, { keyboard: false, offer: { x: gesture.lastX, y: gesture.lastY, touch: touchCount } });
+  if (holdsButton(gesture) && controlReady && !accessEnded) offerAfterHold({ x: gesture.lastX, y: gesture.lastY }, gesture.fb, Boolean(gesture.dragging));
   if (gesture.pinch || holdsButton(gesture) || gesture.moved || !controlReady || accessEnded) return;
   const point = repeatTapPoint(gesture);
   lastTouchTapFb = toFramebuffer(point);
   gesture.canvas.dispatchEvent(new PointerEvent('mousedown', mouseOptions(point.x, point.y, 1)));
   // noVNC's window capture proxy must receive mouseup to release its overlay.
   window.dispatchEvent(new PointerEvent('mouseup', mouseOptions(point.x, point.y, 0)));
+  if (onAddressBar(lastTouchTapFb)) { tapAddressBar(point, point.repeat); return; }
   checkFocusAfterTap((point.y - gesture.canvas.getBoundingClientRect().top) / displayScale, point.repeat ? { offer: { x: point.x, y: point.y, touch: touchCount } } : {});
 }, { capture: true, passive: false });
 

@@ -174,8 +174,8 @@ async function fixture(t, { clipboardBridge = false, retained = false, focus } =
     if (reply.exceptionDetails) throw new Error(JSON.stringify(reply.exceptionDetails));
     return reply.result.value;
   };
-  const waitFor = async (expression, description) => {
-    for (let attempt = 0; attempt < 200; attempt++) {
+  const waitFor = async (expression, description, attempts = 200) => {
+    for (let attempt = 0; attempt < attempts; attempt++) {
       if (await evaluate(expression)) return;
       await pause(25);
     }
@@ -481,7 +481,7 @@ test('a stationary touch holds the remote button until lift; taps still click an
   const down = await pressed(before);
   assert.ok(down, 'a finger kept within the tap slop presses the remote button');
   assert.ok(Math.abs(down.x - (195 - rect.left) / rect.scale) <= 2 && Math.abs(down.y - (422 - rect.top) / rect.scale) <= 2, 'the hold presses at the contact point');
-  assert.match(await status(), /^Holding…/);
+  assert.doesNotMatch(await status(), /Hold|Lift/, 'no notice while holding');
   for (const point of [[196, 423], [194, 421], [195, 422]]) { await pause(200); await touch('touchMove', [point]); }
   while (performance.now() - down.at < 1100) await pause(20);
   assert.equal(peer.pointers.at(-1).mask, 1, 'the button stays down while the finger rests');
@@ -494,7 +494,7 @@ test('a stationary touch holds the remote button until lift; taps still click an
   assert.ok(held.slice(1, -1).filter(event => event.mask === 1).length >= 1, 'small jitter is forwarded as held-button movement');
   assert.deepEqual(held.filter(event => event.mask !== 1), [up], 'the hold neither scrolls nor releases early');
   assert.equal(await evaluate('Boolean(document.captureElement)'), false, 'upstream mouse capture is released');
-  assert.match(await status(), /^Hold released/);
+  assert.doesNotMatch(await status(), /Hold|Lift/, 'no notice after the hold');
 
   before = peer.pointers.length;
   await touch('touchStart', [[195, 422]]); await touch('touchEnd', []);
@@ -693,6 +693,35 @@ test('Chrome’s own toolbar opens the keyboard only for a tap at the top of the
   assert.equal((await keyboard()).inputMode, 'url');
 });
 
+// OpenClaw's browser tool attaches with Playwright, which turns on Chrome's focus emulation. The page then reports focus
+// even while the address bar has it, so the focus check answers none. The address bar is found by where the tap lands.
+// Chrome draws its toolbar at a fixed size: the address bar is the row from about y 46 to 80, whatever the screen width.
+test('a tap on Chrome’s address bar opens the URL keyboard even when the page still reports focus', { skip: noVncSkip }, async t => {
+  const focus = { answer: { kind: 'none' }, requests: 0 };
+  const { tap, keyboard, waitFor, evaluate } = await phone(t, focus);
+  await tap(640, 62);
+  await waitFor(`document.activeElement?.id === 'keyboard-input'`, 'a tap on the address bar opens the keyboard');
+  assert.equal((await keyboard()).inputMode, 'url');
+  await evaluate('document.activeElement.blur()');
+  const before = focus.requests;
+  for (const [x, y, label] of [[640, 20, 'the tab strip'], [60, 62, 'the back and reload buttons'], [width - 40, 62, 'the profile and menu buttons'], [640, 300, 'the page']]) {
+    await pause(500);
+    await tap(x, y);
+    for (let n = 0; n < 100 && focus.requests <= before; n++) await pause(20);
+    await pause(700);
+    assert.equal((await keyboard()).open, false, label + ' does not open the keyboard');
+  }
+});
+
+test('a tap below the toolbar never opens the URL keyboard, even when the focus check says browser UI', { skip: noVncSkip }, async t => {
+  const focus = { answer: { kind: 'browser-ui' }, requests: 0 };
+  const { tap, keyboard } = await phone(t, focus);
+  await tap(640, 300);
+  for (let n = 0; n < 100 && focus.requests < 1; n++) await pause(20);
+  await pause(900);
+  assert.equal((await keyboard()).open, false);
+});
+
 test('an unknown focus answer, or a viewer without the focus capability, leaves the keyboard alone', { skip: noVncSkip }, async t => {
   await t.test('unknown', async t => {
     const focus = { answer: { kind: 'unknown' }, requests: 0 };
@@ -799,6 +828,54 @@ test('touch and hold in a text field offers Paste just above the finger, and a t
   assert.ok(low.top >= 0 && low.bottom <= 444, 'kept inside the visible area: ' + JSON.stringify(low));
 });
 
+test('touch and hold offers Paste while the finger is still down, as Android does, and lifting keeps it', { skip: noVncSkip }, async t => {
+  const focus = { answer: { kind: 'editable', inputMode: 'text', multiline: false }, requests: 0 };
+  const { touch, point, pill, waitFor, evaluate, peers } = await phone(t, focus, { clipboardBridge: true });
+  const peer = peers.at(-1);
+  const [x, y] = await point(640, 300);
+  await touch('touchStart', [[x, y]]);
+  await waitFor(`!document.querySelector('#quick-actions').hidden`, 'Paste appears during the hold, before the finger lifts', 60);
+  const bar = await pill();
+  assert.deepEqual([bar.copy, bar.paste], [false, true]);
+  assert.ok(bar.bottom <= y && bar.left <= x && bar.right >= x, 'just above the finger: ' + JSON.stringify({ bar, x, y }));
+  await touch('touchEnd', []);
+  for (let n = 0; n < 100 && peer.pointers.at(-1)?.mask !== 0; n++) await pause(10);
+  await pause(400);
+  assert.equal((await pill()).visible, true, 'lifting leaves Paste up to be tapped');
+  assert.equal(await evaluate(`document.querySelector('#status').textContent`), 'Control connected.', 'no hold notice');
+});
+
+test('touch and hold, then slide, drags with the button held and hides the bar until the finger lifts', { skip: noVncSkip }, async t => {
+  const focus = { answer: { kind: 'editable', inputMode: 'text', multiline: false }, requests: 0 };
+  const { touch, point, pill, waitFor, evaluate, peers } = await phone(t, focus);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  const [x, y] = await point(640, 300);
+  await touch('touchStart', [[x, y]]);
+  await waitFor(`!document.querySelector('#quick-actions').hidden`, 'Paste appears during the hold', 60);
+  focus.answer = { kind: 'editable', inputMode: 'text', multiline: false, selected: true };
+  for (const dx of [10, 25, 40, 60]) { await touch('touchMove', [[x + dx, y]]); await pause(30); }
+  assert.equal((await pill()).visible, false, 'sliding hides the bar so it is not in the way');
+  const held = peer.pointers.slice(before);
+  assert.ok(held.filter(e => e.mask === 1).length >= 3, 'the slide moves with the button held: ' + JSON.stringify(held.map(e => e.mask)));
+  assert.ok(held.every(e => (e.mask & 0x78) === 0), 'a hold never scrolls');
+  await touch('touchEnd', []);
+  for (let n = 0; n < 100 && peer.pointers.at(-1)?.mask !== 0; n++) await pause(10);
+  assert.equal(peer.pointers.at(-1).mask, 0, 'lifting releases the button');
+  await waitFor(`!document.querySelector('#quick-actions').hidden`, 'after a drag that selected text, the bar offers Copy');
+  assert.deepEqual(await evaluate(`[!document.querySelector('#quick-copy').hidden, !document.querySelector('#quick-paste').hidden]`), [true, true]);
+  assert.equal(await evaluate(`document.querySelector('#status').textContent`), 'Control connected.', 'no hold notice');
+});
+
+test('touch and hold on Chrome’s address bar offers Paste even when the page still reports focus', { skip: noVncSkip }, async t => {
+  const focus = { answer: { kind: 'none' }, requests: 0 };
+  const { touch, point, pill, waitFor } = await phone(t, focus, { clipboardBridge: true });
+  const [x, y] = await point(640, 62);
+  await touch('touchStart', [[x, y]]);
+  await waitFor(`!document.querySelector('#quick-actions').hidden`, 'Paste appears during a hold on the address bar', 60);
+  assert.deepEqual([(await pill()).copy, (await pill()).paste], [false, true]);
+  await touch('touchEnd', []);
+});
+
 test('Trackpad: sliding moves the pointer without clicking, and a tap clicks at the pointer', { skip: noVncSkip }, async t => {
   const { evaluate, touch, peers } = await trackpadPhone(t);
   const scaleAtFit = await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`);
@@ -853,6 +930,25 @@ test('Trackpad: the pointer reaches single desktop pixels at Fit', { skip: noVnc
   await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
   await settle();
   assert.equal(peer.pointers.slice(before).find(e => e.mask === 1).x, Math.floor(final.x));
+});
+
+test('Trackpad: a tap with the pointer on Chrome’s address bar opens the URL keyboard', { skip: noVncSkip }, async t => {
+  const focus = { answer: { kind: 'none' }, requests: 0 };
+  const { evaluate, touch, waitFor } = await trackpadPhone(t, focus);
+  // Slide the pointer up and left until it rests on the address bar row, then tap.
+  for (let n = 0; n < 40; n++) {
+    const at = await evaluate('__viewer.pointer()');
+    if (at.y >= 52 && at.y <= 74 && at.x >= 300 && at.x <= 900) break;
+    const dx = at.x > 900 ? -6 : at.x < 300 ? 6 : 0, dy = at.y > 74 ? -6 : at.y < 52 ? 6 : 0;
+    await touch('touchStart', [[200, 600]]); await touch('touchMove', [[200 + dx, 600 + dy]]); await pause(250); await touch('touchEnd', []);
+    await pause(60);
+  }
+  const at = await evaluate('__viewer.pointer()');
+  assert.ok(at.y >= 46 && at.y <= 80, 'the pointer is on the address bar row: ' + JSON.stringify(at));
+  await pause(400);
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await waitFor(`document.activeElement?.id === 'keyboard-input'`, 'the tap opens the keyboard');
+  assert.equal(await evaluate(`document.querySelector('#keyboard-input').inputMode`), 'url');
 });
 
 test('Trackpad: two quick taps land both clicks on one desktop pixel', { skip: noVncSkip }, async t => {
