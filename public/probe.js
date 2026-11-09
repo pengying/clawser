@@ -128,6 +128,7 @@ function openConnection(config) {
     controlReady = config.mode !== 'watch';
     updateInputControls();
     updateDisplay();
+    if (inputMode === 'trackpad' && !pointer) { placePointer(); drawPointer(); }
     readyResolve();
   }, { once: true });
   instance.addEventListener('clipboard', (event) => {
@@ -273,7 +274,9 @@ void bootstrap();
 function updateInputControls() {
   for (const id of ['keyboard', 'paste']) document.getElementById(id).disabled = !controlReady || accessEnded;
   document.getElementById('copy').disabled = !controlReady || accessEnded;
-  if (!controlReady || accessEnded) { cancelTouchInput(); keyboardInput.blur(); }
+  // A gesture belongs to the control state it began in, so any change cancels it.
+  cancelTouchInput();
+  if (!controlReady || accessEnded) keyboardInput.blur();
   updateQuickActions();
   drawPointer();
 }
@@ -685,12 +688,20 @@ function drawPointer() {
 function setInputMode(next) {
   inputMode = next;
   cancelTouchInput();
-  if (next === 'trackpad' && !pointer && framebufferSize()) {
-    const b = visibleBounds();
-    const spot = lastTouchTapFb || toFramebuffer({ x: b.left + b.width / 2, y: b.top + b.height / 2 });
-    pointer = movePointer(spot, { dx: 0, dy: 0 }, displayScale, framebufferSize());
-  }
+  lastPadTap = undefined;
+  if (next === 'trackpad') placePointer();
   drawPointer();
+}
+// The last Touch tap since the pointer was placed wins; else keep the pointer; else the center of the visible area.
+function placePointer() {
+  if (!framebufferSize()) return;
+  if (lastTouchTapFb) {
+    pointer = movePointer(lastTouchTapFb, { dx: 0, dy: 0 }, displayScale, framebufferSize());
+    lastTouchTapFb = null;
+  } else if (!pointer) {
+    const b = visibleBounds();
+    pointer = movePointer(toFramebuffer({ x: b.left + b.width / 2, y: b.top + b.height / 2 }), { dx: 0, dy: 0 }, displayScale, framebufferSize());
+  }
 }
 viewport.addEventListener('scroll', drawPointer);
 function sendButton(x, y, button, down) {
@@ -713,12 +724,13 @@ let lastPadTap;
 function trackpadTouch(type, touches) {
   const now = performance.now();
   if (type === 'touchstart') {
-    if (!pointer) setInputMode('trackpad');
+    if (!pointer) { placePointer(); drawPointer(); }
+    if (!pointer) return;
     if (!padGesture) {
-      padGesture = { at: now, starts: new Map(), last: null, moved: false, two: false, travel: 0, twoTravel: 0 };
+      padGesture = { at: now, start: { ...pointer }, starts: new Map(), last: null, moved: false, two: false, travel: 0 };
       padGesture.last = { x: touches[0].clientX, y: touches[0].clientY, at: now };
     }
-    if (touches.length >= 2) padGesture.two = true;
+    if (touches.length >= 2) { padGesture.two = true; lastPadTap = undefined; }
     for (const t of touches) if (!padGesture.starts.has(t.identifier)) padGesture.starts.set(t.identifier, { x: t.clientX, y: t.clientY });
     return;
   }
@@ -738,6 +750,7 @@ function trackpadTouch(type, touches) {
     const s = gesture.starts.get(t.identifier);
     if (!gesture.moved && s && Math.hypot(t.clientX - s.x, t.clientY - s.y) > padMoveSlop) gesture.moved = true;
     if (gesture.moved) {
+      lastPadTap = undefined;
       const next = movePointer(pointer, accelerate(dx, dy, dt), displayScale, framebufferSize());
       movePointerTo(next.x, next.y);
     }
@@ -753,6 +766,8 @@ function trackpadTouch(type, touches) {
     return;
   }
   if (gesture.travel > padTapSlop) return;
+  // A jittery tap clicks where the pointer was when the finger landed.
+  if (pointer.x !== gesture.start.x || pointer.y !== gesture.start.y) movePointerTo(gesture.start.x, gesture.start.y);
   const second = lastPadTap && now - lastPadTap < padDoubleMs;
   lastPadTap = second ? undefined : now;
   sendButton(pointer.x, pointer.y, 0, true);
@@ -843,7 +858,7 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
     // While the sheet is open a tap on the page only closes it. The whole gesture is swallowed.
     if (touchGesture?.swallowed) return;
     if (sheetOpen() && !touchGesture) { closeSheet(); touchGesture = { swallowed: true }; return; }
-    if (inputMode === 'trackpad' && controlReady && !accessEnded) return trackpadTouch(type, touches);
+    if (padGesture || (!touchGesture && inputMode === 'trackpad' && controlReady && !accessEnded)) return trackpadTouch(type, touches);
     if (touches.length >= 2) beginPinch(touches);
     else if (!touchGesture) {
       const canvas = screen.querySelector('canvas'), size = framebufferSize();
@@ -856,7 +871,7 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
     }
     return;
   }
-  if (!touchGesture?.swallowed && inputMode === 'trackpad' && controlReady && !accessEnded) return trackpadTouch(type, touches);
+  if (padGesture) return trackpadTouch(type, touches);
   if (!touchGesture) return;
   if (type === 'touchmove') {
     if (touchGesture.swallowed) return;
@@ -899,4 +914,7 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
 }, { capture: true, passive: false });
 
 // probe.js is a module, so tests reach these through window. Each does only what the owner can do with a tap.
-window.__viewer = { hideBar, showBar, barHidden, zoomTo, openSheet, closeSheet, sheetOpen, setHint, setInputMode, pointer: () => pointer };
+window.__viewer = { hideBar, showBar, barHidden, zoomTo, openSheet, closeSheet, sheetOpen, setHint, setInputMode, pointer: () => pointer,
+  // Test hooks: flip control without a reconnect, and read which gestures are alive.
+  setControlReady(value) { controlReady = value; updateInputControls(); drawPointer(); },
+  gestures: () => ({ touch: Boolean(touchGesture), pad: Boolean(padGesture) }) };

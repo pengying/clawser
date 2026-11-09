@@ -10,7 +10,6 @@ button:focus-visible,textarea:focus-visible{outline:3px solid #74c6ff;outline-of
 #screen{position:absolute;inset:0;width:100%;height:100%;overflow:hidden;touch-action:none}
 /* noVNC alone owns canvas dimensions and its matching pointer-input scale. */
 #pointer{position:fixed;z-index:3;left:0;top:0;width:15px;height:21px;pointer-events:none}
-#pointer[hidden]{display:none}
 #bar{--pad-left:max(14px,var(--safe-left));--pad-right:max(10px,var(--safe-right));position:fixed;z-index:5;top:0;left:0;right:0;padding:calc(4px + var(--safe-top)) var(--pad-right) 4px var(--pad-left);border:1px solid rgba(255,255,255,.08);border-top:0;border-radius:0 0 20px 20px;background:rgba(18,26,34,.88);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);box-shadow:0 6px 20px rgba(0,0,0,.35);color:#e9eef2;transition:transform .22s ease}
 #bar.bar-hidden{transform:translateY(-104%);box-shadow:none}
 /* The row spans the whole bar, so its middle column sits on the screen's center line; the side columns keep the bar's insets.

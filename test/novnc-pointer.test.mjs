@@ -788,7 +788,7 @@ test('Trackpad: the pointer reaches single desktop pixels at Fit', { skip: noVnc
   const { evaluate, touch, peers } = await trackpadPhone(t);
   const peer = peers.at(-1), seen = new Set();
   for (let n = 0; n < 6; n++) {
-    await touch('touchStart', [[200, 600]]); await touch('touchMove', [[205, 600]]); await touch('touchEnd', []);
+    await touch('touchStart', [[200, 600]]); await touch('touchMove', [[205, 600]]); await pause(300); await touch('touchEnd', []);
     await settle();
     seen.add(Math.floor((await evaluate('__viewer.pointer()')).x));
   }
@@ -805,7 +805,7 @@ test('Trackpad: two quick taps land both clicks on one desktop pixel', { skip: n
   const peer = peers.at(-1), before = peer.pointers.length;
   await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
   await pause(100);
-  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await touch('touchStart', [[100, 700]]); await touch('touchMove', [[105, 700]]); await touch('touchEnd', []);
   await settle();
   const clicks = peer.pointers.slice(before).filter(e => e.mask === 1);
   assert.equal(clicks.length, 2);
@@ -813,8 +813,36 @@ test('Trackpad: two quick taps land both clicks on one desktop pixel', { skip: n
 });
 
 test('Trackpad: the pointer shows only in Trackpad mode while in control', { skip: noVncSkip }, async t => {
-  const { evaluate, shown } = await trackpadPhone(t);
+  const { evaluate, shown, waitFor } = await trackpadPhone(t);
   assert.equal(await shown('#pointer'), true);
   await evaluate("__viewer.setInputMode('touch')");
   assert.equal(await shown('#pointer'), false);
+  await evaluate("__viewer.setInputMode('trackpad')");
+  assert.equal(await shown('#pointer'), true);
+  await evaluate(`document.querySelector('#done').click()`);
+  await waitFor(`document.querySelector('#status').textContent.includes('Test browser destroyed.')`, 'Done completes');
+  assert.equal(await shown('#pointer'), false, 'the pointer is hidden once access has ended');
+});
+
+test('Trackpad: a gesture that began before control was ready does not outlive the change', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, press, waitFor, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  await evaluate('__viewer.setControlReady(false)');
+  await touch('touchStart', [[100, 700]]);
+  await evaluate('__viewer.setControlReady(true)');
+  await touch('touchEnd', []);
+  await settle();
+  assert.deepEqual(await evaluate('__viewer.gestures()'), { touch: false, pad: false });
+  await press('#bar-tab');
+  await waitFor('!__viewer.barHidden()', 'the tab still brings the bar back');
+  assert.equal(peer.pointers.slice(before).filter(e => e.mask === 1).length, 0, 'no stray click');
+});
+
+test('Trackpad: a two-finger gesture that moves sends no button in 4a', { skip: noVncSkip }, async t => {
+  const { touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  await touch('touchStart', [[150, 600]]); await touch('touchStart', [[150, 600], [230, 600]]);
+  await touch('touchMove', [[150, 640], [230, 640]]); await touch('touchEnd', []);
+  await settle();
+  assert.ok(peer.pointers.slice(before).every(e => (e.mask & 7) === 0), 'no button packets');
 });
