@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## 1.0.0
 
 - The first handoff link no longer waits for the secure tunnel. The controller now starts the tunnel when it starts, and starts it again a few seconds after it drops. Before, the first link after each restart waited up to a minute, while Cloudflare set up a new address.
 - The agent skill now tells the agent to work the page itself before sending a link: close popups, scroll, retry another way, and read error messages. A link is the last resort. Once it does need one, it asks for the link right away.
