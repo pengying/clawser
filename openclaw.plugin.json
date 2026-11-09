@@ -1,7 +1,7 @@
 {
   "id": "browser-handoff",
   "name": "Clawser",
-  "description": "Private full-browser viewing and human takeover links for OpenClaw",
+  "description": "Step into the agent's browser from your phone for a CAPTCHA, login or 2FA, then hand it back",
   "activation": {
     "onStartup": true
   },

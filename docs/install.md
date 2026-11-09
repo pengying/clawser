@@ -2,8 +2,10 @@
 
 ## Supported host
 
-The validated platform is Linux x86_64, Node.js >=24.16 <25 or >=26.1, and
-OpenClaw 2026.10.4+ with its native trusted-tool-policy SDK. Native fixtures cover
+The validated platform is Linux x86_64 and OpenClaw 2026.10.4+ with its native
+trusted-tool-policy SDK, running on Node.js >=24.16 <25 or >=26.1. That is the
+same Node range OpenClaw itself requires. OpenClaw's opt-in Bun runtime is
+untested with Clawser. Native fixtures cover
 2026.10.4 and 2026.10.7. Windows, macOS and ARM hosts remain unverified.
 Run setup as the OpenClaw user, without `sudo`, with the same OpenClaw
 state/config environment used by the Gateway. Start the Gateway first.
@@ -44,19 +46,24 @@ a loopback CDP connection, and outbound HTTPS. See
 
 ### For agents installing Clawser
 
-1. Run `openclaw clawser setup --dry-run` first.
-2. If it prints an install command, give it to the owner verbatim and wait.
+1. Install the plugin from ClawHub only when the owner asks, and only after
+   they approve its declared capabilities.
+2. Run `openclaw clawser setup --dry-run`. It checks the host and changes
+   nothing.
+3. If it prints an install command, give it to the owner verbatim and wait.
    Never run `sudo` or a system package manager yourself.
-3. Rerun setup after the owner confirms the install.
-4. Never install a browser.
+4. Rerun the dry run after the owner confirms the install.
+5. Leave `setup --yes` to the owner. It closes the agent's browser and reloads
+   this plugin, which ends your own turn's browser work.
+6. Never install a browser.
 
 ## Tagged Git installation
 
-This guide describes v1.0.0. Tagged Git installation is the recommended
+This guide describes v1.0.1. Tagged Git installation is the recommended
 distribution path.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v1.0.0 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v1.0.1 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -322,13 +329,13 @@ replace the native capability-acceptance step. Developer installation is in
 
 ## Release archive alternative
 
-Once published, download `pengying-clawser-1.0.0.tgz` and `SHA256SUMS` from the
-[v1.0.0 release](https://github.com/pengying/clawser/releases/tag/v1.0.0) into the
+Once published, download `pengying-clawser-1.0.1.tgz` and `SHA256SUMS` from the
+[v1.0.1 release](https://github.com/pengying/clawser/releases/tag/v1.0.1) into the
 same directory:
 
 ```sh
 sha256sum --check SHA256SUMS
-openclaw plugins install ./pengying-clawser-1.0.0.tgz --force --accept-capabilities
+openclaw plugins install ./pengying-clawser-1.0.1.tgz --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -345,7 +352,7 @@ file; they are not an independent publisher signature.
 2. Install the new release:
 
    ```sh
-   openclaw plugins install git:github.com/pengying/clawser@v1.0.0 --force --accept-capabilities
+   openclaw plugins install git:github.com/pengying/clawser@v1.0.1 --force --accept-capabilities
    ```
 
 3. Check the plan:
