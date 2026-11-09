@@ -291,8 +291,16 @@ function fitScale(size) {
   return Math.min(1, viewport.clientWidth / size.width, viewport.clientHeight / size.height);
 }
 
+// The bar's height with the sheet closed. A transform hides the bar, so this is the same whether it is shown or hidden.
+function closedBarHeight() {
+  const sheet = sheetOpen() ? moreSheet.getBoundingClientRect().height + parseFloat(getComputedStyle(moreSheet).marginTop) : 0;
+  return Math.round(bar.getBoundingClientRect().height - sheet);
+}
+
 // Only change the mount dimensions. noVNC's autoscale updates both its display
 // and framebuffer-coordinate conversion; the canvas is never independently zoomed.
+// Past Fit the stage has a fixed band of room above the screen, one closed bar tall, so at the top of the scroll
+// the screen's first row sits just below the bar. Showing, hiding or opening the bar never changes the band.
 function updateDisplay(anchor) {
   const size = framebufferSize();
   if (!size) return;
@@ -304,8 +312,9 @@ function updateDisplay(anchor) {
   };
   displayScale = zoomMode === 'fit' ? fitScale(size) : Math.max(0.1, Math.min(3, Number(zoomMode)));
   const width = size.width * displayScale, height = size.height * displayScale;
-  const stageWidth = Math.max(width, viewport.clientWidth), stageHeight = Math.max(height, viewport.clientHeight);
-  const left = (stageWidth - width) / 2, top = (stageHeight - height) / 2;
+  const room = zoomMode === 'fit' ? 0 : closedBarHeight();
+  const stageWidth = Math.max(width, viewport.clientWidth), stageHeight = Math.max(height + room, viewport.clientHeight);
+  const left = (stageWidth - width) / 2, top = Math.max(room, (stageHeight - height) / 2);
   stage.style.width = stageWidth + 'px';
   stage.style.height = stageHeight + 'px';
   Object.assign(screen.style, { left: left + 'px', top: top + 'px', width: width + 'px', height: height + 'px' });

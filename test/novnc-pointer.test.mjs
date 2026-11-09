@@ -1036,15 +1036,45 @@ test('showing and hiding the bar leaves zoom and scroll exactly where they were'
   await evaluate('__viewer.zoomTo(2)');
   await settle();
   await evaluate(`(() => { const v = document.querySelector('#viewport'); v.scrollLeft = 120; v.scrollTop = 90; })()`);
-  const state = () => evaluate(`(() => { const v = document.querySelector('#viewport'); return { scale: document.querySelector('#zoom-level').dataset.scale, left: v.scrollLeft, top: v.scrollTop }; })()`);
+  const state = () => evaluate(`(() => { const v = document.querySelector('#viewport'), c = document.querySelector('canvas').getBoundingClientRect();
+    return { scale: document.querySelector('#zoom-level').dataset.scale, left: v.scrollLeft, top: v.scrollTop, screenLeft: c.left, screenTop: c.top, height: v.scrollHeight }; })()`);
   const start = await state();
   assert.ok(start.left > 0 && start.top > 0, 'the view is scrolled');
   await evaluate('__viewer.showBar()');
+  await settle();
   assert.deepEqual(await state(), start, 'showing the bar changes nothing');
   await evaluate('__viewer.hideBar()');
+  await settle();
   assert.deepEqual(await state(), start, 'hiding the bar changes nothing');
   await evaluate('__viewer.showBar()');
+  await settle();
   assert.deepEqual(await state(), start, 'showing it again changes nothing');
+  await evaluate('__viewer.openSheet()');
+  await settle();
+  assert.deepEqual(await state(), start, 'opening the sheet changes nothing');
+  await evaluate('__viewer.closeSheet()');
+  await settle();
+  assert.deepEqual(await state(), start, 'closing the sheet changes nothing');
+});
+
+test('zoomed past Fit, the top of the remote screen scrolls out from under the bar', { skip: noVncSkip }, async t => {
+  const { evaluate, press } = await phone(t, undefined);
+  await evaluate('__viewer.showBar()');
+  await settle();
+  const layout = () => evaluate(`(() => { const c = document.querySelector('canvas').getBoundingClientRect(), v = document.querySelector('#viewport');
+    return { top: c.top, height: c.height, bar: document.querySelector('#bar').getBoundingClientRect().bottom, view: v.clientHeight, scroll: v.scrollHeight }; })()`);
+  const fit = await layout();
+  assert.ok(Math.abs(fit.top - (fit.view - fit.height) / 2) <= 0.5, 'at Fit the screen stays centered, with the bar over the page: ' + JSON.stringify(fit));
+  assert.equal(fit.scroll, fit.view, 'at Fit the view does not scroll');
+  await evaluate("__viewer.zoomTo(2); document.querySelector('#viewport').scrollTop = 0");
+  await settle();
+  const zoomed = await layout();
+  assert.ok(zoomed.top >= zoomed.bar - 1, 'scrolled to the top, the screen starts below the bar: ' + JSON.stringify(zoomed));
+  // The room is the closed bar's height, so zooming with the sheet open puts the screen in the same place.
+  await press('#more');
+  await evaluate("__viewer.zoomTo(2); document.querySelector('#viewport').scrollTop = 0");
+  await settle();
+  assert.equal((await layout()).top, zoomed.top, 'the open sheet does not change the room');
 });
 
 test('the hidden tab brings the bar back with a tap or a pull down', { skip: noVncSkip }, async t => {
