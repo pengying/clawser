@@ -538,7 +538,6 @@ async function pasteText(text) {
   }
   if (!controlReady || accessEnded || connection !== activeConnection) return;
   sendChord(0x76, 'KeyV');
-  status.textContent = 'Text pasted into the browser.';
 }
 
 // Returns true once the text reached the browser.
@@ -639,8 +638,10 @@ for (const button of [quickCopy, quickPaste]) {
   button.addEventListener('pointerdown', event => event.preventDefault());
   button.addEventListener('mousedown', event => event.preventDefault());
 }
-quickCopy.addEventListener('click', async () => { hideQuickActions(); await copyToDevice(); });
-quickPaste.addEventListener('click', async () => { hideQuickActions(); await pasteFromDevice(); });
+// Using the bar answers it. A focus check still running from the same hold must not bring the bar back.
+function useQuickAction() { touchCount++; hideQuickActions(); }
+quickCopy.addEventListener('click', async () => { useQuickAction(); await copyToDevice(); });
+quickPaste.addEventListener('click', async () => { useQuickAction(); await pasteFromDevice(); });
 
 // A real editable buffer supports Android/Gboard input and IME composition.
 // Compare committed code points rather than keycodes or UTF-16 code units.
