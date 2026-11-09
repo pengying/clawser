@@ -1,5 +1,10 @@
 # Changes
 
+## 0.8.1
+
+- The bundled skill now tells OpenClaw that it runs only on Linux. `openclaw skills list` and `skills check` show it as unavailable on macOS and Windows, where setup refuses to install anyway. On Linux nothing changes.
+- The skill names no required programs on purpose. The CDP viewer never runs x11vnc or python3, and the Gateway's PATH may not reach a Homebrew Xvfb. OpenClaw hides a skill whose programs it can't find, which would drop its consent rules on hosts where the tool still works. `clawser doctor` remains the check for the noVNC host programs.
+
 ## 0.8.0
 
 - The noVNC viewer now has a bar built into the top edge of the screen. It replaces the floating panel and the side Controls tab. While you watch, the bar shows an amber eye on the left, Take control in the center, and ⋯ and Done on the right. In control, it shows a green pointer on the left, the Touch / Trackpad switch in the center, and Keyboard, ⋯ and Done on the right. Under ⋯ are zoom, a Fit or 100% toggle, Copy and Paste. Zoomed in, you can scroll the top of the browser out from under the bar.
