@@ -813,8 +813,12 @@ test('touch and hold in a text field offers Paste just above the finger, and a t
   assert.deepEqual(clipboardRequests, [{ action: 'write', text: 'from my phone' }]);
   for (let n = 0; n < 100 && !peers.at(-1).keys.slice(keysBefore).some(key => key.down && key.keysym === 0x76); n++) await pause(10);
   assert.ok(peers.at(-1).keys.slice(keysBefore).some(key => key.down && key.keysym === 0x76), 'Ctrl+V reached the browser');
+  await pause(200);
+  assert.doesNotMatch(await evaluate(`document.querySelector('#status').textContent`), /pasted/i, 'the paste shows in the field, with no notice');
   assert.equal(await evaluate(`document.activeElement?.id`), 'keyboard-input', 'the keyboard stays open for more typing');
   await waitFor(`document.querySelector('#quick-actions').hidden`, 'the bar goes away after pasting');
+  await pause(800);
+  assert.equal((await pill()).visible, false, 'a focus answer from the same hold does not bring it back');
   focus.answer = { kind: 'editable', inputMode: 'text', multiline: true, selected: true };
   await hold(640, 300);
   await waitFor(`!document.querySelector('#quick-actions').hidden`, 'a hold that selects text in a field offers both');

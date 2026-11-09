@@ -1,5 +1,11 @@
 # Changes
 
+## 0.8.5
+
+- Paste no longer shows a "Text pasted into the browser" notice. The text shows up in the field. A failed paste still says so.
+- The Touch icon in the bar now shows two bent fingers beside the pointing one, so it reads as a hand.
+- After you tap Copy or Paste in the small bar, it no longer pops back up a moment later.
+
 ## 0.8.4
 
 - A tap on the agent browser's address bar now opens your phone's keyboard, with the layout for web addresses. In 0.8.0 to 0.8.3 the viewer opened it only when the page reported that it had lost focus. OpenClaw's own browser tool keeps the page reporting focus, so the keyboard did not open on most installs.
