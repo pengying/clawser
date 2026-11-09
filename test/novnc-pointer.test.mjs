@@ -805,7 +805,7 @@ test('Trackpad: two quick taps land both clicks on one desktop pixel', { skip: n
   const peer = peers.at(-1), before = peer.pointers.length;
   await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
   await pause(100);
-  await touch('touchStart', [[100, 700]]); await touch('touchMove', [[103, 700]]); await touch('touchEnd', []);
+  await touch('touchStart', [[100, 700]]); await touch('touchMove', [[105, 700]]); await touch('touchEnd', []);
   await settle();
   const clicks = peer.pointers.slice(before).filter(e => e.mask === 1);
   assert.equal(clicks.length, 2);
@@ -838,7 +838,7 @@ test('Trackpad: a gesture that began before control was ready does not outlive t
   assert.equal(peer.pointers.slice(before).filter(e => e.mask === 1).length, 0, 'no stray click');
 });
 
-test('Trackpad: a two-finger gesture that moves sends no button in 4a', { skip: noVncSkip }, async t => {
+test('Trackpad: a two-finger gesture that slides sends wheel packets and never a button', { skip: noVncSkip }, async t => {
   const { touch, peers } = await trackpadPhone(t);
   const peer = peers.at(-1), before = peer.pointers.length;
   await touch('touchStart', [[150, 600]]); await touch('touchStart', [[150, 600], [230, 600]]);
@@ -868,21 +868,25 @@ test('Trackpad: tap then drag holds the left button through the slide and releas
   assert.equal(drag.at(-1).mask, 0);
 });
 
-test('Trackpad: a short drag lifted inside 250 ms still drags and does not snap back', { skip: noVncSkip }, async t => {
-  const { evaluate, touch, peers } = await trackpadPhone(t);
-  const peer = peers.at(-1);
+test('Trackpad: a quick 6 px second contact double-clicks at one spot, and a 20 px one drags', { skip: noVncSkip }, async t => {
+  const { touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
   await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
   await pause(80);
-  const first = peer.pointers.length;
-  const start = await evaluate('__viewer.pointer()');
   await touch('touchStart', [[100, 700]]); await touch('touchMove', [[103, 700]]); await touch('touchMove', [[106, 700]]); await touch('touchEnd', []);
   await settle();
-  const drag = peer.pointers.slice(first);
-  assert.deepEqual(maskRun(drag), [1, 0]);
-  const pointer = await evaluate('__viewer.pointer()');
-  assert.ok(pointer.x > start.x, 'the pointer moved');
-  assert.equal(drag.at(-1).x, Math.floor(pointer.x), 'the button came up at the moved position');
-  assert.equal(drag.find(e => e.mask === 1).x, Math.floor(start.x), 'it went down where the pointer was');
+  const fresh = peer.pointers.slice(before), presses = fresh.filter(e => e.mask === 1);
+  assert.equal(presses.length, 2, 'two clicks');
+  assert.deepEqual([presses[0].x, presses[0].y], [presses[1].x, presses[1].y]);
+  assert.ok(fresh.every(e => e.mask === 0 || e.mask === 1) && maskRun(fresh).join() === '1,0,1,0', 'no moves while pressed');
+  await pause(600);
+  const second = peer.pointers.length;
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await pause(80);
+  await touch('touchStart', [[100, 700]]); await touch('touchMove', [[120, 700]]); await touch('touchMove', [[140, 700]]); await touch('touchEnd', []);
+  await settle();
+  const drag = peer.pointers.slice(second);
+  assert.ok(drag.filter(e => e.mask === 1).length >= 2 && new Set(drag.filter(e => e.mask === 1).map(e => e.x)).size >= 2, 'the 20 px contact dragged');
 });
 
 test('Trackpad: a held drag is released by pinch, a hidden page, switching to Touch, Done, and a dropped connection.', { skip: noVncSkip }, async t => {
@@ -922,6 +926,8 @@ test('Trackpad: two fingers sliding together scroll at the pointer without press
   await settle();
   const fresh = peer.pointers.slice(before);
   assert.ok(fresh.some(e => e.mask & 0x78), 'wheel events reached the desktop');
+  const at = await evaluate('__viewer.pointer()');
+  assert.ok(fresh.filter(e => e.mask & 0x78).every(e => Math.abs(e.x - Math.floor(at.x)) <= 1 && Math.abs(e.y - Math.floor(at.y)) <= 1), 'wheel lands at the pointer');
   assert.ok(fresh.every(e => (e.mask & 7) === 0), 'no button');
   assert.equal(await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`), scale);
 });
@@ -936,11 +942,27 @@ test('Trackpad: a pinch zooms the view as in Touch.', { skip: noVncSkip }, async
   assert.ok(await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`) > scale);
 });
 
+test('Trackpad: a wide pinch with one finger moving inward zooms and sends no wheel', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  const scale = await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`);
+  await touch('touchStart', [[50, 500]]); await touch('touchStart', [[50, 500], [250, 500]]);
+  for (let x = 246; x >= 186; x -= 4) await touch('touchMove', [[50, 500], [x, 500]]);
+  await touch('touchEnd', []);
+  await settle();
+  assert.notEqual(await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`), scale);
+  assert.ok(peer.pointers.slice(before).every(e => !(e.mask & 0x78)), 'no wheel');
+});
+
 test('Trackpad: the pointer is pulled back on screen after a resize.', { skip: noVncSkip }, async t => {
   const { evaluate, touch, cdp } = await trackpadPhone(t);
-  for (let n = 0; n < 6; n++) { await touch('touchStart', [[50, 600]]); await touch('touchMove', [[150, 600]]); await touch('touchMove', [[250, 600]]); await touch('touchMove', [[350, 600]]); await touch('touchEnd', []); await pause(50); }
+  await evaluate('__viewer.zoomTo(1)');
+  await settle();
+  for (let n = 0; n < 8; n++) { await touch('touchStart', [[50, 600]]); await touch('touchMove', [[150, 600]]); await touch('touchMove', [[250, 600]]); await touch('touchMove', [[350, 600]]); await touch('touchEnd', []); await pause(50); }
   await cdp.send('Emulation.setDeviceMetricsOverride', { width: 300, height: 844, deviceScaleFactor: 2, mobile: true });
   await settle();
-  assert.ok(await evaluate(`document.querySelector('#pointer').getBoundingClientRect().left < innerWidth`));
+  const r = await evaluate(`(() => { const r = document.querySelector('#pointer').getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, w: innerWidth, h: innerHeight }; })()`);
+  // The hotspot is 1.5 px inside the glyph; at the far edge of the desktop the arrow body may overhang, so the hotspot must be on screen.
+  assert.ok(r.left + 1.5 >= 0 && r.left + 1.5 < r.w && r.top + 1.5 >= 0 && r.top + 1.5 < r.h, 'pointer hotspot inside the window: ' + JSON.stringify(r));
   assert.ok((await evaluate('__viewer.pointer()')).x <= width - 1);
 });

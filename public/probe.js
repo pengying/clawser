@@ -326,8 +326,8 @@ function zoomTo(scale, anchor) {
 document.getElementById('zoom-toggle').addEventListener('click', () => zoomTo(zoomMode === 'fit' ? 1 : 'fit'));
 document.getElementById('zoom-in').addEventListener('click', () => zoomTo(displayScale * 1.25));
 document.getElementById('zoom-out').addEventListener('click', () => zoomTo(displayScale / 1.25));
-new ResizeObserver(() => updateDisplay()).observe(viewport);
-new MutationObserver(() => updateDisplay()).observe(screen, { childList: true, subtree: true, attributes: true, attributeFilter: ['width', 'height'] });
+new ResizeObserver(() => { updateDisplay(); clampPointer(); }).observe(viewport);
+new MutationObserver(() => { updateDisplay(); clampPointer(); }).observe(screen, { childList: true, subtree: true, attributes: true, attributeFilter: ['width', 'height'] });
 
 function visibleBounds() {
   const visual = window.visualViewport;
@@ -708,12 +708,13 @@ function clampPointer() {
   if (!pointer || !framebufferSize()) return;
   pointer = movePointer(pointer, { dx: 0, dy: 0 }, displayScale, framebufferSize());
   drawPointer();
+  followView();
 }
 window.addEventListener('resize', clampPointer);
 window.visualViewport?.addEventListener('resize', clampPointer);
 function sendButton(x, y, button, down) {
   const buttons = button === 2 ? 2 : 1;
-  // On a dropped connection noVNC may already have removed the canvas; the release must still go out.
+  // On a dropped connection the canvas may be gone. The mouseup then only clears noVNC's capture; x11vnc releases the button on the next control session's first mask-0 event.
   const at = canvasEl() ? toScreen({ x, y }) : { x: 0, y: 0 };
   if (down) canvasEl().dispatchEvent(new PointerEvent('mousedown', mouseOptions(at.x, at.y, buttons, button)));
   // Route up through window so noVNC also removes its capture overlay.
@@ -727,7 +728,7 @@ function movePointerTo(x, y, buttons = 0) {
   canvasEl().dispatchEvent(new PointerEvent('mousemove', mouseOptions(at.x, at.y, buttons)));
 }
 
-const padPinchChange = 0.2;
+const padDecideSlop = 8, padDragSlop = 8, padDragMs = 250;
 const padTapMs = 250, padDoubleMs = 350, padMoveSlop = 4, padTapSlop = 8, padTwoSlop = 10;
 let lastPadTap;
 function trackpadTouch(type, touches) {
@@ -742,7 +743,10 @@ function trackpadTouch(type, touches) {
       padGesture.last = { x: touches[0].clientX, y: touches[0].clientY, at: now };
     }
     if (touches.length >= 2) {
-      if (!padGesture.two) { padGesture.distance = touchDistance(touches); padGesture.mid = midpoint(touches); padGesture.mid0 = padGesture.mid; }
+      // A finger that lands again restarts the midpoint, so the slide never jumps.
+      if (!padGesture.mode) { padGesture.distance = touchDistance(touches); padGesture.mid0 = midpoint(touches); }
+      padGesture.mid = midpoint(touches);
+      padGesture.last = { x: touches[0].clientX, y: touches[0].clientY, at: now };
       padGesture.two = true; lastPadTap = undefined;
     }
     for (const t of touches) if (!padGesture.starts.has(t.identifier)) padGesture.starts.set(t.identifier, { x: t.clientX, y: t.clientY });
@@ -755,15 +759,18 @@ function trackpadTouch(type, touches) {
       const s = gesture.starts.get(t.identifier);
       if (s) gesture.travel = Math.max(gesture.travel, Math.hypot(t.clientX - s.x, t.clientY - s.y));
     }
-    if (gesture.two) {
+    if (gesture.two && (touches.length >= 2 || !gesture.held)) {
       if (touches.length < 2 || !gesture.distance) return;
-      const mid = midpoint(touches), change = Math.abs(touchDistance(touches) / Math.max(1, gesture.distance) - 1);
-      // Slide versus pinch is settled once per gesture. A held drag can still become a pinch, but never a slide.
-      if (!gesture.mode && change >= padPinchChange) gesture.mode = 'pinch';
-      else if (!gesture.mode && !gesture.held && Math.hypot(mid.x - gesture.mid0.x, mid.y - gesture.mid0.y) > padTwoSlop) {
-        const at = toScreen(pointer);
-        gesture.scroll = { canvas: canvasEl(), x: at.x, y: at.y, wheelX: gesture.mid0.x - gesture.mid.x, wheelY: gesture.mid0.y - gesture.mid.y, scrolled: false };
-        gesture.mode = 'slide';
+      const mid = midpoint(touches), delta = Math.abs(touchDistance(touches) - gesture.distance);
+      const travel = Math.hypot(mid.x - gesture.mid0.x, mid.y - gesture.mid0.y);
+      // Decided once, the first time spread or midpoint travel passes a few px: spread wins ties. A held drag never slides.
+      if (!gesture.mode && Math.max(delta, travel) > padDecideSlop) {
+        if (delta >= travel) gesture.mode = 'pinch';
+        else if (!gesture.held) {
+          const at = toScreen(pointer);
+          gesture.scroll = { canvas: canvasEl(), x: at.x, y: at.y, wheelX: gesture.mid0.x - gesture.mid.x, wheelY: gesture.mid0.y - gesture.mid.y, scrolled: false };
+          gesture.mode = 'slide';
+        }
       }
       if (gesture.mode === 'pinch') {
         releasePad(gesture);
@@ -777,15 +784,28 @@ function trackpadTouch(type, touches) {
         scrollTouch(gesture.scroll);
       }
       gesture.mid = mid;
+      gesture.last = { x: touches[0].clientX, y: touches[0].clientY, at: now };
       return;
     }
     const t = touches[0], dx = t.clientX - gesture.last.x, dy = t.clientY - gesture.last.y, dt = now - gesture.last.at;
     gesture.last = { x: t.clientX, y: t.clientY, at: now };
     const s = gesture.starts.get(t.identifier);
-    if (!gesture.moved && s && Math.hypot(t.clientX - s.x, t.clientY - s.y) > padMoveSlop) {
+    if (gesture.chained && !gesture.held) {
+      // A contact right after a tap stays undecided: nothing moves and nothing is sent until it is clearly a drag.
+      gesture.sumX = (gesture.sumX || 0) + dx; gesture.sumY = (gesture.sumY || 0) + dy;
+      const travel = s ? Math.hypot(t.clientX - s.x, t.clientY - s.y) : 0;
+      if (!(travel > padDragSlop || (travel > padMoveSlop && now - gesture.at >= padDragMs))) return;
       gesture.moved = true;
-      if (gesture.chained && controlReady && !accessEnded) { sendButton(pointer.x, pointer.y, 0, true); gesture.held = true; }
+      lastPadTap = undefined;
+      if (!controlReady || accessEnded) return;
+      sendButton(pointer.x, pointer.y, 0, true);
+      gesture.held = true;
+      const next = movePointer(pointer, accelerate(gesture.sumX, gesture.sumY, now - gesture.at), displayScale, framebufferSize());
+      movePointerTo(next.x, next.y, 1);
+      followView();
+      return;
     }
+    if (!gesture.moved && s && Math.hypot(t.clientX - s.x, t.clientY - s.y) > padMoveSlop) gesture.moved = true;
     if (gesture.moved) {
       lastPadTap = undefined;
       const next = movePointer(pointer, accelerate(dx, dy, dt), displayScale, framebufferSize());
@@ -794,7 +814,12 @@ function trackpadTouch(type, touches) {
     }
     return;
   }
-  if (touches.length) return;
+  if (touches.length) {
+    // The remaining finger carries on from where it is, with no jump.
+    gesture.last = { x: touches[0].clientX, y: touches[0].clientY, at: now };
+    if (touches.length >= 2) gesture.mid = midpoint(touches);
+    return;
+  }
   padGesture = undefined;
   if (gesture.held) {
     releasePad(gesture);
@@ -802,9 +827,8 @@ function trackpadTouch(type, touches) {
     if (controlReady && !accessEnded) checkFocusAfterTap(0, { keyboard: false, offer: { x: at.x, y: at.y, touch: touchCount } });
     return;
   }
-  // A short tap-then-drag is still a drag: its pointer stays where the finger took it.
   if (gesture.chained && gesture.moved) return;
-  if (now - gesture.at > padTapMs) return;
+  if ((!gesture.chained || gesture.two) && now - gesture.at > padTapMs) return;
   if (gesture.two) {
     if (gesture.travel > padTwoSlop) return;
     sendButton(pointer.x, pointer.y, 2, true);
@@ -827,12 +851,12 @@ function releasePad(gesture) {
   gesture.held = false;
   sendButton(pointer.x, pointer.y, 0, false);
 }
-// When zoomed past Fit the view scrolls to keep the pointer 40 px inside the area below the bar.
+// When zoomed past Fit the view scrolls to keep the pointer 40 px inside the visible area below the bar.
 function followView() {
   const size = framebufferSize();
-  if (!size || !(displayScale > fitScale(size) + 0.001)) return;
-  const top = barHidden() ? 0 : bar.getBoundingClientRect().bottom;
-  const { dx, dy } = followPointer(toScreen(pointer), { left: 0, top, width: innerWidth, height: innerHeight - top }, 40);
+  if (!pointer || !size || !(displayScale > fitScale(size) + 0.001)) return;
+  const b = visibleBounds(), top = Math.max(b.top, barHidden() ? 0 : bar.getBoundingClientRect().bottom);
+  const { dx, dy } = followPointer(toScreen(pointer), { left: b.left, top, width: b.width, height: b.top + b.height - top }, 40);
   if (!dx && !dy) return;
   viewport.scrollLeft += dx;
   viewport.scrollTop += dy;
@@ -921,7 +945,7 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
     hideQuickActions();
     // While the sheet is open a tap on the page only closes it. The whole gesture is swallowed.
     if (touchGesture?.swallowed) return;
-    if (sheetOpen() && !touchGesture) { closeSheet(); touchGesture = { swallowed: true }; return; }
+    if (sheetOpen() && !touchGesture && !padGesture) { closeSheet(); touchGesture = { swallowed: true }; return; }
     if (padGesture || (!touchGesture && inputMode === 'trackpad' && controlReady && !accessEnded)) return trackpadTouch(type, touches);
     if (touches.length >= 2) beginPinch(touches);
     else if (!touchGesture) {
