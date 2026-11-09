@@ -117,6 +117,40 @@ test('tunnel failure retires the viewer while keeping the persistent browser',as
   assert.equal(status.reason,'tunnel_outage');assert.equal(status.inputFenced,true);assert.equal(status.resumeAllowed,true);assert.deepEqual(events,['watch','fence']);
 });
 
+function countingTransport(ensure=async()=>'https://example.test') {
+  const ports=[];
+  return {ports,on(){},ensure:async port=>{ports.push(port);return ensure(port);},close:async()=>{}};
+}
+const settle=()=>new Promise(resolve=>setTimeout(resolve,50));
+
+test('the controller starts the public tunnel when it starts, so the first link does not wait for it',async t=>{
+  const transport=countingTransport();
+  const{controller:c}=await setup(t,{controller:{transport}});
+  await settle();
+  assert.deepEqual(transport.ports,[new URL(c.gateway.localUrl).port*1]);
+});
+
+test('a dropped tunnel is started again in the background',async t=>{
+  const {EventEmitter}=await import('node:events');const transport=Object.assign(new EventEmitter(),countingTransport());
+  delete transport.on;
+  await setup(t,{controller:{transport,transportRewarmMs:0}});
+  await settle();
+  transport.emit('failure',new Error('owned tunnel exited'));
+  await settle();
+  assert.equal(transport.ports.length,2);
+});
+
+test('a failed tunnel warm-up is not retried in the background, and the next link starts it',async t=>{
+  let fail=true;
+  const transport=countingTransport(async()=>{if(fail)throw new Error('offline');return 'https://example.test';});
+  const{controller:c}=await setup(t,{controller:{transport,transportRewarmMs:0}});
+  await settle();
+  assert.equal(transport.ports.length,1);
+  fail=false;
+  await c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30});
+  assert.equal(transport.ports.length,2);
+});
+
 async function viewerClient(t,controller,lease) {
   const {Duplex}=await import('node:stream');
   const {WebSocket}=await import('ws');

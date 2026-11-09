@@ -73,8 +73,12 @@ and follow its activation guidance.
 OpenClaw puts each Git tag in its own folder. Clawser's user services point at
 that folder, so rerun setup after every upgrade. See [Upgrade](#upgrade).
 
-Check the [ClawHub package page](https://clawhub.ai/pengying/plugins/clawser)
-for approved registry versions. ClawHub may lag GitHub.
+ClawHub carries the same releases after its scan approves them. To install from
+ClawHub instead, run `openclaw plugins install @pengying/clawser
+--accept-capabilities`, or ask the agent to install the ClawHub plugin from your
+owner chat. Setup and the host packages stay operator steps either way. Check
+the [ClawHub package page](https://clawhub.ai/pengying/plugins/clawser) for
+approved versions.
 
 ## Choose the agent's browser
 
@@ -617,8 +621,8 @@ own setup receipt and is not an adoption tool for manual installations.
   setup as root.
 - **Port, configuration or ownership conflict:** compare options and receipts.
   Preserve resources and choose a separate state directory for a new installation.
-- **Tunnel not ready:** check DNS/outbound HTTPS. First-link startup allows up to
-  90 seconds. Never expose CDP/VNC or the Gateway as a replacement endpoint.
+- **Tunnel not ready:** check DNS/outbound HTTPS. The controller starts the
+  tunnel when it starts, and a cold start allows up to 90 seconds. Never expose CDP/VNC or the Gateway as a replacement endpoint.
 - **Recovery required or uncertain input:** keep automation paused. Inspect the
   original browser/controller and follow the reported recovery guidance. Do not
   retry/replay input, clear ledgers, bypass the gate or treat another link as

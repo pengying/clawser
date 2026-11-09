@@ -1,6 +1,6 @@
 ---
 name: browser-handoff
-description: Use when an owner-authorized browser task needs manual CAPTCHA, password, 2FA, consent, sensitive form input, or human judgment.
+description: Use when an owner-authorized browser task hits a CAPTCHA, login, 2FA, consent, sensitive form step or human judgment call. Work the page yourself first; a handoff link is the last resort.
 metadata: { "openclaw": { "os": ["linux"] } }
 ---
 
@@ -21,7 +21,22 @@ cannot establish it. Do not disclose unrelated tabs.
 
 ## Do everything you can first
 
-A handoff link is for the one step only the owner can do. Before creating one:
+A handoff link is a last resort for the one step only the owner can do. Most
+obstacles are not that step. Work the page yourself first:
+
+- Take a fresh snapshot and read what is actually on screen.
+- Close cookie banners, popups and promos. Scroll to find hidden buttons.
+- If a click or input does nothing, wait for the page to settle, then retry
+  with another selector, the keyboard, or a different route to the same goal.
+- Reload once if the page looks broken, or go back and try another path the
+  site offers. Never reload, go back or click again after a payment or other
+  final submit; check the result instead.
+- An error message is not a reason to hand off. Read it and correct what you
+  entered, using only details the owner gave you.
+
+Hand off only when the page needs something you cannot do or must not do. When
+you do, call `action=tabs` and then `action=create` without extra steps, so the
+owner gets the link quickly. Before creating one:
 
 1. Check that the page is on the site the owner asked you to use. If the
    address differs, stop and ask.
