@@ -567,8 +567,8 @@ async function phone(t, focus, options = {}) {
       left: r.left, right: r.right, top: r.top, bottom: r.bottom, height: r.height, width: r.width }; })()`);
   return { ...ctx, errors, touch, tap, keyboard, press: selector => press(ctx, selector), shown, point, hold, doubleTap, pill };
 }
-async function trackpadPhone(t) {
-  const ctx = await phone(t, undefined);
+async function trackpadPhone(t, focus) {
+  const ctx = await phone(t, focus);
   await ctx.evaluate("__viewer.setInputMode('trackpad')");
   return ctx;
 }
@@ -580,6 +580,8 @@ test('the ⋯ sheet holds zoom, Copy and Paste as icons, and a tap on the page o
   await evaluate('__viewer.showBar()');
   await press('#more');
   assert.equal(await evaluate(`document.querySelector('#more').getAttribute('aria-expanded')`), 'true');
+  assert.equal(await evaluate(`document.querySelector('#more').hasAttribute('aria-pressed')`), false, '⋯ opens a sheet, so it says expanded and not pressed');
+  assert.equal(await evaluate(`getComputedStyle(document.querySelector('#more')).backgroundColor`), 'rgba(255, 255, 255, 0.14)', 'an open sheet still shows on the ⋯ button');
   const sizes = await evaluate(`[...document.querySelectorAll('#more-sheet button')].map(b => { const r = b.getBoundingClientRect(); return { label: b.getAttribute('aria-label'), w: r.width, h: r.height }; })`);
   assert.deepEqual(sizes.map(s => s.label), ['Zoom out', 'Zoom in', 'Actual size', 'Copy', 'Paste']);
   assert.ok(sizes.every(s => s.w >= 44 && s.h >= 44), 'every sheet button is a full finger target');
@@ -815,6 +817,81 @@ test('Trackpad: two quick taps land both clicks on one desktop pixel', { skip: n
   const clicks = peer.pointers.slice(before).filter(e => e.mask === 1);
   assert.equal(clicks.length, 2);
   assert.deepEqual([clicks[0].x, clicks[0].y], [clicks[1].x, clicks[1].y]);
+});
+
+test('Trackpad: a second contact that lands soon after a tap but lifts late still double-clicks and offers Copy', { skip: noVncSkip }, async t => {
+  const focus = { answer: { kind: 'none', selected: true }, requests: 0 };
+  const { touch, peers, waitFor } = await trackpadPhone(t, focus);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await pause(100);
+  await touch('touchStart', [[100, 700]]); await pause(400); await touch('touchEnd', []);
+  await settle();
+  const clicks = peer.pointers.slice(before).filter(e => e.mask === 1);
+  assert.equal(clicks.length, 2, 'two clicks');
+  assert.deepEqual([clicks[0].x, clicks[0].y], [clicks[1].x, clicks[1].y], 'both at one spot');
+  await waitFor(`!document.querySelector('#quick-actions').hidden`, 'the double click offers Copy');
+});
+
+test('Trackpad: a finger resting on the bar does not turn a tap on the page into a two-finger tap', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers } = await trackpadPhone(t);
+  await evaluate('__viewer.showBar()');
+  await settle();
+  const [mx, my] = await evaluate(`(() => { const a = document.querySelector('#bar-status').getBoundingClientRect(), c = document.querySelector('#input-mode').getBoundingClientRect(), row = document.querySelector('.bar-row').getBoundingClientRect(); return [(a.right + c.left) / 2, row.top + row.height / 2]; })()`);
+  assert.equal(await evaluate(`document.elementFromPoint(${mx}, ${my}).closest('#bar') !== null`), true, `the point (${mx}, ${my}) is on the bar`);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  await touch('touchStart', [[mx, my]]);
+  await touch('touchStart', [[mx, my], [100, 700]]);
+  // The page finger lifts while the bar finger stays down, then the bar finger lifts.
+  await touch('touchMove', [[mx, my]]);
+  await touch('touchEnd', []);
+  await settle();
+  const fresh = peer.pointers.slice(before);
+  assert.equal(fresh.filter(e => e.mask === 1).length, 1, 'one left click: ' + JSON.stringify(fresh.map(e => e.mask)));
+  assert.ok(fresh.every(e => !(e.mask & 4)), 'no right click');
+});
+
+test('Trackpad: turning the phone releases a held drag', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers, cdp } = await trackpadPhone(t);
+  const peer = peers.at(-1);
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await pause(80);
+  await touch('touchStart', [[100, 700]]); await touch('touchMove', [[130, 700]]);
+  await settle();
+  assert.equal(peer.pointers.at(-1).mask, 1, 'the button is held');
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 844, height: 390, deviceScaleFactor: 2, mobile: true });
+  await settle();
+  assert.equal(peer.pointers.at(-1).mask, 0, 'the turn released the button');
+  assert.equal(await evaluate('document.captureElement'), null, 'noVNC holds no capture');
+  assert.equal((await evaluate('__viewer.gestures()')).pad, false);
+  await touch('touchEnd', []);
+  await settle();
+  assert.equal(peer.pointers.at(-1).mask, 0, 'the lift afterwards presses nothing');
+});
+
+test('Trackpad: zooming from the sheet keeps the pointer in view', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, press } = await trackpadPhone(t);
+  for (let n = 0; n < 2; n++) { await touch('touchStart', [[50, 600]]); await touch('touchMove', [[150, 600]]); await touch('touchMove', [[250, 600]]); await touch('touchMove', [[350, 600]]); await touch('touchEnd', []); await pause(50); }
+  assert.ok((await evaluate('__viewer.pointer()')).x > 1200, 'the pointer is at the right edge of the remote screen');
+  // Let the bar finish sliding in before pressing its buttons.
+  await evaluate('__viewer.showBar()');
+  await settle();
+  await press('#more');
+  await settle();
+  await press('#zoom-toggle');
+  await settle();
+  const r = await evaluate(`(() => { const r = document.querySelector('#pointer').getBoundingClientRect(); return { left: r.left, top: r.top, w: innerWidth, h: innerHeight, scale: document.querySelector('#zoom-level').dataset.scale }; })()`);
+  assert.equal(r.scale, '1', 'the toggle zoomed to 100%');
+  assert.ok(r.left + 1.5 >= 0 && r.left + 1.5 < r.w && r.top + 1.5 >= 0 && r.top + 1.5 < r.h, 'pointer hotspot inside the window: ' + JSON.stringify(r));
+});
+
+test('Trackpad: the tab brings the bar back with focus on the checked mode', { skip: noVncSkip }, async t => {
+  const { evaluate, press } = await trackpadPhone(t);
+  await evaluate('__viewer.hideBar()');
+  await press('#bar-tab');
+  await settle();
+  assert.equal(await evaluate('__viewer.barHidden()'), false);
+  assert.equal(await evaluate('document.activeElement?.id'), 'mode-trackpad');
 });
 
 test('Trackpad: the pointer shows only in Trackpad mode while in control', { skip: noVncSkip }, async t => {

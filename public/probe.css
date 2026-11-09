@@ -10,7 +10,9 @@ button:focus-visible,textarea:focus-visible{outline:3px solid #74c6ff;outline-of
 #screen{position:absolute;inset:0;width:100%;height:100%;overflow:hidden;touch-action:none}
 /* noVNC alone owns canvas dimensions and its matching pointer-input scale. */
 #pointer{position:fixed;z-index:3;left:0;top:0;width:15px;height:21px;pointer-events:none}
-#bar{--pad-left:max(14px,var(--safe-left));--pad-right:max(10px,var(--safe-right));position:fixed;z-index:5;top:0;left:0;right:0;padding:calc(4px + var(--safe-top)) var(--pad-right) 4px var(--pad-left);border:1px solid rgba(255,255,255,.08);border-top:0;border-radius:0 0 20px 20px;background:rgba(18,26,34,.88);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);box-shadow:0 6px 20px rgba(0,0,0,.35);color:#e9eef2;transition:transform .22s ease}
+/* A pinch that starts on the bar or the tab must not zoom the whole page. The tab allows pans, which never move this page,
+   because with no pan at all Chrome drops the click of a tap that follows a pull, whose touchend the viewer cancels. */
+#bar{--pad-left:max(14px,var(--safe-left));--pad-right:max(10px,var(--safe-right));position:fixed;z-index:5;top:0;left:0;right:0;padding:calc(4px + var(--safe-top)) var(--pad-right) 4px var(--pad-left);border:1px solid rgba(255,255,255,.08);border-top:0;border-radius:0 0 20px 20px;background:rgba(18,26,34,.88);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);box-shadow:0 6px 20px rgba(0,0,0,.35);color:#e9eef2;transition:transform .22s ease;touch-action:none}
 #bar.bar-hidden{transform:translateY(-104%);box-shadow:none}
 /* The row spans the whole bar, so its middle column sits on the screen's center line; the side columns keep the bar's insets.
    A side column grows past its equal share only when its buttons need the room, so on a narrow phone, or with a longer
@@ -25,7 +27,7 @@ button:focus-visible,textarea:focus-visible{outline:3px solid #74c6ff;outline-of
 /* Bar buttons keep a 44px tap area and draw their smaller shape inside it. The negative margin keeps the row 40px tall. */
 #bar .ib,#bar .txt{margin:-2px 0}
 #bar .ib{display:flex;align-items:center;justify-content:center;width:44px;height:44px;padding:5px 4px;border:0;border-radius:22px;background:transparent;background-clip:content-box;color:#dfe7ec}
-#bar .ib[aria-pressed="true"]{background-color:rgba(255,255,255,.14)}
+#bar .ib[aria-pressed="true"],#bar .ib[aria-expanded="true"]{background-color:rgba(255,255,255,.14)}
 #bar .txt{height:44px;padding:0 13px;border:6px solid transparent;border-left:0;border-right:0;border-radius:16px/22px;background:rgba(255,255,255,.1) padding-box;color:#e9eef2;white-space:nowrap}
 #bar .go{padding:0 18px;background-color:#54d6ad;color:#06231a}
 /* Below 412px the in-control row runs out of room; the text buttons tighten first so the switch can stay centered. */
@@ -35,7 +37,7 @@ button:focus-visible,textarea:focus-visible{outline:3px solid #74c6ff;outline-of
    the centered column fits beside the keyboard, more and Done buttons at 390px. */
 #bar .seg-btn{display:flex;align-items:center;justify-content:center;width:44px;height:44px;margin:-2px -1px;padding:0;border:7px solid transparent;border-left:0;border-right:0;border-radius:15px/22px;background:transparent padding-box;color:#c9d6df}
 #bar .seg-btn[aria-checked="true"]{background-color:#54d6ad;color:#06231a}
-#bar-tab{position:fixed;z-index:4;top:0;left:50%;transform:translateX(-50%);width:48px;height:calc(44px + var(--safe-top));padding:0;border:0;border-radius:0 0 11px 11px;background:transparent;color:#dfe7ec}
+#bar-tab{position:fixed;z-index:4;top:0;left:50%;transform:translateX(-50%);width:48px;height:calc(44px + var(--safe-top));padding:0;border:0;border-radius:0 0 11px 11px;background:transparent;color:#dfe7ec;touch-action:pan-x pan-y}
 .tab-shape{position:absolute;top:0;left:0;right:0;display:flex;align-items:center;justify-content:center;height:calc(18px + var(--safe-top));padding-top:var(--safe-top);border:1px solid rgba(255,255,255,.1);border-top:0;border-radius:0 0 11px 11px;background:rgba(18,26,34,.88);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
 .tab-shape .ico{width:14px;height:14px}
 .actions{display:flex;gap:6px;margin-bottom:6px;align-items:center}

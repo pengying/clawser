@@ -333,9 +333,14 @@ function zoomTo(scale, anchor) {
   updateDisplay(anchor);
 }
 
-document.getElementById('zoom-toggle').addEventListener('click', () => zoomTo(zoomMode === 'fit' ? 1 : 'fit'));
-document.getElementById('zoom-in').addEventListener('click', () => zoomTo(displayScale * 1.25));
-document.getElementById('zoom-out').addEventListener('click', () => zoomTo(displayScale / 1.25));
+// In Trackpad the view then scrolls to keep the pointer in sight, as it does while the pointer moves.
+function zoomFromSheet(scale) {
+  zoomTo(scale);
+  if (inputMode === 'trackpad') followView();
+}
+document.getElementById('zoom-toggle').addEventListener('click', () => zoomFromSheet(zoomMode === 'fit' ? 1 : 'fit'));
+document.getElementById('zoom-in').addEventListener('click', () => zoomFromSheet(displayScale * 1.25));
+document.getElementById('zoom-out').addEventListener('click', () => zoomFromSheet(displayScale / 1.25));
 new ResizeObserver(() => { updateDisplay(); clampPointer(); }).observe(viewport);
 new MutationObserver(() => { updateDisplay(); clampPointer(); }).observe(screen, { childList: true, subtree: true, attributes: true, attributeFilter: ['width', 'height'] });
 
@@ -371,12 +376,10 @@ function openSheet() {
   showBar();
   moreSheet.hidden = false;
   moreButton.setAttribute('aria-expanded', 'true');
-  moreButton.setAttribute('aria-pressed', 'true');
 }
 function closeSheet() {
   moreSheet.hidden = true;
   moreButton.setAttribute('aria-expanded', 'false');
-  moreButton.setAttribute('aria-pressed', 'false');
 }
 moreButton.addEventListener('click', () => (sheetOpen() ? closeSheet() : openSheet()));
 function setHint(mode) {
@@ -386,9 +389,11 @@ function setHint(mode) {
 }
 // Status pop-ups sit just under the bar's real bottom edge, which moves when the sheet opens.
 new ResizeObserver(() => document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px')).observe(bar);
+// The mode switch is one stop in the focus order, on its checked segment, so the tab lands there and never on the other one.
 barTab.addEventListener('click', () => {
   showBar();
-  [...bar.querySelectorAll('button')].find(button => !button.disabled && button.getClientRects().length)?.focus();
+  [...bar.querySelectorAll('button')].find(button => !button.disabled && button.getClientRects().length &&
+    !button.matches('[role=radio]:not([aria-checked="true"])'))?.focus();
 });
 // A pull down on the tab shows the bar as well. The touchend then cancels the click, so focus does not jump a second time.
 let tabPull;
@@ -764,11 +769,19 @@ function clampPointer() {
   drawPointer();
   followView();
 }
+// Turning the phone moves everything under the finger, so a gesture in progress ends there and lets go of any button.
+let landscape = innerWidth > innerHeight;
+window.addEventListener('resize', () => {
+  if ((innerWidth > innerHeight) === landscape) return;
+  landscape = !landscape;
+  cancelTouchInput();
+});
 window.addEventListener('resize', clampPointer);
 window.visualViewport?.addEventListener('resize', clampPointer);
 function sendButton(x, y, button, down) {
   const buttons = button === 2 ? 2 : 1;
-  // On a dropped connection the canvas may be gone. The mouseup then only clears noVNC's capture; x11vnc releases the button on the next control session's first mask-0 event.
+  // On a dropped connection the canvas may be gone. The mouseup then only clears noVNC's capture. The desktop button is let go by
+  // the supervisor: retiring the control actor runs xproof.settle, which releases every held key and button.
   const at = canvasEl() ? toScreen({ x, y }) : { x: 0, y: 0 };
   if (down) canvasEl().dispatchEvent(new PointerEvent('mousedown', mouseOptions(at.x, at.y, buttons, button)));
   // Route up through window so noVNC also removes its capture overlay.
@@ -892,7 +905,8 @@ function trackpadTouch(type, touches) {
   if (gesture.travel > padTapSlop) return;
   // A jittery tap clicks where the pointer was when the finger landed.
   if (pointer.x !== gesture.start.x || pointer.y !== gesture.start.y) movePointerTo(gesture.start.x, gesture.start.y);
-  const second = lastPadTap && now - lastPadTap < padDoubleMs;
+  // It landed soon after a tap, so it is the second click of a double click however long it rested.
+  const second = gesture.chained;
   lastPadTap = second ? undefined : now;
   sendButton(pointer.x, pointer.y, 0, true);
   sendButton(pointer.x, pointer.y, 0, false);
@@ -985,15 +999,31 @@ function repeatTapPoint(gesture) {
   return point;
 }
 
+// Fingers whose touchstart landed on the page. One that started on the bar or the tab stays in event.touches
+// while it is down, so gestures read only these and a resting finger on the bar never becomes a second finger.
+const pageTouches = new Set();
+// A held button shows noVNC's capture overlay over everything, so a second finger then lands on it, not the viewport.
+const onPage = target => target instanceof Node && (viewport.contains(target) || target.id === 'noVNC_mouse_capture_elem');
+
 // Capture touch before noVNC's gesture recognizer. Listen at window because
 // native dragging creates a capture overlay outside the viewport, and a second
 // finger can start on that overlay. Ordinary desktop mouse events are untouched.
 for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) window.addEventListener(type, (event) => {
+  const changed = [...event.changedTouches];
+  const ours = changed.filter(t => (type === 'touchstart' ? onPage(t.target) : pageTouches.has(t.identifier)));
+  if (type === 'touchstart') {
+    // Phones reuse touch ids, so drop any whose end never arrived before counting the new finger.
+    const down = new Set([...event.touches].map(t => t.identifier));
+    for (const id of pageTouches) if (!down.has(id)) pageTouches.delete(id);
+    for (const t of ours) pageTouches.add(t.identifier);
+  } else if (type !== 'touchmove') for (const t of changed) pageTouches.delete(t.identifier);
   if (!touchGesture && !padGesture && !event.composedPath().includes(viewport)) return;
   event.preventDefault();
   event.stopImmediatePropagation();
-  const touches = event.touches;
   if (type === 'touchcancel') { cancelTouchInput(); return; }
+  // A finger that started on the bar or the tab neither starts, joins nor ends a page gesture.
+  if (!ours.length) return;
+  const touches = [...event.touches].filter(t => pageTouches.has(t.identifier));
   if (type === 'touchstart') {
     touchCount++;
     hideQuickActions();
