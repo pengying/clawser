@@ -124,14 +124,17 @@ browser whose contents you intend to share.
 
 Once you take control, a bar across the top of the noVNC viewer holds the
 controls. Tap the page to tuck the bar away, and tap the small tab at the top
-to bring it back. It comes back on its own if control ends. An eye icon shows
-whether you are watching or in control, and a pointer icon shows the input mode.
-Touch mode works like a phone: tap to click, swipe to scroll, pinch to zoom,
-and touch and hold, then drag, to press and drag. Trackpad mode moves an on-screen
+to bring it back. It comes back on its own if control ends. An amber eye means
+you are watching, and a green pointer means you are in control.
+
+In control, the center of the bar switches between **Touch** and **Trackpad**.
+Touch works like a phone: tap to click, swipe to scroll, pinch to zoom, and
+touch and hold, then drag, to press and drag. Trackpad moves an on-screen
 pointer as you slide one finger. Tap to click at the pointer, and tap with two
-fingers to right-click, for example right-click then Translate, or slide two
-fingers to scroll. Under the
-**⋯** button are zoom and Fit, and Copy and Paste.
+fingers to right-click, for example to open Chrome's menu and choose Translate.
+Tap, then touch and slide, to drag, and slide two fingers to scroll. The phone
+remembers your choice. Under the **⋯** button are zoom, a Fit or 100% toggle,
+and Copy and Paste.
 
 To move text, use **Copy** and **Paste**, as on a phone. Double-tap a word, or
 touch and hold, then drag, to select text. A small Copy bar appears just above

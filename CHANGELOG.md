@@ -2,8 +2,8 @@
 
 ## 0.8.0
 
-- The noVNC viewer now has a top bar. It holds the Take control and Done buttons, an eye icon for watching or control, a pointer icon for the input mode, the keyboard, and a ⋯ button with zoom, Fit, Copy and Paste. It replaces the side Controls tab.
-- There is a new Trackpad mode next to Touch. Slide one finger to move an on-screen pointer, tap to click at the pointer, and tap with two fingers to right-click, for example right-click then Translate. The phone remembers the mode you chose.
+- The noVNC viewer now has a bar built into the top edge of the screen. It replaces the floating panel and the side Controls tab. An amber eye shows you are watching, and a green pointer shows you are in control. Take control sits in the center, with Keyboard, a ⋯ button and Done on the right. Under ⋯ are zoom, a Fit or 100% toggle, Copy and Paste.
+- There is a new Trackpad mode, next to Touch in the center of the bar once you take control. Slide one finger to move an on-screen pointer, and tap to click at the pointer. Tap with two fingers to right-click, for example to open Chrome's menu and choose Translate. Tap, then touch and slide, to hold the button while dragging, and slide two fingers to scroll. The phone remembers the mode you chose.
 - A tap on the page tucks the bar away so the whole browser is in view. That tap still clicks. A small tab at the top brings the bar back.
 - The Drag once button is gone. Touch and hold already presses and drags, so it is no longer needed.
 
