@@ -383,8 +383,9 @@ function closeSheet() {
 }
 moreButton.addEventListener('click', () => (sheetOpen() ? closeSheet() : openSheet()));
 function setHint(mode) {
-  document.getElementById('hint').textContent = mode === 'trackpad'
-    ? 'Slide to move · tap to click · two fingers to right-click or scroll'
+  const mac = /Mac|iPhone|iPad/.test(navigator.userAgentData?.platform ?? navigator.platform);
+  document.getElementById('hint').textContent = usesMouse ? (mac ? '⌘C to copy · ⌘V to paste' : 'Ctrl+C to copy · Ctrl+V to paste')
+    : mode === 'trackpad' ? 'Slide to move · tap to click · two fingers to right-click or scroll'
     : 'Swipe to scroll · pinch to zoom · hold, then drag';
 }
 // Status pop-ups sit just under the bar's real bottom edge, which moves when the sheet opens.
@@ -405,6 +406,10 @@ barTab.addEventListener('touchmove', event => {
 }, { passive: true });
 barTab.addEventListener('touchend', event => { if (tabPull?.done && event.cancelable) event.preventDefault(); tabPull = undefined; }, { passive: false });
 barTab.addEventListener('touchcancel', () => { tabPull = undefined; });
+// A phone or tablet reports a coarse pointer or touch points. Anything else has a mouse and a real keyboard.
+// A laptop with a touch screen counts as touch and keeps the phone controls.
+const usesMouse = !matchMedia('(any-pointer: coarse)').matches && !(navigator.maxTouchPoints > 0);
+if (usesMouse) setHint('touch');
 function setBarState(state) {
   const inControl = state === 'control';
   const badge = document.getElementById('bar-status');
@@ -413,8 +418,8 @@ function setBarState(state) {
   document.getElementById('icon-watching').hidden = inControl;
   document.getElementById('icon-control').hidden = !inControl;
   control.hidden = inControl;
-  document.getElementById('input-mode').hidden = !inControl;
-  document.getElementById('keyboard').hidden = !inControl;
+  document.getElementById('input-mode').hidden = !inControl || usesMouse;
+  document.getElementById('keyboard').hidden = !inControl || usesMouse;
 }
 window.visualViewport?.addEventListener('resize', placeQuickActions);
 window.visualViewport?.addEventListener('scroll', placeQuickActions);
@@ -437,6 +442,49 @@ function sendChord(keysym, code) {
   instance.sendKey(keysym, code);
   instance.sendKey(0xffe3, 'ControlLeft', false);
 }
+
+// noVNC cancels every key on its canvas, which stops the browser's own copy and paste. On a Mac it also sends Cmd
+// as Alt. Cmd or Ctrl with C or V therefore runs the viewer's Copy or Paste instead.
+let shortcutPaste;
+function releaseHeldKeys() {
+  const keyboard = activeConnection?.instance?._keyboard;
+  if (keyboard?._keyDownList) keyboard._allKeysUp();
+}
+window.addEventListener('keydown', (event) => {
+  if (!controlReady || accessEnded || !activeConnection || event.altKey || event.shiftKey) return;
+  if (!(event.ctrlKey || event.metaKey) || (event.ctrlKey && event.metaKey)) return;
+  if (event.code !== 'KeyC' && event.code !== 'KeyV') return;
+  if (event.target !== canvasEl() && !screen.contains(event.target)) return;
+  // The modifier's own keydown already reached the agent's browser. Releasing it keeps the chord clean.
+  releaseHeldKeys();
+  event.stopImmediatePropagation();
+  // Each key repeat would paste or copy again.
+  if (event.repeat) { event.preventDefault(); return; }
+  if (event.code === 'KeyC') { event.preventDefault(); void copyToDevice(); return; }
+  // The default stays, which lets the browser fire its own paste event with this device's clipboard. Safari skips
+  // that event on a page with no editable focus. The timer then falls back to an explicit clipboard read.
+  clearTimeout(shortcutPaste);
+  shortcutPaste = setTimeout(() => { shortcutPaste = undefined; void pasteFromDevice(); }, 150);
+}, true);
+window.addEventListener('keyup', (event) => {
+  if (!(event.ctrlKey || event.metaKey) || (event.code !== 'KeyC' && event.code !== 'KeyV')) return;
+  if (!controlReady || accessEnded || !activeConnection) return;
+  // noVNC never saw the keydown. It gets no keyup either.
+  event.stopImmediatePropagation();
+}, true);
+window.addEventListener('paste', (event) => {
+  if (shortcutPaste === undefined) return;
+  const text = event.clipboardData?.getData('text/plain') ?? '';
+  // An empty paste can mean the browser withheld the text. The explicit read then gets its turn.
+  if (!text) return;
+  clearTimeout(shortcutPaste); shortcutPaste = undefined;
+  event.preventDefault();
+  pasteText(text).catch((error) => {
+    if (accessEnded) return;
+    status.textContent = 'Paste failed: ' + ''.concat(error.message);
+    showClipboard(text, true);
+  });
+}, true);
 
 const clipboardDialog = document.getElementById('clipboard-dialog');
 const clipboardText = document.getElementById('clipboard-text');
@@ -713,6 +761,7 @@ function drawPointer() {
 const MODE_KEY = 'clawser.inputMode', HINT_KEY = 'clawser.trackpadHintShown';
 let modeRestored = false, hintTimer, hintHide;
 function storedMode() {
+  if (usesMouse) return 'touch';
   try { return localStorage.getItem(MODE_KEY) === 'trackpad' ? 'trackpad' : 'touch'; } catch { return 'touch'; }
 }
 function showTrackpadHint() {
@@ -998,6 +1047,13 @@ function repeatTapPoint(gesture) {
   lastTap = repeat ? undefined : { ...point, at: now, view };
   return point;
 }
+
+// The touch path already handled the viewer's own synthetic events and the mouse events a phone fires after a tap.
+viewport.addEventListener('mousedown', (event) => {
+  if (!usesMouse || !event.isTrusted || event.button !== 0) return;
+  if (sheetOpen()) { closeSheet(); event.preventDefault(); event.stopImmediatePropagation(); return; }
+  if (controlReady && !accessEnded && !barHidden()) hideBar();
+}, true);
 
 // Fingers whose touchstart landed on the page. One that started on the bar or the tab stays in event.touches
 // while it is down, so gestures read only these and a resting finger on the bar never becomes a second finger.

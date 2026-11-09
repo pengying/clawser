@@ -57,11 +57,11 @@ The validated host is **Linux x86_64**, **Node.js >=24.16 <25 or >=26.1**, and
 cover 2026.10.4 and 2026.10.7. Other operating systems and ARM hosts are unverified.
 Start your OpenClaw Gateway before setup.
 
-Install the tagged **v0.8.1** release from GitHub. ClawHub availability may lag
+Install the tagged **v0.8.2** release from GitHub. ClawHub availability may lag
 GitHub.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.8.1 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.8.2 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -95,7 +95,7 @@ Finish any open handoffs, then:
 1. Install the new version:
 
    ```sh
-   openclaw plugins install git:github.com/pengying/clawser@v0.8.1 --force --accept-capabilities
+   openclaw plugins install git:github.com/pengying/clawser@v0.8.2 --force --accept-capabilities
    ```
 
 2. Check the plan with `openclaw clawser setup --dry-run`.
@@ -147,6 +147,12 @@ access, a text box opens to copy or paste by hand. Only plain text moves. There
 is no file transfer and no automatic clipboard sync. In the CDP viewer, your
 phone's own paste works in a focused field, but nothing is copied back. Phone
 autofill and passkeys don't transfer to the agent's browser.
+
+On a computer with a mouse, the bar has no Touch / Trackpad switch and no
+Keyboard button. Click the page to close **⋯** or, in control, to tuck the bar
+away. Ctrl+C and Ctrl+V, or ⌘C and ⌘V on a Mac, copy the selection in the
+agent's browser to your computer and paste your computer's clipboard into it.
+Other shortcuts go to the agent's browser as usual.
 
 CAPTCHA, login and form completion are manual human actions. Support varies by
 site and phone. Neither viewer is native video; there are no guarantees about
