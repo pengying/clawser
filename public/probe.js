@@ -1,8 +1,8 @@
+import { accelerate, movePointer, followPointer } from './trackpad.js';
 const screen = document.getElementById('screen');
 const control = document.getElementById('control');
 const done = document.getElementById('done');
 const status = document.getElementById('status');
-const mode = document.getElementById('mode');
 const base = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
 const requestTimeoutMs = 12_000;
 const assetTimeoutMs = 12_000;
@@ -24,7 +24,8 @@ let expiresAt = 0;
 let remoteClipboard = '';
 const viewport = document.getElementById('viewport');
 const stage = document.getElementById('stage');
-const toolbar = document.getElementById('toolbar');
+const bar = document.getElementById('bar');
+const barTab = document.getElementById('bar-tab');
 const keyboardInput = document.getElementById('keyboard-input');
 let zoomMode = 'fit';
 let displayScale = 1;
@@ -80,7 +81,7 @@ async function reconnectWatch() {
   if (reconnecting || accessEnded) return;
   reconnecting = true;
   status.textContent = 'Connection interrupted. Reconnecting in watch mode…';
-  mode.textContent = 'Private watch session';
+  setBarState('watching');
   try {
     for (;;) {
       const config = await watchCredentials(true);
@@ -122,11 +123,13 @@ function openConnection(config) {
     if (connection.retiring || accessEnded) return;
     connected = true;
     status.textContent = config.mode === 'watch' ? 'Watching. Take control to interact.' : 'Control connected.';
-    mode.textContent = config.mode === 'watch' ? 'Private watch session' : 'Private control session';
+    setBarState(config.mode === 'watch' ? 'watching' : 'control');
     control.disabled = config.mode !== 'watch' || config.permission === 'watch';
     controlReady = config.mode !== 'watch';
     updateInputControls();
     updateDisplay();
+    if (!modeRestored) { modeRestored = true; setInputMode(storedMode(), { restore: true }); }
+    if (inputMode === 'trackpad' && !pointer) { placePointer(); drawPointer(); }
     readyResolve();
   }, { once: true });
   instance.addEventListener('clipboard', (event) => {
@@ -139,7 +142,7 @@ function openConnection(config) {
     controlReady = false;
     updateInputControls();
     // Losing control puts Take control and the status line back in reach.
-    if (config.mode !== 'watch') showToolbar();
+    if (config.mode !== 'watch') showBar();
     control.disabled = true;
     disconnectedResolve();
     if (!connected) readyReject(Object.assign(new Error('The VNC connection closed before it became ready'), { closedBeforeReady: true }));
@@ -168,7 +171,7 @@ async function requestCleanup(context = 'Viewer access ended.') {
   }
   done.disabled = true;
   done.textContent = 'Finishing…';
-  showToolbar();
+  showBar();
   cleanupInFlight = (async () => {
     try {
       const result = await post('done');
@@ -231,7 +234,7 @@ control.addEventListener('click', async () => {
     const next = openConnection({ ...config, mode: 'control' });
     await next.ready;
     // Control is what the owner asked for, so give the whole screen to the browser.
-    if (controlReady && !accessEnded && next === activeConnection) collapseToolbar();
+    if (controlReady && !accessEnded && next === activeConnection) { hideBar(); barTab.focus(); }
   } catch (error) {
     try { previous?.instance.disconnect(); } catch {}
     await failAndCleanup(error.message);
@@ -270,10 +273,13 @@ async function bootstrap() {
 void bootstrap();
 
 function updateInputControls() {
-  for (const id of ['keyboard', 'paste', 'drag-once']) document.getElementById(id).disabled = !controlReady || accessEnded;
+  for (const id of ['keyboard', 'paste']) document.getElementById(id).disabled = !controlReady || accessEnded;
   document.getElementById('copy').disabled = !controlReady || accessEnded;
-  if (!controlReady || accessEnded) { cancelTouchInput(); keyboardInput.blur(); }
+  // A gesture belongs to the control state it began in, so any change cancels it.
+  cancelTouchInput();
+  if (!controlReady || accessEnded) keyboardInput.blur();
   updateQuickActions();
+  drawPointer();
 }
 
 function framebufferSize() {
@@ -285,8 +291,16 @@ function fitScale(size) {
   return Math.min(1, viewport.clientWidth / size.width, viewport.clientHeight / size.height);
 }
 
+// The bar's height with the sheet closed. A transform hides the bar, so this is the same whether it is shown or hidden.
+function closedBarHeight() {
+  const sheet = sheetOpen() ? moreSheet.getBoundingClientRect().height + parseFloat(getComputedStyle(moreSheet).marginTop) : 0;
+  return Math.round(bar.getBoundingClientRect().height - sheet);
+}
+
 // Only change the mount dimensions. noVNC's autoscale updates both its display
 // and framebuffer-coordinate conversion; the canvas is never independently zoomed.
+// Past Fit the stage has a fixed band of room above the screen, one closed bar tall, so at the top of the scroll
+// the screen's first row sits just below the bar. Showing, hiding or opening the bar never changes the band.
 function updateDisplay(anchor) {
   const size = framebufferSize();
   if (!size) return;
@@ -298,8 +312,9 @@ function updateDisplay(anchor) {
   };
   displayScale = zoomMode === 'fit' ? fitScale(size) : Math.max(0.1, Math.min(3, Number(zoomMode)));
   const width = size.width * displayScale, height = size.height * displayScale;
-  const stageWidth = Math.max(width, viewport.clientWidth), stageHeight = Math.max(height, viewport.clientHeight);
-  const left = (stageWidth - width) / 2, top = (stageHeight - height) / 2;
+  const room = zoomMode === 'fit' ? 0 : closedBarHeight();
+  const stageWidth = Math.max(width, viewport.clientWidth), stageHeight = Math.max(height + room, viewport.clientHeight);
+  const left = (stageWidth - width) / 2, top = Math.max(room, (stageHeight - height) / 2);
   stage.style.width = stageWidth + 'px';
   stage.style.height = stageHeight + 'px';
   Object.assign(screen.style, { left: left + 'px', top: top + 'px', width: width + 'px', height: height + 'px' });
@@ -307,10 +322,10 @@ function updateDisplay(anchor) {
   viewport.scrollLeft = zoomMode === 'fit' ? 0 : left + pixel.x * displayScale - point.x;
   viewport.scrollTop = zoomMode === 'fit' ? 0 : top + pixel.y * displayScale - point.y;
   const label = document.getElementById('zoom-level');
-  label.value = Math.round(displayScale * 100) + '%';
+  label.value = zoomMode === 'fit' ? 'Fit' : Math.round(displayScale * 100) + '%';
   label.dataset.scale = String(displayScale);
-  document.getElementById('zoom-fit').setAttribute('aria-pressed', String(zoomMode === 'fit'));
-  document.getElementById('zoom-actual').setAttribute('aria-pressed', String(zoomMode === 1));
+  drawPointer();
+  document.getElementById('zoom-toggle').setAttribute('aria-label', zoomMode === 'fit' ? 'Actual size' : 'Fit to screen');
 }
 
 function zoomTo(scale, anchor) {
@@ -318,14 +333,18 @@ function zoomTo(scale, anchor) {
   updateDisplay(anchor);
 }
 
-document.getElementById('zoom-fit').addEventListener('click', () => zoomTo('fit'));
-document.getElementById('zoom-actual').addEventListener('click', () => zoomTo(1));
-document.getElementById('zoom-in').addEventListener('click', () => zoomTo(displayScale * 1.25));
-document.getElementById('zoom-out').addEventListener('click', () => zoomTo(displayScale / 1.25));
-new ResizeObserver(() => { updateDisplay(); keepToolbarVisible(); }).observe(viewport);
-new MutationObserver(() => updateDisplay()).observe(screen, { childList: true, subtree: true, attributes: true, attributeFilter: ['width', 'height'] });
+// In Trackpad the view then scrolls to keep the pointer in sight, as it does while the pointer moves.
+function zoomFromSheet(scale) {
+  zoomTo(scale);
+  if (inputMode === 'trackpad') followView();
+}
+document.getElementById('zoom-toggle').addEventListener('click', () => zoomFromSheet(zoomMode === 'fit' ? 1 : 'fit'));
+document.getElementById('zoom-in').addEventListener('click', () => zoomFromSheet(displayScale * 1.25));
+document.getElementById('zoom-out').addEventListener('click', () => zoomFromSheet(displayScale / 1.25));
+new ResizeObserver(() => { updateDisplay(); clampPointer(); }).observe(viewport);
+new MutationObserver(() => { updateDisplay(); clampPointer(); }).observe(screen, { childList: true, subtree: true, attributes: true, attributeFilter: ['width', 'height'] });
 
-function toolbarBounds() {
+function visibleBounds() {
   const visual = window.visualViewport;
   const style = getComputedStyle(document.documentElement);
   const safe = edge => parseFloat(style.getPropertyValue(`--safe-${edge}`)) || 0;
@@ -334,70 +353,82 @@ function toolbarBounds() {
     height: (visual?.height || innerHeight) - safe('top') - safe('bottom') };
 }
 
-function moveToolbar(left, top) {
-  const bounds = toolbarBounds();
-  toolbar.style.left = Math.max(bounds.left + 8, Math.min(left, bounds.left + bounds.width - toolbar.offsetWidth - 8)) + 'px';
-  toolbar.style.top = Math.max(bounds.top + 8, Math.min(top, bounds.top + bounds.height - toolbar.offsetHeight - 8)) + 'px';
+function barHidden() { return bar.classList.contains('bar-hidden'); }
+// While watching, Take control is the one thing to do, so the bar stays down.
+// A hidden bar is inert: its buttons leave the focus order, and a tap during the slide reaches the tab beneath.
+function hideBar() {
+  if (!controlReady || barHidden()) return;
+  closeSheet();
+  bar.classList.add('bar-hidden');
+  bar.inert = true;
+  barTab.hidden = false;
 }
-
-function keepToolbarVisible() {
-  if (toolbar.hidden) return;
-  const bounds = toolbarBounds();
-  toolbar.style.maxHeight = Math.max(100, bounds.height - 16) + 'px';
-  const rect = toolbar.getBoundingClientRect();
-  moveToolbar(rect.left, rect.top);
-}
-
-const handle = document.getElementById('drag-handle');
-let toolbarDrag;
-handle.addEventListener('pointerdown', (event) => {
-  if (event.button !== 0) return;
-  const rect = toolbar.getBoundingClientRect();
-  toolbarDrag = { x: event.clientX, y: event.clientY, left: rect.left, top: rect.top };
-  handle.setPointerCapture(event.pointerId);
-  event.preventDefault();
-});
-handle.addEventListener('pointermove', (event) => {
-  if (!toolbarDrag) return;
-  moveToolbar(toolbarDrag.left + event.clientX - toolbarDrag.x, toolbarDrag.top + event.clientY - toolbarDrag.y);
-});
-handle.addEventListener('pointerup', () => { toolbarDrag = undefined; });
-handle.addEventListener('pointercancel', () => { toolbarDrag = undefined; });
-handle.addEventListener('keydown', (event) => {
-  const direction = { ArrowLeft: [-20, 0], ArrowRight: [20, 0], ArrowUp: [0, -20], ArrowDown: [0, 20] }[event.key];
-  if (!direction) return;
-  event.preventDefault();
-  const rect = toolbar.getBoundingClientRect();
-  moveToolbar(rect.left + direction[0], rect.top + direction[1]);
-});
-
-function collapseToolbar() {
-  if (toolbar.hidden) return;
-  const restore = document.getElementById('restore');
-  const rect = toolbar.getBoundingClientRect();
-  restore.style.top = Math.max(8, Math.min(rect.top, innerHeight - 52)) + 'px';
-  const right = rect.left + rect.width / 2 > innerWidth / 2;
-  restore.style.left = right ? 'auto' : '0';
-  restore.style.right = right ? '0' : 'auto';
-  restore.style.borderRadius = right ? '12px 0 0 12px' : '0 12px 12px 0';
-  toolbar.hidden = true;
-  restore.hidden = false;
-  restore.focus();
-}
-function showToolbar() {
-  if (!toolbar.hidden) return;
-  toolbar.hidden = false;
-  document.getElementById('restore').hidden = true;
-  keepToolbarVisible();
+function showBar() {
+  if (!barHidden()) return;
+  bar.classList.remove('bar-hidden');
+  bar.inert = false;
+  barTab.hidden = true;
   hideQuickActions();
 }
-document.getElementById('collapse').addEventListener('click', collapseToolbar);
-document.getElementById('restore').addEventListener('click', () => {
-  showToolbar();
-  document.getElementById('collapse').focus();
+const moreButton = document.getElementById('more'), moreSheet = document.getElementById('more-sheet');
+function sheetOpen() { return !moreSheet.hidden; }
+function openSheet() {
+  showBar();
+  moreSheet.hidden = false;
+  moreButton.setAttribute('aria-expanded', 'true');
+}
+function closeSheet() {
+  moreSheet.hidden = true;
+  moreButton.setAttribute('aria-expanded', 'false');
+}
+moreButton.addEventListener('click', () => (sheetOpen() ? closeSheet() : openSheet()));
+function setHint(mode) {
+  document.getElementById('hint').textContent = mode === 'trackpad'
+    ? 'Slide to move · tap to click · two fingers to right-click or scroll'
+    : 'Swipe to scroll · pinch to zoom · hold, then drag';
+}
+// Status pop-ups sit just under the bar's real bottom edge, which moves when the sheet opens.
+new ResizeObserver(() => document.documentElement.style.setProperty('--bar-h', bar.offsetHeight + 'px')).observe(bar);
+// The mode switch is one stop in the focus order, on its checked segment, so the tab lands there and never on the other one.
+barTab.addEventListener('click', () => {
+  showBar();
+  [...bar.querySelectorAll('button')].find(button => !button.disabled && button.getClientRects().length &&
+    !button.matches('[role=radio]:not([aria-checked="true"])'))?.focus();
 });
-window.visualViewport?.addEventListener('resize', () => { keepToolbarVisible(); placeQuickActions(); });
-window.visualViewport?.addEventListener('scroll', () => { keepToolbarVisible(); placeQuickActions(); });
+// A pull down on the tab shows the bar as well. The touchend then cancels the click, so focus does not jump a second time.
+let tabPull;
+barTab.addEventListener('touchstart', event => { tabPull = { y: event.touches[0].clientY, done: false }; }, { passive: true });
+barTab.addEventListener('touchmove', event => {
+  if (!tabPull || tabPull.done || !event.touches.length || event.touches[0].clientY - tabPull.y < 12) return;
+  tabPull.done = true;
+  showBar();
+}, { passive: true });
+barTab.addEventListener('touchend', event => { if (tabPull?.done && event.cancelable) event.preventDefault(); tabPull = undefined; }, { passive: false });
+barTab.addEventListener('touchcancel', () => { tabPull = undefined; });
+function setBarState(state) {
+  const inControl = state === 'control';
+  const badge = document.getElementById('bar-status');
+  badge.dataset.state = state;
+  badge.setAttribute('aria-label', inControl ? 'In control' : 'Watching');
+  document.getElementById('icon-watching').hidden = inControl;
+  document.getElementById('icon-control').hidden = !inControl;
+  control.hidden = inControl;
+  document.getElementById('input-mode').hidden = !inControl;
+  document.getElementById('keyboard').hidden = !inControl;
+}
+window.visualViewport?.addEventListener('resize', placeQuickActions);
+window.visualViewport?.addEventListener('scroll', placeQuickActions);
+
+// Messages pop up under the bar and fade after a few seconds. One that needs the owner stays until the next message.
+const lastingStatus = /could not|failed|ended|another tab|Retry|close this tab/i;
+let statusTimer;
+function popUpStatus() {
+  clearTimeout(statusTimer);
+  status.classList.remove('faded');
+  if (!lastingStatus.test(status.textContent)) statusTimer = setTimeout(() => status.classList.add('faded'), 4000);
+}
+new MutationObserver(popUpStatus).observe(status, { childList: true, characterData: true, subtree: true });
+popUpStatus();
 
 function sendChord(keysym, code) {
   if (!controlReady || accessEnded) return;
@@ -413,7 +444,7 @@ function keepClipboardVisible() {
   if (!clipboardDialog.open) return;
   // The on-screen keyboard can shrink only visualViewport, leaving the native
   // dialog's layout-viewport centering and CSS viewport units unchanged.
-  const bounds = toolbarBounds();
+  const bounds = visibleBounds();
   const compact = bounds.height < 120;
   const gutter = compact ? 4 : 8;
   clipboardDialog.classList.toggle('clipboard-compact', compact);
@@ -530,7 +561,7 @@ let quickOffer;
 let touchCount = 0;
 function placeQuickActions() {
   if (quickActions.hidden || !quickOffer) return;
-  const bounds = toolbarBounds(), rect = quickActions.getBoundingClientRect(), gap = 12;
+  const bounds = visibleBounds(), rect = quickActions.getBoundingClientRect(), gap = 12;
   const left = Math.max(bounds.left + 8, Math.min(quickOffer.x - rect.width / 2, bounds.left + bounds.width - rect.width - 8));
   // Above the finger, or below it when there is no room above. Always inside the area the keyboard leaves visible.
   let top = quickOffer.y - rect.height - gap;
@@ -656,49 +687,275 @@ keyboardInput.addEventListener('blur', () => {
 });
 
 let touchGesture;
-let dragOnce = false;
 const holdDelayMs = 250;
 const midpoint = (touches) => ({ x: (touches[0].clientX + touches[1].clientX) / 2, y: (touches[0].clientY + touches[1].clientY) / 2 });
 const touchDistance = (touches) => Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
-function setDragOnce(enabled) {
-  dragOnce = enabled;
-  document.getElementById('drag-once').setAttribute('aria-pressed', String(enabled));
+function mouseOptions(x, y, buttons, button = 0) {
+  return { bubbles: true, cancelable: true, clientX: x, clientY: y, button, buttons };
 }
-document.getElementById('drag-once').addEventListener('click', () => {
-  if (!controlReady || accessEnded) return;
-  setDragOnce(!dragOnce);
-  status.textContent = dragOnce ? 'Next touch drags in the browser. Lift or pinch to finish.' : 'Swipe to scroll. Pinch to zoom.';
-});
 
-function mouseOptions(x, y, buttons) {
-  return { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, buttons };
+// Trackpad mode. pointer is the on-screen arrow in framebuffer pixels, fractions allowed.
+let inputMode = 'touch';
+let pointer = null;
+let lastTouchTapFb = null;
+let padGesture;
+const pointerEl = document.getElementById('pointer');
+const canvasEl = () => screen.querySelector('canvas');
+const toScreen = fb => { const r = canvasEl().getBoundingClientRect(); return { x: r.left + fb.x * displayScale, y: r.top + fb.y * displayScale }; };
+const toFramebuffer = pt => { const r = canvasEl().getBoundingClientRect(); return { x: (pt.x - r.left) / displayScale, y: (pt.y - r.top) / displayScale }; };
+function drawPointer() {
+  const show = inputMode === 'trackpad' && controlReady && !accessEnded && pointer && canvasEl();
+  pointerEl.toggleAttribute('hidden', !show);
+  if (!show) return;
+  const at = toScreen(pointer);
+  pointerEl.style.transform = `translate(${at.x - 1.5}px, ${at.y - 1.5}px)`;
 }
-const holdsButton = gesture => gesture.kind === 'drag' || gesture.kind === 'hold';
+const MODE_KEY = 'clawser.inputMode', HINT_KEY = 'clawser.trackpadHintShown';
+let modeRestored = false, hintTimer, hintHide;
+function storedMode() {
+  try { return localStorage.getItem(MODE_KEY) === 'trackpad' ? 'trackpad' : 'touch'; } catch { return 'touch'; }
+}
+function showTrackpadHint() {
+  try { if (localStorage.getItem(HINT_KEY) === '1') return; } catch { /* An unreadable store means the hint shows this once. */ }
+  try { localStorage.setItem(HINT_KEY, '1'); } catch { /* Nothing to remember it with. */ }
+  const el = document.getElementById('trackpad-hint');
+  clearTimeout(hintTimer); clearTimeout(hintHide);
+  el.classList.remove('faded');
+  el.hidden = false;
+  hintTimer = setTimeout(() => { el.classList.add('faded'); hintHide = setTimeout(() => { el.hidden = true; }, 350); }, 5000);
+}
+for (const [id, mode] of [['mode-touch', 'touch'], ['mode-trackpad', 'trackpad']]) {
+  document.getElementById(id).addEventListener('click', () => { if (inputMode !== mode) setInputMode(mode); });
+}
+document.getElementById('input-mode').addEventListener('keydown', event => {
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  event.preventDefault();
+  const mode = inputMode === 'touch' ? 'trackpad' : 'touch';
+  setInputMode(mode);
+  document.getElementById('mode-' + mode).focus();
+});
+function setInputMode(next, { restore = false } = {}) {
+  inputMode = next;
+  for (const mode of ['touch', 'trackpad']) {
+    const button = document.getElementById('mode-' + mode);
+    button.setAttribute('aria-checked', String(mode === next));
+    button.tabIndex = mode === next ? 0 : -1;
+  }
+  setHint(next);
+  if (!restore) {
+    try { localStorage.setItem(MODE_KEY, next); } catch { /* The switch still works for this page. */ }
+    if (next === 'trackpad') showTrackpadHint();
+  }
+  cancelTouchInput();
+  lastPadTap = undefined;
+  if (next === 'trackpad') placePointer();
+  drawPointer();
+}
+// The last Touch tap since the pointer was placed wins; else keep the pointer; else the center of the visible area.
+function placePointer() {
+  if (!framebufferSize()) return;
+  if (lastTouchTapFb) {
+    pointer = movePointer(lastTouchTapFb, { dx: 0, dy: 0 }, displayScale, framebufferSize());
+    lastTouchTapFb = null;
+  } else if (!pointer) {
+    const b = visibleBounds();
+    pointer = movePointer(toFramebuffer({ x: b.left + b.width / 2, y: b.top + b.height / 2 }), { dx: 0, dy: 0 }, displayScale, framebufferSize());
+  }
+}
+viewport.addEventListener('scroll', drawPointer);
+function clampPointer() {
+  if (inputMode !== 'trackpad' || !pointer || !framebufferSize()) return;
+  pointer = movePointer(pointer, { dx: 0, dy: 0 }, displayScale, framebufferSize());
+  drawPointer();
+  followView();
+}
+// Turning the phone moves everything under the finger, so a gesture in progress ends there and lets go of any button.
+let landscape = innerWidth > innerHeight;
+window.addEventListener('resize', () => {
+  if ((innerWidth > innerHeight) === landscape) return;
+  landscape = !landscape;
+  cancelTouchInput();
+});
+window.addEventListener('resize', clampPointer);
+window.visualViewport?.addEventListener('resize', clampPointer);
+function sendButton(x, y, button, down) {
+  const buttons = button === 2 ? 2 : 1;
+  // On a dropped connection the canvas may be gone. The mouseup then only clears noVNC's capture. The desktop button is let go by
+  // the supervisor: retiring the control actor runs xproof.settle, which releases every held key and button.
+  const at = canvasEl() ? toScreen({ x, y }) : { x: 0, y: 0 };
+  if (down) canvasEl().dispatchEvent(new PointerEvent('mousedown', mouseOptions(at.x, at.y, buttons, button)));
+  // Route up through window so noVNC also removes its capture overlay.
+  else window.dispatchEvent(new PointerEvent('mouseup', mouseOptions(at.x, at.y, 0, button)));
+}
+function movePointerTo(x, y, buttons = 0) {
+  pointer = movePointer({ x, y }, { dx: 0, dy: 0 }, displayScale, framebufferSize());
+  drawPointer();
+  if (!controlReady || accessEnded) return;
+  const at = toScreen(pointer);
+  canvasEl().dispatchEvent(new PointerEvent('mousemove', mouseOptions(at.x, at.y, buttons)));
+}
+
+const padDecideSlop = 8, padDragSlop = 8, padDragMs = 250;
+const padTapMs = 250, padDoubleMs = 350, padMoveSlop = 4, padTapSlop = 8, padTwoSlop = 10;
+let lastPadTap;
+function trackpadTouch(type, touches) {
+  const now = performance.now();
+  if (type === 'touchstart') {
+    if (!pointer) { placePointer(); drawPointer(); }
+    if (!pointer) return;
+    if (!padGesture) {
+      // chained: the finger landed soon after a tap, so a move makes this a drag with the left button held.
+      padGesture = { at: now, start: { ...pointer }, starts: new Map(), last: null, moved: false, two: false, travel: 0,
+        chained: Boolean(lastPadTap && now - lastPadTap < padDoubleMs), held: false, mode: undefined };
+      padGesture.last = { x: touches[0].clientX, y: touches[0].clientY, at: now };
+    }
+    if (touches.length >= 2) {
+      // A finger that lands again restarts the midpoint, so the slide never jumps.
+      if (!padGesture.mode) { padGesture.distance = touchDistance(touches); padGesture.mid0 = midpoint(touches); }
+      padGesture.mid = midpoint(touches);
+      padGesture.last = { x: touches[0].clientX, y: touches[0].clientY, at: now };
+      padGesture.two = true; lastPadTap = undefined;
+    }
+    for (const t of touches) if (!padGesture.starts.has(t.identifier)) padGesture.starts.set(t.identifier, { x: t.clientX, y: t.clientY });
+    return;
+  }
+  const gesture = padGesture;
+  if (!gesture) return;
+  if (type === 'touchmove') {
+    for (const t of touches) {
+      const s = gesture.starts.get(t.identifier);
+      if (s) gesture.travel = Math.max(gesture.travel, Math.hypot(t.clientX - s.x, t.clientY - s.y));
+    }
+    if (gesture.two && (touches.length >= 2 || !gesture.held)) {
+      if (touches.length < 2 || !gesture.distance) return;
+      const mid = midpoint(touches), delta = Math.abs(touchDistance(touches) - gesture.distance);
+      const travel = Math.hypot(mid.x - gesture.mid0.x, mid.y - gesture.mid0.y);
+      // Decided once, the first time spread or midpoint travel passes a few px: spread wins ties. A held drag never slides.
+      if (!gesture.mode && Math.max(delta, travel) > padDecideSlop) {
+        if (delta >= travel) gesture.mode = 'pinch';
+        else if (!gesture.held) {
+          const at = toScreen(pointer);
+          gesture.scroll = { canvas: canvasEl(), x: at.x, y: at.y, wheelX: gesture.mid0.x - gesture.mid.x, wheelY: gesture.mid0.y - gesture.mid.y, scrolled: false };
+          gesture.mode = 'slide';
+        }
+      }
+      if (gesture.mode === 'pinch') {
+        releasePad(gesture);
+        padGesture = undefined;
+        beginPinch(touches);
+        return;
+      }
+      if (gesture.mode === 'slide' && controlReady && !accessEnded) {
+        gesture.scroll.wheelX += gesture.mid.x - mid.x;
+        gesture.scroll.wheelY += gesture.mid.y - mid.y;
+        scrollTouch(gesture.scroll);
+      }
+      gesture.mid = mid;
+      gesture.last = { x: touches[0].clientX, y: touches[0].clientY, at: now };
+      return;
+    }
+    const t = touches[0], dx = t.clientX - gesture.last.x, dy = t.clientY - gesture.last.y, dt = now - gesture.last.at;
+    gesture.last = { x: t.clientX, y: t.clientY, at: now };
+    const s = gesture.starts.get(t.identifier);
+    if (gesture.chained && !gesture.held) {
+      // A contact right after a tap stays undecided: nothing moves and nothing is sent until it is clearly a drag.
+      gesture.sumX = (gesture.sumX || 0) + dx; gesture.sumY = (gesture.sumY || 0) + dy;
+      const travel = s ? Math.hypot(t.clientX - s.x, t.clientY - s.y) : 0;
+      if (!(travel > padDragSlop || (travel > padMoveSlop && now - gesture.at >= padDragMs))) return;
+      gesture.moved = true;
+      lastPadTap = undefined;
+      if (!controlReady || accessEnded) return;
+      sendButton(pointer.x, pointer.y, 0, true);
+      gesture.held = true;
+      const next = movePointer(pointer, accelerate(gesture.sumX, gesture.sumY, now - gesture.at), displayScale, framebufferSize());
+      movePointerTo(next.x, next.y, 1);
+      followView();
+      return;
+    }
+    if (!gesture.moved && s && Math.hypot(t.clientX - s.x, t.clientY - s.y) > padMoveSlop) gesture.moved = true;
+    if (gesture.moved) {
+      lastPadTap = undefined;
+      const next = movePointer(pointer, accelerate(dx, dy, dt), displayScale, framebufferSize());
+      movePointerTo(next.x, next.y, gesture.held ? 1 : 0);
+      followView();
+    }
+    return;
+  }
+  if (touches.length) {
+    // The remaining finger carries on from where it is, with no jump.
+    gesture.last = { x: touches[0].clientX, y: touches[0].clientY, at: now };
+    if (touches.length >= 2) gesture.mid = midpoint(touches);
+    return;
+  }
+  padGesture = undefined;
+  if (gesture.held) {
+    releasePad(gesture);
+    const at = toScreen(pointer);
+    if (controlReady && !accessEnded) checkFocusAfterTap(0, { keyboard: false, offer: { x: at.x, y: at.y, touch: touchCount } });
+    return;
+  }
+  if (gesture.chained && gesture.moved) return;
+  if ((!gesture.chained || gesture.two) && now - gesture.at > padTapMs) return;
+  if (gesture.two) {
+    if (gesture.travel > padTwoSlop) return;
+    sendButton(pointer.x, pointer.y, 2, true);
+    sendButton(pointer.x, pointer.y, 2, false);
+    return;
+  }
+  if (gesture.travel > padTapSlop) return;
+  // A jittery tap clicks where the pointer was when the finger landed.
+  if (pointer.x !== gesture.start.x || pointer.y !== gesture.start.y) movePointerTo(gesture.start.x, gesture.start.y);
+  // It landed soon after a tap, so it is the second click of a double click however long it rested.
+  const second = gesture.chained;
+  lastPadTap = second ? undefined : now;
+  sendButton(pointer.x, pointer.y, 0, true);
+  sendButton(pointer.x, pointer.y, 0, false);
+  const at = toScreen(pointer);
+  checkFocusAfterTap(pointer.y, second ? { offer: { x: at.x, y: at.y, touch: touchCount } } : {});
+}
+// The one place a held Trackpad button comes up. Every path that ends a gesture or a session reaches it.
+function releasePad(gesture) {
+  if (!gesture?.held) return;
+  gesture.held = false;
+  sendButton(pointer.x, pointer.y, 0, false);
+}
+// When zoomed past Fit the view scrolls to keep the pointer 40 px inside the visible area below the bar.
+function followView() {
+  const size = framebufferSize();
+  if (!pointer || !size || !(displayScale > fitScale(size) + 0.001)) return;
+  const b = visibleBounds(), top = Math.max(b.top, barHidden() ? 0 : bar.getBoundingClientRect().bottom);
+  const { dx, dy } = followPointer(toScreen(pointer), { left: b.left, top, width: b.width, height: b.top + b.height - top }, 40);
+  if (!dx && !dy) return;
+  viewport.scrollLeft += dx;
+  viewport.scrollTop += dy;
+  drawPointer();
+}
+const holdsButton = gesture => gesture.kind === 'hold';
 function beginHold(gesture) {
   if (gesture !== touchGesture || gesture.moved || !controlReady || accessEnded) return;
   gesture.kind = 'hold';
   gesture.remoteDown = true;
   status.textContent = 'Holding… Lift to release.';
-  gesture.canvas.dispatchEvent(new MouseEvent('mousedown', mouseOptions(gesture.x, gesture.y, 1)));
+  gesture.canvas.dispatchEvent(new PointerEvent('mousedown', mouseOptions(gesture.x, gesture.y, 1)));
 }
 function releaseTouchDrag(gesture = touchGesture) {
   clearTimeout(gesture?.holdTimer);
   if (!gesture?.remoteDown) return;
   gesture.remoteDown = false;
-  if (controlReady && !accessEnded) status.textContent = (gesture.kind === 'hold' ? 'Hold released.' : 'Drag finished.') + ' Swipe to scroll. Pinch to zoom.';
+  if (controlReady && !accessEnded) status.textContent = 'Hold released. Swipe to scroll. Pinch to zoom.';
   // Route up through noVNC's window capture proxy so it also removes the
   // capture overlay and flushes any queued held-button movement.
-  window.dispatchEvent(new MouseEvent('mouseup', mouseOptions(gesture.lastX, gesture.lastY, 0)));
+  window.dispatchEvent(new PointerEvent('mouseup', mouseOptions(gesture.lastX, gesture.lastY, 0)));
 }
 function cancelTouchInput() {
   releaseTouchDrag();
+  releasePad(padGesture);
   touchGesture = undefined;
-  setDragOnce(false);
+  padGesture = undefined;
 }
 document.addEventListener('visibilitychange', () => { if (document.hidden) cancelTouchInput(); });
 function beginPinch(touches) {
   releaseTouchDrag();
-  setDragOnce(false);
   const point = midpoint(touches), rect = screen.getBoundingClientRect();
   // Discard scrolling remainders immediately; no wheel event runs on release.
   touchGesture = { pinch: true, distance: touchDistance(touches), scale: displayScale,
@@ -742,38 +999,58 @@ function repeatTapPoint(gesture) {
   return point;
 }
 
+// Fingers whose touchstart landed on the page. One that started on the bar or the tab stays in event.touches
+// while it is down, so gestures read only these and a resting finger on the bar never becomes a second finger.
+const pageTouches = new Set();
+// A held button shows noVNC's capture overlay over everything, so a second finger then lands on it, not the viewport.
+const onPage = target => target instanceof Node && (viewport.contains(target) || target.id === 'noVNC_mouse_capture_elem');
+
 // Capture touch before noVNC's gesture recognizer. Listen at window because
 // native dragging creates a capture overlay outside the viewport, and a second
 // finger can start on that overlay. Ordinary desktop mouse events are untouched.
 for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) window.addEventListener(type, (event) => {
-  if (!touchGesture && !event.composedPath().includes(viewport)) return;
+  const changed = [...event.changedTouches];
+  const ours = changed.filter(t => (type === 'touchstart' ? onPage(t.target) : pageTouches.has(t.identifier)));
+  if (type === 'touchstart') {
+    // Phones reuse touch ids, so drop any whose end never arrived before counting the new finger.
+    const down = new Set([...event.touches].map(t => t.identifier));
+    for (const id of pageTouches) if (!down.has(id)) pageTouches.delete(id);
+    // A new finger may reuse the id of one whose end went to a removed overlay. An id that lands off the page is dropped too.
+    for (const t of changed) if (!ours.includes(t)) pageTouches.delete(t.identifier);
+    for (const t of ours) pageTouches.add(t.identifier);
+  } else if (type !== 'touchmove') for (const t of changed) pageTouches.delete(t.identifier);
+  if (!touchGesture && !padGesture && !event.composedPath().includes(viewport)) return;
   event.preventDefault();
   event.stopImmediatePropagation();
-  const touches = event.touches;
   if (type === 'touchcancel') { cancelTouchInput(); return; }
+  // A finger that started on the bar or the tab neither starts, joins nor ends a page gesture.
+  if (!ours.length) return;
+  const touches = [...event.touches].filter(t => pageTouches.has(t.identifier));
   if (type === 'touchstart') {
     touchCount++;
     hideQuickActions();
+    // While the sheet is open a tap on the page only closes it. The whole gesture is swallowed.
+    if (touchGesture?.swallowed) return;
+    if (sheetOpen() && !touchGesture && !padGesture) { closeSheet(); touchGesture = { swallowed: true }; return; }
+    // The first touch on the page in control tucks the bar away, and the same gesture carries on below. Focus stays where it is.
+    if (controlReady && !accessEnded && !barHidden() && !touchGesture && !padGesture) hideBar();
+    if (padGesture || (!touchGesture && inputMode === 'trackpad' && controlReady && !accessEnded)) return trackpadTouch(type, touches);
     if (touches.length >= 2) beginPinch(touches);
     else if (!touchGesture) {
       const canvas = screen.querySelector('canvas'), size = framebufferSize();
       if (!canvas || !size) return;
-      const kind = dragOnce && controlReady && !accessEnded ? 'drag'
-        : displayScale > fitScale(size) + 0.001 ? 'pan' : 'scroll';
+      const kind = displayScale > fitScale(size) + 0.001 ? 'pan' : 'scroll';
       touchGesture = { pinch: false, kind, canvas, x: touches[0].clientX, y: touches[0].clientY,
         lastX: touches[0].clientX, lastY: touches[0].clientY,
         left: viewport.scrollLeft, top: viewport.scrollTop, moved: false, wheelX: 0, wheelY: 0 };
-      if (kind === 'drag') {
-        setDragOnce(false);
-        touchGesture.remoteDown = true;
-        status.textContent = 'Dragging in the browser. Lift to finish; pinch to cancel.';
-        canvas.dispatchEvent(new MouseEvent('mousedown', mouseOptions(touchGesture.x, touchGesture.y, 1)));
-      } else if (controlReady && !accessEnded) touchGesture.holdTimer = setTimeout(beginHold, holdDelayMs, touchGesture);
+      if (controlReady && !accessEnded) touchGesture.holdTimer = setTimeout(beginHold, holdDelayMs, touchGesture);
     }
     return;
   }
+  if (padGesture) return trackpadTouch(type, touches);
   if (!touchGesture) return;
   if (type === 'touchmove') {
+    if (touchGesture.swallowed) return;
     if (touches.length >= 2) {
       if (!touchGesture.pinch) beginPinch(touches);
       const center = midpoint(touches);
@@ -784,7 +1061,7 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
       gesture.wheelY += gesture.lastY - y;
       gesture.lastX = x; gesture.lastY = y;
       if (holdsButton(gesture)) {
-        if (gesture.remoteDown) window.dispatchEvent(new MouseEvent('mousemove', mouseOptions(x, y, 1)));
+        if (gesture.remoteDown) window.dispatchEvent(new PointerEvent('mousemove', mouseOptions(x, y, 1)));
         return;
       }
       const dx = x - gesture.x, dy = y - gesture.y;
@@ -801,11 +1078,19 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
   const gesture = touchGesture;
   releaseTouchDrag(gesture);
   touchGesture = undefined;
+  if (gesture.swallowed) return;
   if (holdsButton(gesture) && controlReady && !accessEnded) checkFocusAfterTap(0, { keyboard: false, offer: { x: gesture.lastX, y: gesture.lastY, touch: touchCount } });
   if (gesture.pinch || holdsButton(gesture) || gesture.moved || !controlReady || accessEnded) return;
   const point = repeatTapPoint(gesture);
-  gesture.canvas.dispatchEvent(new MouseEvent('mousedown', mouseOptions(point.x, point.y, 1)));
+  lastTouchTapFb = toFramebuffer(point);
+  gesture.canvas.dispatchEvent(new PointerEvent('mousedown', mouseOptions(point.x, point.y, 1)));
   // noVNC's window capture proxy must receive mouseup to release its overlay.
-  window.dispatchEvent(new MouseEvent('mouseup', mouseOptions(point.x, point.y, 0)));
+  window.dispatchEvent(new PointerEvent('mouseup', mouseOptions(point.x, point.y, 0)));
   checkFocusAfterTap((point.y - gesture.canvas.getBoundingClientRect().top) / displayScale, point.repeat ? { offer: { x: point.x, y: point.y, touch: touchCount } } : {});
 }, { capture: true, passive: false });
+
+// probe.js is a module, so tests reach these through window. Each does only what the owner can do with a tap.
+window.__viewer = { hideBar, showBar, barHidden, zoomTo, openSheet, closeSheet, sheetOpen, setHint, setInputMode, pointer: () => pointer,
+  // Test hooks: flip control without a reconnect, and read which gestures are alive.
+  setControlReady(value) { controlReady = value; updateInputControls(); drawPointer(); },
+  gestures: () => ({ touch: Boolean(touchGesture), pad: Boolean(padGesture) }) };

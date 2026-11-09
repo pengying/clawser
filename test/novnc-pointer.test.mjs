@@ -134,7 +134,7 @@ async function fixture(t, { clipboardBridge = false, retained = false, focus } =
         response.setHeader('Content-Type', 'text/javascript');
         return response.end(await readFile(file));
       }
-      const file = path.endsWith('/probe.css') ? 'probe.css' : path.endsWith('/probe.js') ? 'probe.js' : 'probe.html';
+      const file = path.endsWith('/probe.css') ? 'probe.css' : path.endsWith('/probe.js') ? 'probe.js' : path.endsWith('/trackpad.js') ? 'trackpad.js' : 'probe.html';
       response.setHeader('Content-Type', file.endsWith('.css') ? 'text/css' : file.endsWith('.js') ? 'text/javascript' : 'text/html');
       response.end(await readFile(new URL(`../public/${file}`, import.meta.url)));
     } catch (error) { response.writeHead(500); response.end(String(error)); }
@@ -217,11 +217,11 @@ test('rendered noVNC targets map to framebuffer coordinates on the RFB wire', {
         viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio },
         document: { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight },
         doneVisible: document.querySelector('#done').getBoundingClientRect().bottom <= innerHeight,
-        controlsVisible: document.querySelector('.controls').getBoundingClientRect().bottom <= innerHeight,
+        barVisible: document.querySelector('#bar').getBoundingClientRect().bottom <= innerHeight,
         screen: { left: document.querySelector('#viewport').getBoundingClientRect().left, top: document.querySelector('#viewport').getBoundingClientRect().top, width: document.querySelector('#viewport').clientWidth, height: document.querySelector('#viewport').clientHeight } };
     })()`);
     await captureEvidence(cdp, `viewer-${scenario.name.replaceAll(' ', '-')}`);
-    await evaluate(`document.querySelector('#collapse').click()`);
+    await evaluate('__viewer.hideBar()');
     const results = [];
     for (const [x, y] of targets) {
       const before = peer.pointers.length;
@@ -238,18 +238,18 @@ test('rendered noVNC targets map to framebuffer coordinates on the RFB wire', {
     t.diagnostic(JSON.stringify({ geometry, results }));
     assert.ok(results.every(({ error }) => error && error.every((value) => Math.abs(value) <= 2)), 'visible target clicks must land within two framebuffer pixels');
     assert.ok(geometry.document.width <= geometry.viewport.width && geometry.document.height <= geometry.viewport.height, 'viewer stays within the viewport');
-    await evaluate(`document.querySelector('#restore').click()`);
-    assert.ok(geometry.doneVisible && geometry.controlsVisible, 'overlay actions remain visible');
+    await evaluate('__viewer.showBar()');
+    assert.ok(geometry.doneVisible && geometry.barVisible, 'overlay actions remain visible');
     assert.deepEqual(geometry.screen, { left: 0, top: 0, width: scenario.width, height: scenario.height }, 'browser viewport fills the screen');
     assert.ok(geometry.scale <= 1, 'fit never upscales above 100%');
-    await evaluate(`document.querySelector('#collapse').click()`);
-    assert.equal(await evaluate(`document.querySelector('#toolbar').hidden && !document.querySelector('#restore').hidden`), true, 'collapsed actions leave a restore tab');
-    await evaluate(`document.querySelector('#restore').click()`);
-    assert.equal(await evaluate(`document.querySelector('#toolbar').hidden`), false);
+    await evaluate('__viewer.hideBar()');
+    assert.equal(await evaluate(`__viewer.barHidden() && !document.querySelector('#bar-tab').hidden`), true, 'a hidden bar leaves the tab that shows it');
+    await evaluate('__viewer.showBar()');
+    assert.equal(await evaluate('__viewer.barHidden()'), false);
     await evaluate(`document.querySelector('#zoom-in').click()`);
     await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     assert.ok(await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale) > ${geometry.scale}`), 'zoom button increases the noVNC display scale');
-    await evaluate(`document.querySelector('#zoom-fit').click()`);
+    await evaluate("__viewer.zoomTo('fit')");
     assert.equal(peers.at(-1), peer, 'resizing keeps the RFB session');
     await evaluate(`document.querySelector('#done').click()`);
     await waitFor(`document.querySelector('#status').textContent.includes('Test browser destroyed.')`, 'Done still completes');
@@ -266,19 +266,6 @@ test('overlay, clipboard, mobile keyboard and pinch keep input intentional', {
   await cdp.send('Page.navigate', { url });
   await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'real RFB connected');
   const peer = peers.at(-1);
-  const toolbarBefore = await evaluate(`(() => { const r=document.querySelector('#toolbar').getBoundingClientRect();return {left:r.left,top:r.top}; })()`);
-  const handle = await evaluate(`(() => { const r=document.querySelector('#drag-handle').getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}; })()`);
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1, ...handle });
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', button: 'left', buttons: 1, x: handle.x+40, y:handle.y+90 });
-  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1, x: handle.x+40, y:handle.y+90 });
-  const toolbarAfter = await evaluate(`(() => { const r=document.querySelector('#toolbar').getBoundingClientRect();return {left:r.left,top:r.top,right:r.right,bottom:r.bottom}; })()`);
-  assert.ok(toolbarAfter.left >= toolbarBefore.left+30 && toolbarAfter.top >= toolbarBefore.top+80, 'drag handle moves the overlay');
-  assert.ok(toolbarAfter.right <= 390 && toolbarAfter.bottom <= 844, 'moved actions remain within the narrow viewport');
-  await evaluate(`document.documentElement.style.setProperty('--safe-left', '40px'); for(let n=0;n<10;n++) document.querySelector('#drag-handle').dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowLeft'}));`);
-  const safePosition = await evaluate(`({ left: document.querySelector('#toolbar').getBoundingClientRect().left, style: document.querySelector('#toolbar').style.left, safe: getComputedStyle(document.documentElement).getPropertyValue('--safe-left'), animation: getComputedStyle(document.querySelector('#toolbar')).translate })`);
-  t.diagnostic(JSON.stringify({safePosition}));
-  assert.ok(safePosition.left >= 48, 'keyboard repositioning respects the device safe area');
-  await evaluate(`document.documentElement.style.removeProperty('--safe-left')`);
   await evaluate(`window.clipboardReads = 0; window.clipboardWrites = []; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText: async () => { window.clipboardReads++; return 'local paste'; }, writeText: async text => window.clipboardWrites.push(text) } });`);
   assert.equal(await evaluate('window.clipboardReads'), 0, 'local clipboard is never read on connect');
   await evaluate(`document.querySelector('#paste').click()`);
@@ -308,7 +295,7 @@ test('overlay, clipboard, mobile keyboard and pinch keep input intentional', {
   await evaluate(`document.querySelector('#keyboard-input').dispatchEvent(new CompositionEvent('compositionend', { data: '中文😀' }))`);
   for (let n = 0; n < 100 && peer.keys.length < keysBefore + 6; n++) await pause(10);
   assert.deepEqual(peer.keys.slice(keysBefore).filter(key => key.down).map(key => key.keysym), [0x1004e2d, 0x1006587, 0x101f600], 'committed Unicode is sent once, preserving supplementary characters');
-  await evaluate(`document.querySelector('#keyboard-input').blur(); document.querySelector('#collapse').click()`);
+  await evaluate(`document.querySelector('#keyboard-input').blur(); __viewer.hideBar()`);
   const before = peer.pointers.length, beforeKeys = peer.keys.length;
   const touch = (type, points) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([x, y], id) => ({ x, y, id, radiusX: 1, radiusY: 1, force: 1 })) });
   const initialScale = await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`);
@@ -348,7 +335,9 @@ test('overlay, clipboard, mobile keyboard and pinch keep input intentional', {
   t.diagnostic(JSON.stringify({ scaleBeforeSqueeze, afterSqueeze: await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`), captureAfterTap: await evaluate(`({active: Boolean(document.captureElement), proxy: document.querySelector('#noVNC_mouse_capture_elem')?.style.display})`) }));
   await waitFor(`Number(document.querySelector('#zoom-level').dataset.scale) < ${scaleBeforeSqueeze * 0.55}`, 'squeezing zooms out');
   assert.equal(peer.pointers.length, beforeSqueeze, 'squeezing sends no remote pointer events');
-  await evaluate(`document.querySelector('#restore').click(); document.querySelector('#done').click()`);
+  await press({ cdp, evaluate }, '#bar-tab');
+  await waitFor('!__viewer.barHidden()', 'a tap on the tab brings the bar back');
+  await evaluate(`document.querySelector('#done').click()`);
   await waitFor(`document.querySelector('#status').textContent.includes('Test browser destroyed.')`, 'Done completes');
 });
 
@@ -434,7 +423,7 @@ test('mobile scrolling reaches RFB before finger-up and stops immediately for pi
   await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
   await cdp.send('Page.navigate', { url });
   await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'RFB connected');
-  await evaluate(`document.querySelector('#collapse').click()`);
+  await evaluate('__viewer.hideBar()');
   const peer = peers.at(-1);
   const touch = (type, points) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([x, y], id) => ({ x, y, id, radiusX: 1, radiusY: 1, force: 1 })) });
   const wheels = () => peer.pointers.filter(event => event.mask & 0x78);
@@ -454,7 +443,7 @@ test('mobile scrolling reaches RFB before finger-up and stops immediately for pi
   await pause(100);
   assert.equal(peer.pointers.length, beforePinch, 'second finger immediately stops scrolling with no release replay');
   assert.deepEqual(peer.keys, [], 'pinch never sends remote Ctrl+wheel keys');
-  await evaluate(`document.querySelector('#zoom-fit').click()`);
+  await evaluate("__viewer.zoomTo('fit')");
   const beforeSmallPinch = peer.pointers.length;
   await touch('touchStart', [[145, 422]]);
   await touch('touchMove', [[145, 418]]);
@@ -463,72 +452,10 @@ test('mobile scrolling reaches RFB before finger-up and stops immediately for pi
   await touch('touchEnd', []);
   await pause(100);
   assert.equal(peer.pointers.length, beforeSmallPinch, 'pinch before the movement threshold sends no remote input');
-  await evaluate(`document.querySelector('#restore').click(); document.querySelector('#done').click()`);
-  await waitFor(`document.querySelector('#status').textContent.includes('Test browser destroyed.')`, 'Done completes');
-});
-
-test('Drag once sends mapped mouse down/move/up and releases on pinch, cancel and Done', {
-  skip: !assets ? 'set NOVNC_ASSETS_DIR to the noVNC 1.7.0 source tree' : !existsSync(chromePath) ? 'Chrome unavailable' : false,
-}, async (t) => {
-  const { cdp, evaluate, waitFor, peers, url } = await fixture(t);
-  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
-  await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
-  await cdp.send('Page.navigate', { url });
-  await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'RFB connected');
-  assert.equal(await evaluate(`Boolean(document.querySelector('#drag-once'))`), true, 'overlay exposes a one-use native drag action');
-  await evaluate(`document.querySelector('#zoom-actual').click(); document.querySelector('#collapse').click()`);
-  const peer = peers.at(-1);
-  const touch = (type, points) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([x, y], id) => ({ x, y, id, radiusX: 1, radiusY: 1, force: 1 })) });
-  const arm = async () => {
-    await evaluate(`document.querySelector('#drag-once').click()`);
-    assert.equal(await evaluate(`document.querySelector('#drag-once').getAttribute('aria-pressed')`), 'true');
-  };
-  const released = async (before, description) => {
-    for (let n = 0; n < 100 && !peer.pointers.slice(before).some(event => event.mask === 0); n++) await pause(10);
-    assert.equal(peer.pointers.at(-1)?.mask, 0, description);
-    assert.equal(await evaluate('Boolean(document.captureElement)'), false, 'upstream mouse capture is released');
-    assert.equal(await evaluate(`document.querySelector('#drag-once').getAttribute('aria-pressed')`), 'false', 'drag mode automatically resets');
-  };
-  const rect = await evaluate(`(() => {const r=document.querySelector('canvas').getBoundingClientRect();return {left:r.left,top:r.top,scale:Number(document.querySelector('#zoom-level').dataset.scale)};})()`);
-  await arm();
-  let before = peer.pointers.length;
-  await touch('touchStart', [[145, 422]]);
-  for (let n = 0; n < 100 && !peer.pointers.slice(before).some(event => event.mask === 1); n++) await pause(10);
-  assert.ok(peer.pointers.slice(before).some(event => event.mask === 1), 'armed touch immediately holds the native mouse button');
-  await touch('touchMove', [[195, 437]]);
-  await touch('touchMove', [[245, 452]]);
-  await touch('touchEnd', []);
-  await released(before, 'completed drag releases the remote mouse button');
-  const events = peer.pointers.slice(before), down = events.find(event => event.mask === 1), up = events.at(-1);
-  assert.ok(events.filter(event => event.mask === 1).length >= 2, 'drag includes held-button movement');
-  assert.ok(Math.abs(down.x-(145-rect.left)/rect.scale)<=2 && Math.abs(down.y-(422-rect.top)/rect.scale)<=2, 'drag start maps through noVNC scale and pan');
-  assert.ok(Math.abs(up.x-(245-rect.left)/rect.scale)<=2 && Math.abs(up.y-(452-rect.top)/rect.scale)<=2, 'drag endpoint maps through noVNC scale and pan');
-  before = peer.pointers.length;
-  await touch('touchStart', [[195, 422]]);
-  await pause(50);
-  assert.equal(peer.pointers.length, before, 'the next ordinary touch does not inherit drag mode');
-  await touch('touchEnd', []);
-  await released(before, 'ordinary tap after drag releases capture');
-  await arm(); before = peer.pointers.length;
-  await touch('touchStart', [[145, 422]]);
-  await touch('touchMove', [[175, 422]]);
-  await touch('touchStart', [[175, 422], [245, 422]]);
-  await released(before, 'adding a second finger releases the drag before pinch');
-  const beforePinch = peer.pointers.length;
-  await touch('touchMove', [[125, 422], [295, 422]]);
-  await touch('touchEnd', []);
-  await pause(100);
-  assert.equal(peer.pointers.length, beforePinch, 'post-drag pinch produces no extra mouse or wheel input');
-  await arm(); before = peer.pointers.length;
-  await touch('touchStart', [[195, 422]]);
-  await touch('touchCancel', []);
-  await released(before, 'touch cancellation releases the drag');
-  await arm(); before = peer.pointers.length;
-  await touch('touchStart', [[195, 422]]);
+  await press({ cdp, evaluate }, '#bar-tab');
+  await waitFor('!__viewer.barHidden()', 'a tap on the tab brings the bar back');
   await evaluate(`document.querySelector('#done').click()`);
   await waitFor(`document.querySelector('#status').textContent.includes('Test browser destroyed.')`, 'Done completes');
-  await released(before, 'Done releases the remote button before ending access');
-  await touch('touchEnd', []);
 });
 
 test('a stationary touch holds the remote button until lift; taps still click and early swipes still scroll', {
@@ -539,7 +466,7 @@ test('a stationary touch holds the remote button until lift; taps still click an
   await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
   await cdp.send('Page.navigate', { url });
   await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'RFB connected');
-  await evaluate(`document.querySelector('#collapse').click()`);
+  await evaluate('__viewer.hideBar()');
   const peer = peers.at(-1), status = () => evaluate(`document.querySelector('#status').textContent`);
   const touch = (type, points) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([x, y], id) => ({ x, y, id, radiusX: 1, radiusY: 1, force: 1 })) });
   const pressed = async (before) => {
@@ -604,13 +531,25 @@ test('a stationary touch holds the remote button until lift; taps still click an
   await touch('touchEnd', []);
 });
 
+// A real touch on one of the viewer's own buttons, as a finger would press it.
+async function press({ cdp, evaluate }, selector) {
+  const [x, y] = await evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y, id: 0, radiusX: 1, radiusY: 1, force: 1 }] });
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+}
+
 async function phone(t, focus, options = {}) {
   const ctx = await fixture(t, { focus, ...options });
   await ctx.cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
   await ctx.cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  const errors = [];
+  await ctx.cdp.send('Runtime.enable');
+  ctx.cdp.on('Runtime.exceptionThrown', e => errors.push(JSON.stringify(e.exceptionDetails?.text) + JSON.stringify(e.exceptionDetails?.exception?.description)));
+  ctx.cdp.on('Runtime.consoleAPICalled', e => { if (e.type === 'error') errors.push(JSON.stringify(e.args?.map(a => a.value ?? a.description))); });
+  for (const source of options.scripts || []) await ctx.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source });
   await ctx.cdp.send('Page.navigate', { url: ctx.url });
   await ctx.waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'RFB connected');
-  await ctx.evaluate(`document.querySelector('#collapse').click()`);
+  await ctx.evaluate('__viewer.hideBar()');
   const touch = (type, points) => ctx.cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map(([x, y], id) => ({ x, y, id, radiusX: 1, radiusY: 1, force: 1 })) });
   // Taps at a framebuffer point, so a test can aim at the browser toolbar or the page.
   const tap = async (fx, fy) => {
@@ -618,11 +557,6 @@ async function phone(t, focus, options = {}) {
     await touch('touchStart', [[x, y]]); await touch('touchEnd', []);
   };
   const keyboard = () => ctx.evaluate(`({ open: document.activeElement?.id === 'keyboard-input', inputMode: document.querySelector('#keyboard-input').inputMode, pressed: document.querySelector('#keyboard').getAttribute('aria-pressed') })`);
-  // A real touch on one of the viewer's own buttons, as a finger would press it.
-  const press = async selector => {
-    const [x, y] = await ctx.evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
-    await touch('touchStart', [[x, y]]); await touch('touchEnd', []);
-  };
   const shown = selector => ctx.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); const r = e.getBoundingClientRect(); return !e.hidden && r.width > 0 && r.height > 0; })()`);
   // The phone point for a framebuffer point, then a finger held still there, as for a long press.
   const point = (fx, fy) => ctx.evaluate(`(() => { const r = document.querySelector('canvas').getBoundingClientRect(), s = r.width / ${width}; return [r.left + ${fx} * s, r.top + ${fy} * s]; })()`);
@@ -631,9 +565,62 @@ async function phone(t, focus, options = {}) {
   const pill = () => ctx.evaluate(`(() => { const e = document.querySelector('#quick-actions'), r = e.getBoundingClientRect();
     return { visible: !e.hidden, copy: !document.querySelector('#quick-copy').hidden, paste: !document.querySelector('#quick-paste').hidden,
       left: r.left, right: r.right, top: r.top, bottom: r.bottom, height: r.height, width: r.width }; })()`);
-  return { ...ctx, tap, keyboard, press, shown, point, hold, doubleTap, pill };
+  return { ...ctx, errors, touch, tap, keyboard, press: selector => press(ctx, selector), shown, point, hold, doubleTap, pill };
+}
+async function trackpadPhone(t, focus) {
+  const ctx = await phone(t, focus);
+  await ctx.evaluate("__viewer.setInputMode('trackpad')");
+  return ctx;
+}
+const settle = () => pause(300);
+// The switch sits on the screen's center line whenever each side's buttons fit in their half of the row. When a side needs
+// more room (a wider system font draws Done wider), that side takes exactly what it needs and the switch moves over to it.
+async function assertSwitchPlaced(evaluate) {
+  const m = await evaluate(`(() => {
+    const rect = s => document.querySelector(s).getBoundingClientRect();
+    const shown = s => [...document.querySelector(s).children].filter(e => e.getClientRects().length).map(e => e.getBoundingClientRect());
+    const row = rect('.bar-row'), center = rect('#bar-center'), sw = rect('#input-mode'), left = rect('#bar-left'), right = rect('#bar-right');
+    const leftItems = shown('#bar-left'), rightItems = shown('#bar-right');
+    return { rowLeft: row.left, rowWidth: row.width, centerLeft: center.left, centerRight: center.right, centerWidth: center.width,
+      mid: sw.left + sw.width / 2,
+      leftEnd: Math.max(...leftItems.map(r => r.right)), rightStart: Math.min(...rightItems.map(r => r.left)),
+      leftNeed: Math.max(...leftItems.map(r => r.right)) - left.left, rightNeed: right.right - Math.min(...rightItems.map(r => r.left)) };
+  })()`);
+  const half = (m.rowWidth - m.centerWidth) / 2;
+  const detail = JSON.stringify(m);
+  assert.ok(m.leftEnd <= m.centerLeft + 0.5 && m.centerRight <= m.rightStart + 0.5, `nothing overlaps the switch: ${detail}`);
+  let expected = m.rowLeft + m.rowWidth / 2;
+  if (m.rightNeed > half + 0.5) expected = m.rowLeft + m.rowWidth - m.rightNeed - m.centerWidth / 2;
+  else if (m.leftNeed > half + 0.5) expected = m.rowLeft + m.leftNeed + m.centerWidth / 2;
+  assert.ok(Math.abs(m.mid - expected) <= 1, `the switch is centered, or moved over only as far as a side needs (${m.mid}, expected ${expected}): ${detail}`);
+  return m;
 }
 const noVncSkip = !assets ? 'set NOVNC_ASSETS_DIR to the noVNC 1.7.0 source tree' : !existsSync(chromePath) ? 'Chrome unavailable' : false;
+
+test('the ⋯ sheet holds zoom, Copy and Paste as icons, and a tap on the page only closes it', { skip: noVncSkip }, async t => {
+  const { evaluate, press, tap, point, peers } = await phone(t, undefined);
+  await evaluate('__viewer.showBar()');
+  await press('#more');
+  assert.equal(await evaluate(`document.querySelector('#more').getAttribute('aria-expanded')`), 'true');
+  assert.equal(await evaluate(`document.querySelector('#more').hasAttribute('aria-pressed')`), false, '⋯ opens a sheet, so it says expanded and not pressed');
+  assert.equal(await evaluate(`getComputedStyle(document.querySelector('#more')).backgroundColor`), 'rgba(255, 255, 255, 0.14)', 'an open sheet still shows on the ⋯ button');
+  const sizes = await evaluate(`[...document.querySelectorAll('#more-sheet button')].map(b => { const r = b.getBoundingClientRect(); return { label: b.getAttribute('aria-label'), w: r.width, h: r.height }; })`);
+  assert.deepEqual(sizes.map(s => s.label), ['Zoom out', 'Zoom in', 'Actual size', 'Copy', 'Paste']);
+  assert.ok(sizes.every(s => s.w >= 44 && s.h >= 44), 'every sheet button is a full finger target');
+  await press('#zoom-toggle');
+  assert.equal(await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`), 1, 'the toggle goes to 100%');
+  assert.equal(await evaluate(`document.querySelector('#zoom-toggle').getAttribute('aria-label')`), 'Fit to screen');
+  // The brief's tap(960, 900) falls outside the 1280x720 framebuffer, so aim at a point that is on the phone and below the bar.
+  const [px, py] = await point(640, 420);
+  const barBottom = await evaluate(`document.querySelector('#bar').getBoundingClientRect().bottom`);
+  assert.ok(px >= 0 && px <= 390 && py <= 844 && py > barBottom + 4, `the tap point (${px}, ${py}) is on screen below the bar (${barBottom})`);
+  const before = peers.at(-1).pointers.length;
+  await tap(640, 420);
+  await new Promise(r => setTimeout(r, 300));
+  assert.equal(peers.at(-1).pointers.length, before, 'a tap on the page while the sheet is open sends nothing');
+  assert.equal(await evaluate('__viewer.sheetOpen()'), false, 'that tap closes the sheet');
+  assert.equal(await evaluate('__viewer.barHidden()'), false, 'and does not hide the bar');
+});
 
 test('a tap that focuses a remote text field opens the keyboard with that field’s layout', { skip: noVncSkip }, async t => {
   const focus = { answer: { kind: 'editable', inputMode: 'tel', multiline: false }, requests: 0 };
@@ -655,10 +642,12 @@ test('a tap that focuses a remote text field opens the keyboard with that field�
 
 test('a keyboard the owner opened stays open when a tap lands outside a field', { skip: noVncSkip }, async t => {
   const focus = { answer: { kind: 'none' }, requests: 0 };
-  const { tap, keyboard, evaluate } = await phone(t, focus);
-  await evaluate(`document.querySelector('#restore').click(); document.querySelector('#keyboard').click()`);
+  const { tap, keyboard, press, evaluate, waitFor } = await phone(t, focus);
+  await press('#bar-tab');
+  await waitFor('!__viewer.barHidden()', 'a tap on the tab brings the bar back');
+  await evaluate(`document.querySelector('#keyboard').click()`);
   assert.equal((await keyboard()).open, true);
-  // The toolbar stays open, as it is while someone types. This tap lands below it.
+  // The bar stays open, as it is while someone types. This tap lands below it.
   await tap(640, 680);
   for (let n = 0; n < 100 && focus.requests < 1; n++) await pause(20);
   assert.ok(focus.requests >= 1, 'the tap was checked');
@@ -782,4 +771,528 @@ test('touch and hold in a text field offers Paste just above the finger, and a t
   await waitFor(`!document.querySelector('#quick-actions').hidden`, 'Paste for a hold low in the screen');
   const low = await pill();
   assert.ok(low.top >= 0 && low.bottom <= 444, 'kept inside the visible area: ' + JSON.stringify(low));
+});
+
+test('Trackpad: sliding moves the pointer without clicking, and a tap clicks at the pointer', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers } = await trackpadPhone(t);
+  const scaleAtFit = await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  const start = await evaluate('__viewer.pointer()');
+  await touch('touchStart', [[200, 600]]); await touch('touchMove', [[230, 600]]); await touch('touchMove', [[260, 600]]); await touch('touchEnd', []);
+  await settle();
+  const moved = await evaluate('__viewer.pointer()');
+  assert.ok(moved.x > start.x + 50 / scaleAtFit, 'the pointer moved right by about the finger travel');
+  assert.ok(peer.pointers.slice(before).every(e => (e.mask & 7) === 0), 'sliding never presses a button');
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await settle();
+  const click = peer.pointers.slice(before).filter(e => e.mask === 1);
+  assert.equal(click.length, 1);
+  assert.ok(Math.abs(click[0].x - moved.x) <= 1 && Math.abs(click[0].y - moved.y) <= 1, 'the tap clicks at the pointer, not under the finger');
+});
+
+test('Trackpad: a slide sends hover moves to the desktop with no button', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  const start = await evaluate('__viewer.pointer()');
+  await touch('touchStart', [[200, 600]]); await touch('touchMove', [[230, 600]]); await touch('touchMove', [[260, 600]]); await touch('touchEnd', []);
+  await settle();
+  const fresh = peer.pointers.slice(before);
+  assert.ok(fresh.some(e => e.mask === 0 && e.x !== Math.floor(start.x)), 'a hover move reached the desktop');
+});
+
+test('Trackpad: a two-finger tap right-clicks at the pointer', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  const pointer = await evaluate('__viewer.pointer()');
+  await touch('touchStart', [[150, 600]]); await touch('touchStart', [[150, 600], [230, 600]]); await touch('touchEnd', []);
+  await settle();
+  const masks = [];
+  for (const e of peer.pointers.slice(before)) if (!(masks.length === 0 && e.mask === 0) && masks.at(-1) !== e.mask) masks.push(e.mask);
+  assert.deepEqual(masks, [4, 0]);
+  const right = peer.pointers.slice(before).find(e => e.mask === 4);
+  assert.ok(Math.abs(right.x - pointer.x) <= 1 && Math.abs(right.y - pointer.y) <= 1, 'the right click lands at the pointer');
+});
+
+test('Trackpad: the pointer reaches single desktop pixels at Fit', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), seen = new Set();
+  for (let n = 0; n < 6; n++) {
+    await touch('touchStart', [[200, 600]]); await touch('touchMove', [[205, 600]]); await pause(300); await touch('touchEnd', []);
+    await settle();
+    seen.add(Math.floor((await evaluate('__viewer.pointer()')).x));
+  }
+  assert.equal(seen.size, 6, 'six slides of 5 px reach six distinct desktop pixels');
+  const final = await evaluate('__viewer.pointer()');
+  const before = peer.pointers.length;
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await settle();
+  assert.equal(peer.pointers.slice(before).find(e => e.mask === 1).x, Math.floor(final.x));
+});
+
+test('Trackpad: two quick taps land both clicks on one desktop pixel', { skip: noVncSkip }, async t => {
+  const { touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await pause(100);
+  await touch('touchStart', [[100, 700]]); await touch('touchMove', [[105, 700]]); await touch('touchEnd', []);
+  await settle();
+  const clicks = peer.pointers.slice(before).filter(e => e.mask === 1);
+  assert.equal(clicks.length, 2);
+  assert.deepEqual([clicks[0].x, clicks[0].y], [clicks[1].x, clicks[1].y]);
+});
+
+test('Trackpad: a second contact that lands soon after a tap but lifts late still double-clicks and offers Copy', { skip: noVncSkip }, async t => {
+  const focus = { answer: { kind: 'none', selected: true }, requests: 0 };
+  const { touch, peers, waitFor } = await trackpadPhone(t, focus);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await pause(100);
+  await touch('touchStart', [[100, 700]]); await pause(400); await touch('touchEnd', []);
+  await settle();
+  const clicks = peer.pointers.slice(before).filter(e => e.mask === 1);
+  assert.equal(clicks.length, 2, 'two clicks');
+  assert.deepEqual([clicks[0].x, clicks[0].y], [clicks[1].x, clicks[1].y], 'both at one spot');
+  await waitFor(`!document.querySelector('#quick-actions').hidden`, 'the double click offers Copy');
+});
+
+test('Trackpad: a finger resting on the bar does not turn a tap on the page into a two-finger tap', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers } = await trackpadPhone(t);
+  await evaluate('__viewer.showBar()');
+  await settle();
+  const [mx, my] = await evaluate(`(() => { const a = document.querySelector('#bar-status').getBoundingClientRect(), c = document.querySelector('#input-mode').getBoundingClientRect(), row = document.querySelector('.bar-row').getBoundingClientRect(); return [(a.right + c.left) / 2, row.top + row.height / 2]; })()`);
+  assert.equal(await evaluate(`document.elementFromPoint(${mx}, ${my}).closest('#bar') !== null`), true, `the point (${mx}, ${my}) is on the bar`);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  await touch('touchStart', [[mx, my]]);
+  await touch('touchStart', [[mx, my], [100, 700]]);
+  // The page finger lifts while the bar finger stays down, then the bar finger lifts.
+  await touch('touchMove', [[mx, my]]);
+  await touch('touchEnd', []);
+  await settle();
+  const fresh = peer.pointers.slice(before);
+  assert.equal(fresh.filter(e => e.mask === 1).length, 1, 'one left click: ' + JSON.stringify(fresh.map(e => e.mask)));
+  assert.ok(fresh.every(e => !(e.mask & 4)), 'no right click');
+});
+
+test('Trackpad: a bar finger that reuses the id of a page finger whose end was lost stays off the page', { skip: noVncSkip }, async t => {
+  const { evaluate, peers } = await trackpadPhone(t);
+  await evaluate('__viewer.showBar()');
+  await settle();
+  const peer = peers.at(-1), before = peer.pointers.length;
+  // Synthetic events reproduce what a phone can do: the first finger's touchend went to an overlay that was then removed,
+  // so it never reached the viewer, and the phone gave the same id to the next finger, which lands on the bar.
+  await evaluate(`(async () => {
+    const page = document.querySelector('#screen'), bar = document.querySelector('#bar-status');
+    const at = (id, target, x, y) => new Touch({ identifier: id, target, clientX: x, clientY: y });
+    const send = (type, touches, changed) => changed[0].target.dispatchEvent(new TouchEvent(type, { touches, changedTouches: changed, targetTouches: touches, cancelable: true, bubbles: true, composed: true }));
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const lost = at(7, page, 100, 700);
+    send('touchstart', [lost], [lost]);
+    // Control flips, which drops the gesture but not the record of which fingers are on the page.
+    __viewer.setControlReady(true);
+    await wait(400);
+    const resting = at(7, bar, 30, 20);
+    send('touchstart', [resting], [resting]);
+    const tapper = at(8, page, 100, 700);
+    send('touchstart', [resting, tapper], [tapper]);
+    await wait(40);
+    send('touchend', [resting], [tapper]);
+    send('touchend', [], [resting]);
+    await wait(300);
+  })()`);
+  await settle();
+  const masks = peer.pointers.slice(before).map(e => e.mask);
+  assert.equal(masks.filter(m => m === 1).length, 1, 'one left click: ' + JSON.stringify(masks));
+  assert.ok(masks.every(m => !(m & 4)), 'no right click: ' + JSON.stringify(masks));
+});
+
+test('Trackpad: turning the phone releases a held drag', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers, cdp } = await trackpadPhone(t);
+  const peer = peers.at(-1);
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await pause(80);
+  await touch('touchStart', [[100, 700]]); await touch('touchMove', [[130, 700]]);
+  await settle();
+  assert.equal(peer.pointers.at(-1).mask, 1, 'the button is held');
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 844, height: 390, deviceScaleFactor: 2, mobile: true });
+  await settle();
+  assert.equal(peer.pointers.at(-1).mask, 0, 'the turn released the button');
+  assert.equal(await evaluate('document.captureElement'), null, 'noVNC holds no capture');
+  assert.equal((await evaluate('__viewer.gestures()')).pad, false);
+  await touch('touchEnd', []);
+  await settle();
+  assert.equal(peer.pointers.at(-1).mask, 0, 'the lift afterwards presses nothing');
+});
+
+test('Trackpad: zooming from the sheet keeps the pointer in view', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, press } = await trackpadPhone(t);
+  for (let n = 0; n < 2; n++) { await touch('touchStart', [[50, 600]]); await touch('touchMove', [[150, 600]]); await touch('touchMove', [[250, 600]]); await touch('touchMove', [[350, 600]]); await touch('touchEnd', []); await pause(50); }
+  assert.ok((await evaluate('__viewer.pointer()')).x > 1200, 'the pointer is at the right edge of the remote screen');
+  // Let the bar finish sliding in before pressing its buttons.
+  await evaluate('__viewer.showBar()');
+  await settle();
+  await press('#more');
+  await settle();
+  await press('#zoom-toggle');
+  await settle();
+  const r = await evaluate(`(() => { const r = document.querySelector('#pointer').getBoundingClientRect(); return { left: r.left, top: r.top, w: innerWidth, h: innerHeight, scale: document.querySelector('#zoom-level').dataset.scale }; })()`);
+  assert.equal(r.scale, '1', 'the toggle zoomed to 100%');
+  assert.ok(r.left + 1.5 >= 0 && r.left + 1.5 < r.w && r.top + 1.5 >= 0 && r.top + 1.5 < r.h, 'pointer hotspot inside the window: ' + JSON.stringify(r));
+});
+
+test('Trackpad: the tab brings the bar back with focus on the checked mode', { skip: noVncSkip }, async t => {
+  const { evaluate, press } = await trackpadPhone(t);
+  await evaluate('__viewer.hideBar()');
+  await press('#bar-tab');
+  await settle();
+  assert.equal(await evaluate('__viewer.barHidden()'), false);
+  assert.equal(await evaluate('document.activeElement?.id'), 'mode-trackpad');
+});
+
+test('Trackpad: the pointer shows only in Trackpad mode while in control', { skip: noVncSkip }, async t => {
+  const { evaluate, shown, waitFor } = await trackpadPhone(t);
+  assert.equal(await shown('#pointer'), true);
+  await evaluate("__viewer.setInputMode('touch')");
+  assert.equal(await shown('#pointer'), false);
+  await evaluate("__viewer.setInputMode('trackpad')");
+  assert.equal(await shown('#pointer'), true);
+  await evaluate(`document.querySelector('#done').click()`);
+  await waitFor(`document.querySelector('#status').textContent.includes('Test browser destroyed.')`, 'Done completes');
+  assert.equal(await shown('#pointer'), false, 'the pointer is hidden once access has ended');
+});
+
+test('Trackpad: a gesture that began before control was ready does not outlive the change', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, press, waitFor, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  await evaluate('__viewer.setControlReady(false)');
+  await touch('touchStart', [[100, 700]]);
+  await evaluate('__viewer.setControlReady(true)');
+  await touch('touchEnd', []);
+  await settle();
+  assert.deepEqual(await evaluate('__viewer.gestures()'), { touch: false, pad: false });
+  await press('#bar-tab');
+  await waitFor('!__viewer.barHidden()', 'the tab still brings the bar back');
+  assert.equal(peer.pointers.slice(before).filter(e => e.mask === 1).length, 0, 'no stray click');
+});
+
+test('Trackpad: a two-finger gesture that slides sends wheel packets and never a button', { skip: noVncSkip }, async t => {
+  const { touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  await touch('touchStart', [[150, 600]]); await touch('touchStart', [[150, 600], [230, 600]]);
+  await touch('touchMove', [[150, 640], [230, 640]]); await touch('touchEnd', []);
+  await settle();
+  assert.ok(peer.pointers.slice(before).every(e => (e.mask & 7) === 0), 'no button packets');
+});
+
+const maskRun = (packets) => { const out = []; for (const e of packets) if (!(out.length === 0 && e.mask === 0) && out.at(-1) !== e.mask) out.push(e.mask); return out; };
+
+test('Trackpad: tap then drag holds the left button through the slide and releases on lift.', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1);
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await pause(80);
+  const first = peer.pointers.length;
+  await touch('touchStart', [[100, 700]]);
+  for (const x of [120, 140, 160]) await touch('touchMove', [[x, 700]]);
+  await touch('touchEnd', []);
+  await settle();
+  const drag = peer.pointers.slice(first);
+  assert.deepEqual(maskRun(drag), [1, 0]);
+  const held = drag.filter(e => e.mask === 1);
+  assert.ok(new Set(held.map(e => e.x)).size >= 2, 'the held packets moved');
+  const pointer = await evaluate('__viewer.pointer()');
+  assert.equal(drag.at(-1).x, Math.floor(pointer.x));
+  assert.equal(drag.at(-1).mask, 0);
+});
+
+test('Trackpad: a quick 6 px second contact double-clicks at one spot, and a 20 px one drags', { skip: noVncSkip }, async t => {
+  const { touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await pause(80);
+  await touch('touchStart', [[100, 700]]); await touch('touchMove', [[103, 700]]); await touch('touchMove', [[106, 700]]); await touch('touchEnd', []);
+  await settle();
+  const fresh = peer.pointers.slice(before), presses = fresh.filter(e => e.mask === 1);
+  assert.equal(presses.length, 2, 'two clicks');
+  assert.deepEqual([presses[0].x, presses[0].y], [presses[1].x, presses[1].y]);
+  assert.ok(fresh.every(e => e.mask === 0 || e.mask === 1) && maskRun(fresh).join() === '1,0,1,0', 'no moves while pressed');
+  await pause(600);
+  const second = peer.pointers.length;
+  await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+  await pause(80);
+  await touch('touchStart', [[100, 700]]); await touch('touchMove', [[120, 700]]); await touch('touchMove', [[140, 700]]); await touch('touchEnd', []);
+  await settle();
+  const drag = peer.pointers.slice(second);
+  assert.ok(drag.filter(e => e.mask === 1).length >= 2 && new Set(drag.filter(e => e.mask === 1).map(e => e.x)).size >= 2, 'the 20 px contact dragged');
+});
+
+test('Trackpad: a held drag is released by pinch, a hidden page, switching to Touch, Done, and a dropped connection.', { skip: noVncSkip }, async t => {
+  const endings = {
+    pinch: async ({ touch }) => { await touch('touchStart', [[130, 700], [130, 780]]); await touch('touchMove', [[130, 684], [130, 796]]); await touch('touchEnd', []); },
+    hidden: async ({ evaluate }) => { await evaluate("Object.defineProperty(document, 'hidden', { value: true, configurable: true }); document.dispatchEvent(new Event('visibilitychange'))"); },
+    touch: async ({ evaluate }) => { await evaluate("__viewer.setInputMode('touch')"); },
+    done: async ({ evaluate }) => { await evaluate("document.querySelector('#done').click()"); },
+    dropped: async ({ peers }) => { peers.at(-1).socket.terminate(); },
+  };
+  for (const [name, end] of Object.entries(endings)) await t.test(name, async t => {
+    const ctx = await trackpadPhone(t);
+    const { evaluate, touch, peers } = ctx;
+    const peer = peers.at(-1);
+    await touch('touchStart', [[100, 700]]); await touch('touchEnd', []);
+    await pause(80);
+    await touch('touchStart', [[100, 700]]); await touch('touchMove', [[130, 700]]);
+    await settle();
+    assert.equal(peer.pointers.at(-1).mask, 1, 'the button is held');
+    await evaluate("window.__ups = 0; const send = window.dispatchEvent.bind(window); window.dispatchEvent = e => { if (e.type === 'mouseup') window.__ups++; return send(e); }");
+    await end(ctx);
+    await settle();
+    if (name !== 'dropped') assert.equal(peer.pointers.at(-1).mask, 0, 'the release reached the desktop');
+    assert.equal(await evaluate('__ups'), 1, 'exactly one release');
+    assert.equal(await evaluate('document.captureElement'), null, 'noVNC holds no capture');
+    assert.equal((await evaluate('__viewer.gestures()')).pad, false);
+  });
+});
+
+test('Trackpad: two fingers sliding together scroll at the pointer without pressing a button.', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  const scale = await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`);
+  await touch('touchStart', [[150, 500]]); await touch('touchStart', [[150, 500], [230, 500]]);
+  for (let y = 500; y <= 620; y += 20) await touch('touchMove', [[150, y], [230, y]]);
+  await touch('touchEnd', []);
+  await settle();
+  const fresh = peer.pointers.slice(before);
+  assert.ok(fresh.some(e => e.mask & 0x78), 'wheel events reached the desktop');
+  const at = await evaluate('__viewer.pointer()');
+  assert.ok(fresh.filter(e => e.mask & 0x78).every(e => Math.abs(e.x - Math.floor(at.x)) <= 1 && Math.abs(e.y - Math.floor(at.y)) <= 1), 'wheel lands at the pointer');
+  assert.ok(fresh.every(e => (e.mask & 7) === 0), 'no button');
+  assert.equal(await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`), scale);
+});
+
+test('Trackpad: a pinch zooms the view as in Touch.', { skip: noVncSkip }, async t => {
+  const { evaluate, touch } = await trackpadPhone(t);
+  const scale = await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`);
+  await touch('touchStart', [[150, 500]]); await touch('touchStart', [[150, 500], [230, 500]]);
+  for (const d of [100, 120, 140]) await touch('touchMove', [[150, 500], [150 + d, 500]]);
+  await touch('touchEnd', []);
+  await settle();
+  assert.ok(await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`) > scale);
+});
+
+test('Trackpad: a wide pinch with one finger moving inward zooms and sends no wheel', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, peers } = await trackpadPhone(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  const scale = await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`);
+  await touch('touchStart', [[50, 500]]); await touch('touchStart', [[50, 500], [250, 500]]);
+  for (let x = 246; x >= 186; x -= 4) await touch('touchMove', [[50, 500], [x, 500]]);
+  await touch('touchEnd', []);
+  await settle();
+  assert.notEqual(await evaluate(`Number(document.querySelector('#zoom-level').dataset.scale)`), scale);
+  assert.ok(peer.pointers.slice(before).every(e => !(e.mask & 0x78)), 'no wheel');
+});
+
+test('Trackpad: the pointer is pulled back on screen after a resize.', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, cdp } = await trackpadPhone(t);
+  await evaluate('__viewer.zoomTo(1)');
+  await settle();
+  for (let n = 0; n < 8; n++) { await touch('touchStart', [[50, 600]]); await touch('touchMove', [[150, 600]]); await touch('touchMove', [[250, 600]]); await touch('touchMove', [[350, 600]]); await touch('touchEnd', []); await pause(50); }
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 300, height: 844, deviceScaleFactor: 2, mobile: true });
+  await settle();
+  const r = await evaluate(`(() => { const r = document.querySelector('#pointer').getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, w: innerWidth, h: innerHeight }; })()`);
+  // The hotspot is 1.5 px inside the glyph; at the far edge of the desktop the arrow body may overhang, so the hotspot must be on screen.
+  assert.ok(r.left + 1.5 >= 0 && r.left + 1.5 < r.w && r.top + 1.5 >= 0 && r.top + 1.5 < r.h, 'pointer hotspot inside the window: ' + JSON.stringify(r));
+  assert.ok((await evaluate('__viewer.pointer()')).x <= width - 1);
+});
+
+test('Touch: a resize does not scroll the view toward a leftover Trackpad pointer', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, cdp } = await trackpadPhone(t);
+  await evaluate('__viewer.zoomTo(1)');
+  await settle();
+  for (let n = 0; n < 8; n++) { await touch('touchStart', [[50, 600]]); await touch('touchMove', [[150, 600]]); await touch('touchMove', [[250, 600]]); await touch('touchMove', [[350, 600]]); await touch('touchEnd', []); await pause(50); }
+  await evaluate("__viewer.setInputMode('touch')");
+  await evaluate("document.querySelector('#viewport').scrollLeft = 0");
+  await settle();
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 300, height: 844, deviceScaleFactor: 2, mobile: true });
+  await settle();
+  assert.equal(await evaluate("document.querySelector('#viewport').scrollLeft"), 0, 'Touch mode keeps the view where the owner left it');
+});
+
+test('a tap on the page while in control hides the bar and still clicks there', { skip: noVncSkip }, async t => {
+  const { evaluate, tap, point, peers } = await phone(t, undefined);
+  await evaluate('__viewer.showBar()');
+  // The brief's tap(960, 900) is outside the 1280x720 framebuffer, so aim at a page point below the bar.
+  const [px, py] = await point(640, 500);
+  const barBottom = await evaluate(`document.querySelector('#bar').getBoundingClientRect().bottom`);
+  assert.ok(px >= 0 && px <= 390 && py <= 844 && py > barBottom + 4, `the tap point (${px}, ${py}) is on screen below the bar (${barBottom})`);
+  const before = peers.at(-1).pointers.length;
+  await tap(640, 500);
+  await settle();
+  assert.equal(await evaluate('__viewer.barHidden()'), true);
+  assert.deepEqual(peers.at(-1).pointers.slice(before).map(e => e.mask), [1, 0], 'the same tap clicked once');
+});
+
+test('taps and slides that start on the bar, the sheet or the tab never reach the remote screen', { skip: noVncSkip }, async t => {
+  const { evaluate, press, touch, peers } = await phone(t, undefined);
+  const peer = peers.at(-1);
+  for (const mode of ['touch', 'trackpad']) {
+    await evaluate(`__viewer.setInputMode('${mode}')`);
+    for (const view of ['fit', 'zoomed']) {
+      await evaluate(view === 'fit' ? "__viewer.zoomTo('fit')" : "__viewer.zoomTo(3); document.querySelector('#viewport').scrollTop = 0");
+      await settle();
+      await evaluate('__viewer.closeSheet(); __viewer.showBar()');
+      await settle();
+      const before = peer.pointers.length;
+      const label = `${mode}, ${view}`;
+      // The empty middle of the bar, between the status badge and the centre group.
+      const [mx, my] = await evaluate(`(() => { const a = document.querySelector('#bar-status').getBoundingClientRect(), c = document.querySelector('#input-mode').getBoundingClientRect(), row = document.querySelector('.bar-row').getBoundingClientRect(); return [(a.right + c.left) / 2, row.top + row.height / 2]; })()`);
+      assert.equal(await evaluate(`document.elementFromPoint(${mx}, ${my}).closest('#bar') !== null`), true, `${label}: the point (${mx}, ${my}) is on the bar`);
+      await touch('touchStart', [[mx, my]]); await touch('touchEnd', []);
+      await press('#bar-status');
+      await press('#more');
+      for (const selector of ['#zoom-out', '#zoom-in', '#zoom-toggle']) await press(selector);
+      // A slide that starts on the bar and ends on the page.
+      await touch('touchStart', [[mx, my]]); await touch('touchMove', [[mx, my + 150]]); await touch('touchMove', [[mx + 40, my + 400]]); await touch('touchEnd', []);
+      await evaluate('__viewer.hideBar()');
+      const [tx, ty] = await evaluate(`(() => { const r = document.querySelector('#bar-tab').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+      await touch('touchStart', [[tx, ty]]); await touch('touchMove', [[tx, ty + 80]]); await touch('touchEnd', []);
+      await settle();
+      const leaked = peer.pointers.slice(before);
+      assert.deepEqual(leaked.filter(e => (e.mask & 7) || (e.mask & 0x78)), [], `${label}: no button or wheel packet reached the remote screen`);
+      assert.deepEqual(await evaluate('__viewer.gestures()'), { touch: false, pad: false }, `${label}: no gesture is left alive`);
+    }
+  }
+});
+
+test('showing and hiding the bar leaves zoom and scroll exactly where they were', { skip: noVncSkip }, async t => {
+  const { evaluate } = await phone(t, undefined);
+  await evaluate('__viewer.zoomTo(2)');
+  await settle();
+  await evaluate(`(() => { const v = document.querySelector('#viewport'); v.scrollLeft = 120; v.scrollTop = 90; })()`);
+  const state = () => evaluate(`(() => { const v = document.querySelector('#viewport'), c = document.querySelector('canvas').getBoundingClientRect();
+    return { scale: document.querySelector('#zoom-level').dataset.scale, left: v.scrollLeft, top: v.scrollTop, screenLeft: c.left, screenTop: c.top, height: v.scrollHeight }; })()`);
+  const start = await state();
+  assert.ok(start.left > 0 && start.top > 0, 'the view is scrolled');
+  await evaluate('__viewer.showBar()');
+  await settle();
+  assert.deepEqual(await state(), start, 'showing the bar changes nothing');
+  await evaluate('__viewer.hideBar()');
+  await settle();
+  assert.deepEqual(await state(), start, 'hiding the bar changes nothing');
+  await evaluate('__viewer.showBar()');
+  await settle();
+  assert.deepEqual(await state(), start, 'showing it again changes nothing');
+  await evaluate('__viewer.openSheet()');
+  await settle();
+  assert.deepEqual(await state(), start, 'opening the sheet changes nothing');
+  await evaluate('__viewer.closeSheet()');
+  await settle();
+  assert.deepEqual(await state(), start, 'closing the sheet changes nothing');
+});
+
+test('zoomed past Fit, the top of the remote screen scrolls out from under the bar', { skip: noVncSkip }, async t => {
+  const { evaluate, press } = await phone(t, undefined);
+  await evaluate('__viewer.showBar()');
+  await settle();
+  const layout = () => evaluate(`(() => { const c = document.querySelector('canvas').getBoundingClientRect(), v = document.querySelector('#viewport');
+    return { top: c.top, height: c.height, bar: document.querySelector('#bar').getBoundingClientRect().bottom, view: v.clientHeight, scroll: v.scrollHeight }; })()`);
+  const fit = await layout();
+  assert.ok(Math.abs(fit.top - (fit.view - fit.height) / 2) <= 0.5, 'at Fit the screen stays centered, with the bar over the page: ' + JSON.stringify(fit));
+  assert.equal(fit.scroll, fit.view, 'at Fit the view does not scroll');
+  await evaluate("__viewer.zoomTo(2); document.querySelector('#viewport').scrollTop = 0");
+  await settle();
+  const zoomed = await layout();
+  assert.ok(zoomed.top >= zoomed.bar - 1, 'scrolled to the top, the screen starts below the bar: ' + JSON.stringify(zoomed));
+  // The room is the closed bar's height, so zooming with the sheet open puts the screen in the same place.
+  await press('#more');
+  await evaluate("__viewer.zoomTo(2); document.querySelector('#viewport').scrollTop = 0");
+  await settle();
+  assert.equal((await layout()).top, zoomed.top, 'the open sheet does not change the room');
+});
+
+test('the hidden tab brings the bar back with a tap or a pull down', { skip: noVncSkip }, async t => {
+  const { evaluate, press, touch, peers } = await phone(t, undefined);
+  const before = peers.at(-1).pointers.length;
+  const inBar = () => evaluate(`document.querySelector('#bar').contains(document.activeElement) && document.activeElement.tagName === 'BUTTON'`);
+  const onTab = async dy => {
+    const [x, y] = await evaluate(`(() => { const r = document.querySelector('#bar-tab').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+    await touch('touchStart', [[x, y]]); await touch('touchMove', [[x, y + dy]]); await touch('touchEnd', []);
+    await settle();
+  };
+  await evaluate('__viewer.hideBar()');
+  await press('#bar-tab');
+  await settle();
+  assert.equal(await evaluate('__viewer.barHidden()'), false, 'a tap shows the bar');
+  assert.equal(await inBar(), true, 'a tap moves focus onto a bar button');
+  await evaluate('document.activeElement.blur(); __viewer.hideBar()');
+  await onTab(30);
+  assert.equal(await evaluate('__viewer.barHidden()'), false, 'a pull of 30 px shows the bar');
+  assert.equal(await inBar(), false, 'a pull does not also fire the tap click and its focus jump');
+  await evaluate('__viewer.hideBar()');
+  await onTab(5);
+  assert.equal(await evaluate('__viewer.barHidden()'), false, 'a 5 px wobble counts as a tap');
+  assert.equal(await inBar(), true, 'the wobble went through the normal click');
+  assert.equal(peers.at(-1).pointers.length, before, 'none of these sent a pointer packet');
+});
+
+test('on a 412 px phone the bar keeps the mockup spacing and the switch stays centered', { skip: noVncSkip }, async t => {
+  const { evaluate, cdp } = await phone(t, undefined);
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 412, height: 915, deviceScaleFactor: 2.6, mobile: true });
+  await evaluate('__viewer.showBar()');
+  await settle();
+  const m = await evaluate(`({ w: innerWidth, done: getComputedStyle(document.querySelector('#done')).paddingLeft })`);
+  assert.equal(m.w, 412);
+  assert.equal(m.done, '13px', 'Done keeps the mockup padding where it fits');
+  await assertSwitchPlaced(evaluate);
+});
+
+test('the Touch / Trackpad switch sits in the center, and the choice survives a reload', { skip: noVncSkip }, async t => {
+  const { evaluate, press, waitFor, cdp, errors } = await phone(t, undefined);
+  await evaluate('__viewer.showBar()');
+  await assertSwitchPlaced(evaluate);
+  const center = await evaluate(`({ btns: [...document.querySelectorAll('#input-mode button')].map(b => { const q = b.getBoundingClientRect(); return [q.width, q.height]; }) })`);
+  assert.ok(center.btns.length === 2 && center.btns.every(([w, h]) => w >= 44 && h >= 44), 'both segments are full finger targets');
+  assert.equal(await evaluate(`document.querySelector('#mode-touch').getAttribute('aria-checked')`), 'true');
+  await press('#mode-trackpad');
+  await waitFor(`document.querySelector('#mode-trackpad').getAttribute('aria-checked') === 'true'`, 'Trackpad checked');
+  assert.equal(await evaluate(`document.querySelector('#mode-touch').getAttribute('aria-checked')`), 'false');
+  assert.equal(await evaluate(`!document.querySelector('#pointer').hidden`), true, 'the pointer is shown');
+  assert.equal(await evaluate(`!document.querySelector('#trackpad-hint').hidden`), true, 'the hint is shown');
+  assert.equal(await evaluate(`document.querySelector('#trackpad-hint').textContent`), 'Slide to move the pointer. Tap to click. Two\u2011finger tap to right\u2011click.');
+  assert.match(await evaluate(`document.querySelector('#status').textContent`), /Control connected\./, 'the hint never writes into the status line');
+  await cdp.send('Page.reload');
+  await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'reconnected');
+  await waitFor(`document.querySelector('#mode-trackpad').getAttribute('aria-checked') === 'true'`, 'Trackpad restored');
+  assert.equal(await evaluate(`document.querySelector('#trackpad-hint').hidden`), true, 'the hint stays hidden after a reload');
+  assert.deepEqual(errors, []);
+});
+
+test('a broken or missing stored mode falls back to Touch without an error', { skip: noVncSkip }, async t => {
+  const checked = id => `document.querySelector('${id}').getAttribute('aria-checked')`;
+  const { evaluate, press, waitFor, cdp, errors } = await phone(t, undefined);
+  await evaluate(`localStorage.setItem('clawser.inputMode', 'banana')`);
+  await cdp.send('Page.reload');
+  await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'reconnected');
+  assert.equal(await evaluate(checked('#mode-touch')), 'true', 'banana means Touch');
+  assert.equal(await evaluate(checked('#mode-trackpad')), 'false');
+  assert.deepEqual(errors, []);
+  await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `Storage.prototype.getItem = () => { throw new Error('denied'); }; Storage.prototype.setItem = () => { throw new Error('denied'); };` });
+  await cdp.send('Page.reload');
+  await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'reconnected');
+  assert.equal(await evaluate(checked('#mode-touch')), 'true', 'a throwing store means Touch');
+  await evaluate('__viewer.showBar()');
+  await press('#mode-trackpad');
+  await waitFor(`${checked('#mode-trackpad')} === 'true'`, 'the switch still works for this page');
+  assert.equal(await evaluate(`!document.querySelector('#pointer').hidden`), true);
+  assert.deepEqual(errors, []);
+});
+
+test('a mode restored from storage does not show the first-time hint', { skip: noVncSkip }, async t => {
+  const { evaluate, waitFor, cdp, errors } = await phone(t, undefined);
+  await evaluate(`localStorage.setItem('clawser.inputMode', 'trackpad')`);
+  await cdp.send('Page.reload');
+  await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'reconnected');
+  await waitFor(`document.querySelector('#mode-trackpad').getAttribute('aria-checked') === 'true'`, 'Trackpad restored');
+  assert.equal(await evaluate(`!document.querySelector('#pointer').hidden`), true, 'the pointer is shown');
+  assert.equal(await evaluate(`document.querySelector('#trackpad-hint').hidden`), true, 'no hint on a restore');
+  assert.equal(await evaluate(`localStorage.getItem('clawser.trackpadHintShown')`), null, 'a restore does not use up the hint');
+  assert.deepEqual(errors, []);
 });

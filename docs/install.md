@@ -52,11 +52,11 @@ a loopback CDP connection, and outbound HTTPS. See
 
 ## Tagged Git installation
 
-This guide describes v0.7.5. Tagged Git installation is the recommended
+This guide describes v0.8.0. Tagged Git installation is the recommended
 distribution path.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.7.5 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.8.0 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -318,13 +318,13 @@ replace the native capability-acceptance step. Developer installation is in
 
 ## Release archive alternative
 
-Once published, download `pengying-clawser-0.7.5.tgz` and `SHA256SUMS` from the
-[v0.7.5 release](https://github.com/pengying/clawser/releases/tag/v0.7.5) into the
+Once published, download `pengying-clawser-0.8.0.tgz` and `SHA256SUMS` from the
+[v0.8.0 release](https://github.com/pengying/clawser/releases/tag/v0.8.0) into the
 same directory:
 
 ```sh
 sha256sum --check SHA256SUMS
-openclaw plugins install ./pengying-clawser-0.7.5.tgz --force --accept-capabilities
+openclaw plugins install ./pengying-clawser-0.8.0.tgz --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -341,7 +341,7 @@ file; they are not an independent publisher signature.
 2. Install the new release:
 
    ```sh
-   openclaw plugins install git:github.com/pengying/clawser@v0.7.5 --force --accept-capabilities
+   openclaw plugins install git:github.com/pengying/clawser@v0.8.0 --force --accept-capabilities
    ```
 
 3. Check the plan:
