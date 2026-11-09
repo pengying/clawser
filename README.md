@@ -122,10 +122,12 @@ A noVNC link shares the **whole browser**: every tab, dialog and the browser's
 clipboard during control. The CDP viewer shares the **selected tab**. Choose a
 browser whose contents you intend to share.
 
-Once you take control, a bar across the top of the noVNC viewer holds the
-controls. Tap the page to tuck the bar away, and tap the small tab at the top
-to bring it back. It comes back on its own if control ends. An amber eye means
-you are watching, and a green pointer means you are in control.
+A bar across the top of the noVNC viewer holds the controls. While you watch,
+it stays in place and holds **Take control**. Once you take control, tap the
+page to tuck the bar away, and tap the small tab at the top to bring it back.
+It comes back on its own if control ends. An amber eye means you are watching,
+and a green pointer means you are in control. Zoomed in, scroll to the top to
+see the top of the browser below the bar.
 
 In control, the center of the bar switches between **Touch** and **Trackpad**.
 Touch works like a phone: tap to click, swipe to scroll, pinch to zoom, and

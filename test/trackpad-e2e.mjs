@@ -1,7 +1,8 @@
 // Manual real-desktop check for the viewer's Trackpad mode. Not part of npm test.
 // A scratch display (140-199) at 1920x1080 runs openbox and a disposable windowed Chrome with two tabs.
 // The real viewer runs in a phone-sized headless Chrome and drives it with real touch events in Trackpad mode.
-// Nothing leaves the box and nothing touches :20, 9222 or a real profile.
+// Nothing leaves the box and nothing touches :20, 9222 or a real profile. Both Chromes run with background traffic off,
+// and the X server takes no TCP and only clients holding its cookie. Ctrl-C or a kill still stops everything and removes the temp dir.
 // Usage: node test/trackpad-e2e.mjs <noVncAssetsDir>
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
@@ -9,17 +10,22 @@ import * as fs from 'node:fs/promises';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CdpConnection } from '../src/cdp.mjs';
 import { readFocus } from '../src/focus-state.mjs';
 import { NoVncProbeGateway } from '../src/novnc-probe.mjs';
 import { dropStaleLock } from '../runtime/desktop/test/xvfb.mjs';
+import { xauthorityEntry } from '../src/host-display.mjs';
 
 const assets = process.argv[2];
 const CHROME = process.env.CHROME_BIN || '/opt/google/chrome/chrome';
 const W = 1920, H = 1080;
 const children = [], cleanups = [];
+// Chrome's own traffic to Google (updates, sync, safe browsing lists, pings) stays off, as in renderer-readiness.mjs.
+const QUIET = ['--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-component-update',
+  '--disable-default-apps', '--disable-sync', '--metrics-recording-only', '--no-pings'];
 const exists = p => fs.access(p).then(() => true, () => false);
 const log = (...a) => console.log(new Date().toISOString().slice(11, 23), ...a);
 const run = promisify(execFile);
@@ -29,21 +35,54 @@ async function devtoolsPort(profile) {
   throw new Error('Chrome did not start');
 }
 
+// Stops every child, then runs the cleanups and removes the temp dir that holds both Chrome profiles. The end of the run
+// and a SIGINT or SIGTERM share it, and it runs once.
+let dir, x, cleaning;
+// A child that starts after a signal began the cleanup is stopped at once, so nothing outlives the run.
+const start = (...args) => { const child = spawn(...args); children.push(child); if (cleaning) child.kill('SIGKILL'); return child; };
+function cleanup() {
+  cleaning ??= (async () => {
+    for (const c of [...children].reverse()) { try { c.kill('SIGTERM'); } catch {} }
+    await sleep(800);
+    for (const c of children) { try { c.kill('SIGKILL'); } catch {} }
+    for (const f of cleanups) await f().catch(e => console.log('cleanup:', e.message));
+    if (x) {
+      const { server } = x;
+      if (server.exitCode === null && server.signalCode === null) {
+        const exited = new Promise(r => server.once('exit', r));
+        server.kill('SIGTERM');
+        await Promise.race([exited, sleep(2000)]);
+        try { server.kill('SIGKILL'); } catch {}
+      }
+      await dropStaleLock(x.number).catch(() => {});
+    }
+    if (dir) await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(e => console.log('cleanup:', e.message));
+  })();
+  return cleaning;
+}
+for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]]) process.once(signal, () => {
+  console.log(`FAIL stopped by ${signal}`);
+  void cleanup().finally(() => process.exit(code));
+});
+
 try {
-  let x;
+  dir = await fs.mkdtemp(join(tmpdir(), 'clawser-trackpad-e2e-'));
+  // The server reads its cookie from server-auth. Clients find the same cookie for this display in xauth.
+  const cookie = randomBytes(16);
+  await fs.writeFile(join(dir, 'server-auth'), xauthorityEntry(0, cookie), { mode: 0o600 });
   for (let n = 140; n < 200 && !x; n++) {
     if (await exists(`/tmp/.X11-unix/X${n}`) || await exists(`/tmp/.X${n}-lock`)) continue;
-    const server = spawn('Xvfb', [`:${n}`, '-nolisten', 'tcp', '-screen', '0', `${W}x${H}x24`, '+extension', 'XTEST'], { stdio: 'ignore' });
+    const server = spawn('Xvfb', [`:${n}`, '-auth', join(dir, 'server-auth'), '-nolisten', 'tcp', '-screen', '0', `${W}x${H}x24`, '+extension', 'XTEST'], { stdio: 'ignore' });
+    x = { number: n, server };
     for (const deadline = Date.now() + 5000; server.exitCode === null; await sleep(50)) {
-      if (await exists(`/tmp/.X11-unix/X${n}`)) { x = { number: n, server }; break; }
+      if (await exists(`/tmp/.X11-unix/X${n}`)) { x.ready = true; break; }
       if (Date.now() > deadline) { server.kill('SIGKILL'); break; }
     }
+    if (!x.ready) x = undefined;
   }
   assert.ok(x, 'free display in 140-199');
-  cleanups.push(async () => { x.server.kill(); await sleep(300); await dropStaleLock(x.number); });
-  const dir = await fs.mkdtemp(join(tmpdir(), 'clawser-trackpad-e2e-'));
-  cleanups.push(() => fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
-  const env = { ...process.env, DISPLAY: `:${x.number}` }; delete env.WAYLAND_DISPLAY; delete env.XAUTHORITY;
+  await fs.writeFile(join(dir, 'xauth'), xauthorityEntry(x.number, cookie), { mode: 0o600 });
+  const env = { ...process.env, DISPLAY: `:${x.number}`, XAUTHORITY: join(dir, 'xauth') }; delete env.WAYLAND_DISPLAY;
   log('display', x.number);
 
   // Default-size native radios, as most sites have them. Each logs the X server's view of the press and release.
@@ -55,13 +94,13 @@ try {
   await new Promise(r => page.listen(0, '127.0.0.1', r));
   cleanups.push(() => new Promise(r => page.close(r)));
   const base = `http://127.0.0.1:${page.address().port}`;
-  children.push(spawn('openbox', [], { env, stdio: 'ignore' }));
+  start('openbox', [], { env, stdio: 'ignore' });
   await sleep(600);
   const agentProfile = join(dir, 'agent');
   // The live units' flags for size and position.
-  children.push(spawn(CHROME, ['--no-first-run', '--no-default-browser-check', '--ozone-platform=x11', '--password-store=basic',
+  start(CHROME, [...QUIET, '--ozone-platform=x11', '--password-store=basic',
     '--window-position=0,0', `--window-size=${W},${H}`, '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
-    `--user-data-dir=${agentProfile}`, base + '/radios', base + '/other'], { env, stdio: 'ignore' }));
+    `--user-data-dir=${agentProfile}`, base + '/radios', base + '/other'], { env, stdio: 'ignore' });
   const agentCdp = 'http://127.0.0.1:' + await devtoolsPort(agentProfile);
   const agentTabs = async () => (await fetch(agentCdp + '/json/list', { signal: AbortSignal.timeout(3000) })).json();
   const onTab = async (prefix, expression) => {
@@ -90,7 +129,7 @@ try {
     const args = ['-display', `unix/:${x.number}`, '-unixsock', sock, '-rfbport', '0', '-no6', '-rfbportv6', '-1', '-passwdfile', pw,
       '-forever', '-shared', '-noxdamage', '-noxrecord', '-nosel', '-noprimary', '-noclipboard', '-nosetclipboard', '-nosetprimary', '-noremote', '-nocmds', '-o', '/dev/null', '-norc'];
     if (role === 'watch') args.push('-viewonly');
-    children.push(spawn('x11vnc', args, { env, stdio: 'ignore' }));
+    start('x11vnc', args, { env, stdio: 'ignore' });
     for (const deadline = Date.now() + 10_000; !(await fs.lstat(sock).then(i => i.isSocket(), () => false)); await sleep(50))
       assert.ok(Date.now() < deadline, 'x11vnc started');
     vnc[role] = { sock, password };
@@ -109,8 +148,8 @@ try {
   const invite = await gateway.createProbe({ ttlSeconds: 300, permission: 'control' });
 
   const phoneProfile = join(dir, 'phone');
-  children.push(spawn(CHROME, ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage', '--no-first-run',
-    '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', `--user-data-dir=${phoneProfile}`, 'about:blank'], { stdio: 'ignore' }));
+  start(CHROME, ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage', ...QUIET,
+    '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0', `--user-data-dir=${phoneProfile}`, 'about:blank'], { stdio: 'ignore' });
   const phonePort = await devtoolsPort(phoneProfile);
   const tab = await (await fetch(`http://127.0.0.1:${phonePort}/json/new?about:blank`, { method: 'PUT' })).json();
   const phone = await new CdpConnection({ commandTimeoutMs: 20_000 }).connect(tab.webSocketDebuggerUrl);
@@ -136,15 +175,22 @@ try {
 
   // Moves the pointer with small slow slides (<= 0.17 px/ms, so the gain is 1) and corrects until it is within 2 desktop px.
   // Each slide ends more than 250 ms after it started, so it is never taken for a tap.
+  // The viewer ignores a slide until it has gone 4 phone px, so a correction shorter than 6 px first steps 6 px the other way
+  // in one move, which counts in full, then comes back past the start. The two legs add up to the correction.
   const aimAt = async (fx, fy) => {
     for (let round = 0; round < 40; round++) {
       const p = await pointer();
-      const dx = (fx - p.x) * scale, dy = (fy - p.y) * scale;
-      if (Math.hypot(dx, dy) / scale <= 2) return p;
-      const steps = Math.min(8, Math.max(2, Math.ceil(Math.hypot(dx, dy) / 5)));
+      const dx = (fx - p.x) * scale, dy = (fy - p.y) * scale, distance = Math.hypot(dx, dy);
+      if (distance / scale <= 2) return p;
       const start = [200, 500];
       await touch('touchStart', [start]);
-      for (let i = 1; i <= steps; i++) { await sleep(30); await touch('touchMove', [[start[0] + dx * i / steps, start[1] + dy * i / steps]]); }
+      if (distance < 6) {
+        await sleep(60); await touch('touchMove', [[start[0] - dx / distance * 6, start[1] - dy / distance * 6]]);
+        await sleep(60); await touch('touchMove', [[start[0] + dx, start[1] + dy]]);
+      } else {
+        const steps = Math.min(8, Math.max(2, Math.ceil(distance / 5)));
+        for (let i = 1; i <= steps; i++) { await sleep(30); await touch('touchMove', [[start[0] + dx * i / steps, start[1] + dy * i / steps]]); }
+      }
       await sleep(300);
       await touch('touchEnd', []);
       await sleep(120);
@@ -159,7 +205,7 @@ try {
   // child of the root, so a new window id after the two-finger tap means a menu opened, and its absence after a click elsewhere means it
   // closed. xdotool is not on the box and xwd diffs depend on theme pixels, so the window list is the exact, cheap choice.
   const rootOnlyChildren = async () => {
-    const { stdout } = await run('xwininfo', ['-root', '-children', '-display', `:${x.number}`]);
+    const { stdout } = await run('xwininfo', ['-root', '-children', '-display', `:${x.number}`], { env });
     return new Set(stdout.split('\n').map(l => l.match(/^\s+(0x[0-9a-f]+) /)?.[1]).filter(Boolean));
   };
   const check = (name, ok, detail = '') => { if (!ok) throw new Error(`${name} failed ${detail}`); console.log(`ok   ${name} ${detail}`); };
@@ -199,8 +245,5 @@ try {
   console.log('FAIL ' + (error.stack || error.message));
   process.exitCode = 1;
 } finally {
-  for (const c of children.reverse()) { try { c.kill('SIGTERM'); } catch {} }
-  await sleep(800);
-  for (const c of children) { try { c.kill('SIGKILL'); } catch {} }
-  for (const f of cleanups) await f().catch(e => console.log('cleanup:', e.message));
+  await cleanup();
 }
