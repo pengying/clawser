@@ -1,5 +1,11 @@
 # Changes
 
+## 0.8.4
+
+- A tap on the agent browser's address bar now opens your phone's keyboard, with the layout for web addresses. In 0.8.0 to 0.8.3 the viewer opened it only when the page reported that it had lost focus. OpenClaw's own browser tool keeps the page reporting focus, so the keyboard did not open on most installs.
+- Touch and hold now shows Paste, or Copy, while your finger is still down, as on Android. Lift to tap it. Slide instead and the bar gets out of the way while the hold drags, for example to select text. When you lift after a slide that selected text, Copy appears. A hold on the address bar offers Paste too.
+- The "Holding… Lift to release" and "Hold released" notices are gone.
+
 ## 0.8.3
 
 - On a Mac, the ⋯ sheet now names ⌘C and ⌘V. Chrome reports a Mac as macOS, and 0.8.2 didn't recognize that name. It showed Ctrl+C and Ctrl+V there instead. The shortcuts themselves already worked.

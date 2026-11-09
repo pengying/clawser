@@ -57,11 +57,11 @@ The validated host is **Linux x86_64**, **Node.js >=24.16 <25 or >=26.1**, and
 cover 2026.10.4 and 2026.10.7. Other operating systems and ARM hosts are unverified.
 Start your OpenClaw Gateway before setup.
 
-Install the tagged **v0.8.3** release from GitHub. ClawHub availability may lag
+Install the tagged **v0.8.4** release from GitHub. ClawHub availability may lag
 GitHub.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.8.3 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.8.4 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -95,7 +95,7 @@ Finish any open handoffs, then:
 1. Install the new version:
 
    ```sh
-   openclaw plugins install git:github.com/pengying/clawser@v0.8.3 --force --accept-capabilities
+   openclaw plugins install git:github.com/pengying/clawser@v0.8.4 --force --accept-capabilities
    ```
 
 2. Check the plan with `openclaw clawser setup --dry-run`.
@@ -141,8 +141,10 @@ and Copy and Paste.
 To move text, use **Copy** and **Paste**, as on a phone. Double-tap a word, or
 touch and hold, then drag, to select text. A small Copy bar appears just above
 your finger and sends the selection to your phone. Touch and hold in a text
-field for Paste, which sends your phone's clipboard text to that field. The bar
-goes away at your next touch. Copy and Paste are also under **⋯**. When the phone blocks clipboard
+field or the address bar for Paste, which sends your phone's clipboard text
+there. Paste shows while your finger is still down, and stays when you lift. A
+tap on the address bar opens your phone's keyboard. The bar goes away at your
+next touch. Copy and Paste are also under **⋯**. When the phone blocks clipboard
 access, a text box opens to copy or paste by hand. Only plain text moves. There
 is no file transfer and no automatic clipboard sync. In the CDP viewer, your
 phone's own paste works in a focused field, but nothing is copied back. Phone
