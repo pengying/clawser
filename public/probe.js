@@ -128,6 +128,7 @@ function openConnection(config) {
     controlReady = config.mode !== 'watch';
     updateInputControls();
     updateDisplay();
+    if (!modeRestored) { modeRestored = true; setInputMode(storedMode(), { restore: true }); }
     if (inputMode === 'trackpad' && !pointer) { placePointer(); drawPointer(); }
     readyResolve();
   }, { once: true });
@@ -695,8 +696,42 @@ function drawPointer() {
   const at = toScreen(pointer);
   pointerEl.style.transform = `translate(${at.x - 1.5}px, ${at.y - 1.5}px)`;
 }
-function setInputMode(next) {
+const MODE_KEY = 'clawser.inputMode', HINT_KEY = 'clawser.trackpadHintShown';
+let modeRestored = false, hintTimer, hintHide;
+function storedMode() {
+  try { return localStorage.getItem(MODE_KEY) === 'trackpad' ? 'trackpad' : 'touch'; } catch { return 'touch'; }
+}
+function showTrackpadHint() {
+  try { if (localStorage.getItem(HINT_KEY) === '1') return; } catch { /* An unreadable store means the hint shows this once. */ }
+  try { localStorage.setItem(HINT_KEY, '1'); } catch { /* Nothing to remember it with. */ }
+  const el = document.getElementById('trackpad-hint');
+  clearTimeout(hintTimer); clearTimeout(hintHide);
+  el.classList.remove('faded');
+  el.hidden = false;
+  hintTimer = setTimeout(() => { el.classList.add('faded'); hintHide = setTimeout(() => { el.hidden = true; }, 350); }, 5000);
+}
+for (const [id, mode] of [['mode-touch', 'touch'], ['mode-trackpad', 'trackpad']]) {
+  document.getElementById(id).addEventListener('click', () => { if (inputMode !== mode) setInputMode(mode); });
+}
+document.getElementById('input-mode').addEventListener('keydown', event => {
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+  event.preventDefault();
+  const mode = inputMode === 'touch' ? 'trackpad' : 'touch';
+  setInputMode(mode);
+  document.getElementById('mode-' + mode).focus();
+});
+function setInputMode(next, { restore = false } = {}) {
   inputMode = next;
+  for (const mode of ['touch', 'trackpad']) {
+    const button = document.getElementById('mode-' + mode);
+    button.setAttribute('aria-checked', String(mode === next));
+    button.tabIndex = mode === next ? 0 : -1;
+  }
+  setHint(next);
+  if (!restore) {
+    try { localStorage.setItem(MODE_KEY, next); } catch { /* The switch still works for this page. */ }
+    if (next === 'trackpad') showTrackpadHint();
+  }
   cancelTouchInput();
   lastPadTap = undefined;
   if (next === 'trackpad') placePointer();

@@ -542,6 +542,11 @@ async function phone(t, focus, options = {}) {
   const ctx = await fixture(t, { focus, ...options });
   await ctx.cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
   await ctx.cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  const errors = [];
+  await ctx.cdp.send('Runtime.enable');
+  ctx.cdp.on('Runtime.exceptionThrown', e => errors.push(JSON.stringify(e.exceptionDetails?.text) + JSON.stringify(e.exceptionDetails?.exception?.description)));
+  ctx.cdp.on('Runtime.consoleAPICalled', e => { if (e.type === 'error') errors.push(JSON.stringify(e.args?.map(a => a.value ?? a.description))); });
+  for (const source of options.scripts || []) await ctx.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source });
   await ctx.cdp.send('Page.navigate', { url: ctx.url });
   await ctx.waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'RFB connected');
   await ctx.evaluate('__viewer.hideBar()');
@@ -560,7 +565,7 @@ async function phone(t, focus, options = {}) {
   const pill = () => ctx.evaluate(`(() => { const e = document.querySelector('#quick-actions'), r = e.getBoundingClientRect();
     return { visible: !e.hidden, copy: !document.querySelector('#quick-copy').hidden, paste: !document.querySelector('#quick-paste').hidden,
       left: r.left, right: r.right, top: r.top, bottom: r.bottom, height: r.height, width: r.width }; })()`);
-  return { ...ctx, touch, tap, keyboard, press: selector => press(ctx, selector), shown, point, hold, doubleTap, pill };
+  return { ...ctx, errors, touch, tap, keyboard, press: selector => press(ctx, selector), shown, point, hold, doubleTap, pill };
 }
 async function trackpadPhone(t) {
   const ctx = await phone(t, undefined);
@@ -1065,4 +1070,57 @@ test('the hidden tab brings the bar back with a tap or a pull down', { skip: noV
   assert.equal(await evaluate('__viewer.barHidden()'), false, 'a 5 px wobble counts as a tap');
   assert.equal(await inBar(), true, 'the wobble went through the normal click');
   assert.equal(peers.at(-1).pointers.length, before, 'none of these sent a pointer packet');
+});
+
+test('the Touch / Trackpad switch sits in the center, and the choice survives a reload', { skip: noVncSkip }, async t => {
+  const { evaluate, press, waitFor, cdp, errors } = await phone(t, undefined);
+  await evaluate('__viewer.showBar()');
+  const center = await evaluate(`(() => { const r = document.querySelector('#input-mode').getBoundingClientRect(); return { mid: r.left + r.width / 2, w: r.width, btns: [...document.querySelectorAll('#input-mode button')].map(b => { const q = b.getBoundingClientRect(); return [q.width, q.height]; }) }; })()`);
+  assert.ok(Math.abs(center.mid - 195) <= 1, `the switch is centered (${center.mid})`);
+  assert.ok(center.btns.length === 2 && center.btns.every(([w, h]) => w >= 44 && h >= 44), 'both segments are full finger targets');
+  assert.equal(await evaluate(`document.querySelector('#mode-touch').getAttribute('aria-checked')`), 'true');
+  await press('#mode-trackpad');
+  await waitFor(`document.querySelector('#mode-trackpad').getAttribute('aria-checked') === 'true'`, 'Trackpad checked');
+  assert.equal(await evaluate(`document.querySelector('#mode-touch').getAttribute('aria-checked')`), 'false');
+  assert.equal(await evaluate(`!document.querySelector('#pointer').hidden`), true, 'the pointer is shown');
+  assert.equal(await evaluate(`!document.querySelector('#trackpad-hint').hidden`), true, 'the hint is shown');
+  assert.equal(await evaluate(`document.querySelector('#trackpad-hint').textContent`), 'Slide to move the pointer. Tap to click. Two\u2011finger tap to right\u2011click.');
+  assert.match(await evaluate(`document.querySelector('#status').textContent`), /Control connected\./, 'the hint never writes into the status line');
+  await cdp.send('Page.reload');
+  await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'reconnected');
+  await waitFor(`document.querySelector('#mode-trackpad').getAttribute('aria-checked') === 'true'`, 'Trackpad restored');
+  assert.equal(await evaluate(`document.querySelector('#trackpad-hint').hidden`), true, 'the hint stays hidden after a reload');
+  assert.deepEqual(errors, []);
+});
+
+test('a broken or missing stored mode falls back to Touch without an error', { skip: noVncSkip }, async t => {
+  const checked = id => `document.querySelector('${id}').getAttribute('aria-checked')`;
+  const { evaluate, press, waitFor, cdp, errors } = await phone(t, undefined);
+  await evaluate(`localStorage.setItem('clawser.inputMode', 'banana')`);
+  await cdp.send('Page.reload');
+  await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'reconnected');
+  assert.equal(await evaluate(checked('#mode-touch')), 'true', 'banana means Touch');
+  assert.equal(await evaluate(checked('#mode-trackpad')), 'false');
+  assert.deepEqual(errors, []);
+  await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `Storage.prototype.getItem = () => { throw new Error('denied'); }; Storage.prototype.setItem = () => { throw new Error('denied'); };` });
+  await cdp.send('Page.reload');
+  await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'reconnected');
+  assert.equal(await evaluate(checked('#mode-touch')), 'true', 'a throwing store means Touch');
+  await evaluate('__viewer.showBar()');
+  await press('#mode-trackpad');
+  await waitFor(`${checked('#mode-trackpad')} === 'true'`, 'the switch still works for this page');
+  assert.equal(await evaluate(`!document.querySelector('#pointer').hidden`), true);
+  assert.deepEqual(errors, []);
+});
+
+test('a mode restored from storage does not show the first-time hint', { skip: noVncSkip }, async t => {
+  const { evaluate, waitFor, cdp, errors } = await phone(t, undefined);
+  await evaluate(`localStorage.setItem('clawser.inputMode', 'trackpad')`);
+  await cdp.send('Page.reload');
+  await waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'reconnected');
+  await waitFor(`document.querySelector('#mode-trackpad').getAttribute('aria-checked') === 'true'`, 'Trackpad restored');
+  assert.equal(await evaluate(`!document.querySelector('#pointer').hidden`), true, 'the pointer is shown');
+  assert.equal(await evaluate(`document.querySelector('#trackpad-hint').hidden`), true, 'no hint on a restore');
+  assert.equal(await evaluate(`localStorage.getItem('clawser.trackpadHintShown')`), null, 'a restore does not use up the hint');
+  assert.deepEqual(errors, []);
 });
