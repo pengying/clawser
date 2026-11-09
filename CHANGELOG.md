@@ -1,5 +1,12 @@
 # Changes
 
+## 0.8.0
+
+- The noVNC viewer now has a top bar. It holds the Take control and Done buttons, an eye icon for watching or control, a pointer icon for the input mode, the keyboard, and a ⋯ button with zoom, Fit, Copy and Paste. It replaces the side Controls tab.
+- There is a new Trackpad mode next to Touch. Slide one finger to move an on-screen pointer, tap to click at the pointer, and tap with two fingers to right-click, for example right-click then Translate. The phone remembers the mode you chose.
+- A tap on the page tucks the bar away so the whole browser is in view. That tap still clicks. A small tab at the top brings the bar back.
+- The Drag once button is gone. Touch and hold already presses and drags, so it is no longer needed.
+
 ## 0.7.5
 
 - Fix a way to block a handoff's owner. Each handoff had one budget of 30 requests a minute, charged before the cookie was checked. Anyone who learned a handoff's id could fill it with wrong guesses, and the owner's own requests, Take control, the stream and Done then failed for up to a minute at a time. They still could not see or control the browser. The gateway now checks the cookie or invitation first. A refused guess spends a guess budget of 30 a minute. A valid request spends a separate budget of 240 a minute, and Done spends none, so wrong guesses can no longer block the owner or the real invitation claim.

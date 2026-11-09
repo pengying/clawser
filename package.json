@@ -1,6 +1,6 @@
 {
   "name": "@pengying/clawser",
-  "version": "0.7.5",
+  "version": "0.8.0",
   "description": "Clawser: secure human takeover links for the agent's browser through noVNC, with an optional one-tab CDP viewer",
   "type": "module",
   "main": "./index.mjs",
@@ -30,6 +30,7 @@
     "demo": "node test/demo.mjs",
     "start": "node src/dev.mjs",
     "test:desktop": "node --test runtime/desktop/test/*.test.mjs",
+    "test:trackpad-e2e": "node test/trackpad-e2e.mjs",
     "test:e2e": "node test/host-desktop-e2e.mjs",
     "setup": "node bin/clawser.mjs setup",
     "doctor": "node bin/clawser.mjs doctor",

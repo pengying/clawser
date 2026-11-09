@@ -57,11 +57,11 @@ The validated host is **Linux x86_64**, **Node.js >=24.16 <25 or >=26.1**, and
 cover 2026.10.4 and 2026.10.7. Other operating systems and ARM hosts are unverified.
 Start your OpenClaw Gateway before setup.
 
-Install the tagged **v0.7.5** release from GitHub. ClawHub availability may lag
+Install the tagged **v0.8.0** release from GitHub. ClawHub availability may lag
 GitHub.
 
 ```sh
-openclaw plugins install git:github.com/pengying/clawser@v0.7.5 --force --accept-capabilities
+openclaw plugins install git:github.com/pengying/clawser@v0.8.0 --force --accept-capabilities
 openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
@@ -95,7 +95,7 @@ Finish any open handoffs, then:
 1. Install the new version:
 
    ```sh
-   openclaw plugins install git:github.com/pengying/clawser@v0.7.5 --force --accept-capabilities
+   openclaw plugins install git:github.com/pengying/clawser@v0.8.0 --force --accept-capabilities
    ```
 
 2. Check the plan with `openclaw clawser setup --dry-run`.
@@ -122,15 +122,22 @@ A noVNC link shares the **whole browser**: every tab, dialog and the browser's
 clipboard during control. The CDP viewer shares the **selected tab**. Choose a
 browser whose contents you intend to share.
 
-Once you take control, the noVNC viewer folds its controls away so the whole
-browser is in view. Tap **Controls** at the edge of the screen to bring them
-back. They come back on their own if control ends.
+Once you take control, a bar across the top of the noVNC viewer holds the
+controls. Tap the page to tuck the bar away, and tap the small tab at the top
+to bring it back. It comes back on its own if control ends. An eye icon shows
+whether you are watching or in control, and a pointer icon shows the input mode.
+Touch mode works like a phone: tap to click, swipe to scroll, pinch to zoom,
+and touch and hold, then drag, to press and drag. Trackpad mode moves an on-screen
+pointer as you slide one finger. Tap to click at the pointer, and tap with two
+fingers to right-click, for example right-click then Translate, or slide two
+fingers to scroll. Under the
+**⋯** button are zoom and Fit, and Copy and Paste.
 
 To move text, use **Copy** and **Paste**, as on a phone. Double-tap a word, or
 touch and hold, then drag, to select text. A small Copy bar appears just above
 your finger and sends the selection to your phone. Touch and hold in a text
 field for Paste, which sends your phone's clipboard text to that field. The bar
-goes away at your next touch. Copy and Paste are also in the controls. When the phone blocks clipboard
+goes away at your next touch. Copy and Paste are also under **⋯**. When the phone blocks clipboard
 access, a text box opens to copy or paste by hand. Only plain text moves. There
 is no file transfer and no automatic clipboard sync. In the CDP viewer, your
 phone's own paste works in a focused field, but nothing is copied back. Phone
