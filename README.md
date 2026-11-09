@@ -11,33 +11,40 @@ There is no app or VPN to install. The link opens over HTTPS from anywhere.
 
 ## Install
 
-You need a Linux x86_64 host running OpenClaw 2026.10.4 or newer and Node.js
-24.16+ or 26.1+.
+You need a Linux x86_64 host running OpenClaw 2026.10.4 or newer.
 
-**1. Add the plugin.** Ask your agent in your private owner chat:
+Ask your agent in your private owner chat:
 
-> Install the ClawHub plugin @pengying/clawser.
+> Install the ClawHub plugin @pengying/clawser and run its setup dry run.
 
-OpenClaw asks you to approve the plugin's declared capabilities. Or run it
-yourself:
+The agent installs the plugin after you approve its declared capabilities. It
+then runs `openclaw clawser setup --dry-run`, which checks the host and changes
+nothing. Two steps stay with you:
+
+1. **Host packages.** Clawser needs Xvfb, x11vnc, python3, a few X libraries
+   and Google Chrome. The dry run prints the exact command for your
+   distribution, and the agent passes it to you. It needs `sudo`, so run it
+   yourself. For example:
+
+   ```sh
+   sudo apt install xvfb x11vnc openbox python3 libx11-6 libxres1 libxtst6 libxi6
+   ```
+
+2. **Setup.** When the dry run is clean, run:
+
+   ```sh
+   openclaw clawser setup --yes
+   openclaw clawser doctor
+   ```
+
+   Setup restarts the agent's browser and reloads the plugin, so run it between
+   tasks rather than asking the agent to run it mid-conversation.
+
+To do it all by hand instead:
 
 ```sh
 openclaw plugins install @pengying/clawser --accept-capabilities
-```
-
-**2. Install the host packages.** Clawser needs Xvfb, x11vnc, python3, a few X
-libraries and Google Chrome. Setup installs none of them. It prints the exact
-command for your distribution, for example:
-
-```sh
-sudo apt install xvfb x11vnc openbox python3 libx11-6 libxres1 libxtst6 libxi6
-```
-
-**3. Run setup yourself.** The agent can't do this step, because setup restarts
-the agent's browser and adds background services.
-
-```sh
-openclaw clawser setup --dry-run   # shows the plan, changes nothing
+openclaw clawser setup --dry-run
 openclaw clawser setup --yes
 openclaw clawser doctor
 ```

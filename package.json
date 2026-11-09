@@ -1,7 +1,7 @@
 {
   "name": "@pengying/clawser",
-  "version": "1.0.0",
-  "description": "Clawser: secure human takeover links for the agent's browser through noVNC, with an optional one-tab CDP viewer",
+  "version": "1.0.1",
+  "description": "Step into your OpenClaw agent's browser from your phone for a CAPTCHA, login or 2FA, then hand it back. One-use private links, no app or VPN.",
   "type": "module",
   "main": "./index.mjs",
   "exports": "./index.mjs",

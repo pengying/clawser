@@ -1,5 +1,11 @@
 # Changes
 
+## 1.0.1
+
+- New ClawHub and plugin descriptions that say what Clawser is for.
+- The README install steps now let the agent install the plugin and run the setup dry run. The owner runs the `sudo` package command the dry run prints, then `setup --yes`.
+- The README no longer lists a Node.js version. Clawser needs the same Node range as OpenClaw itself, and `docs/install.md` still states it. OpenClaw's opt-in Bun runtime is untested with Clawser.
+
 ## 1.0.0
 
 - The first handoff link no longer waits for the secure tunnel. The controller now starts the tunnel when it starts, and starts it again a few seconds after it drops. Before, the first link after each restart waited up to a minute, while Cloudflare set up a new address.
