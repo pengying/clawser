@@ -851,6 +851,38 @@ test('Trackpad: a finger resting on the bar does not turn a tap on the page into
   assert.ok(fresh.every(e => !(e.mask & 4)), 'no right click');
 });
 
+test('Trackpad: a bar finger that reuses the id of a page finger whose end was lost stays off the page', { skip: noVncSkip }, async t => {
+  const { evaluate, peers } = await trackpadPhone(t);
+  await evaluate('__viewer.showBar()');
+  await settle();
+  const peer = peers.at(-1), before = peer.pointers.length;
+  // Synthetic events reproduce what a phone can do: the first finger's touchend went to an overlay that was then removed,
+  // so it never reached the viewer, and the phone gave the same id to the next finger, which lands on the bar.
+  await evaluate(`(async () => {
+    const page = document.querySelector('#screen'), bar = document.querySelector('#bar-status');
+    const at = (id, target, x, y) => new Touch({ identifier: id, target, clientX: x, clientY: y });
+    const send = (type, touches, changed) => changed[0].target.dispatchEvent(new TouchEvent(type, { touches, changedTouches: changed, targetTouches: touches, cancelable: true, bubbles: true, composed: true }));
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const lost = at(7, page, 100, 700);
+    send('touchstart', [lost], [lost]);
+    // Control flips, which drops the gesture but not the record of which fingers are on the page.
+    __viewer.setControlReady(true);
+    await wait(400);
+    const resting = at(7, bar, 30, 20);
+    send('touchstart', [resting], [resting]);
+    const tapper = at(8, page, 100, 700);
+    send('touchstart', [resting, tapper], [tapper]);
+    await wait(40);
+    send('touchend', [resting], [tapper]);
+    send('touchend', [], [resting]);
+    await wait(300);
+  })()`);
+  await settle();
+  const masks = peer.pointers.slice(before).map(e => e.mask);
+  assert.equal(masks.filter(m => m === 1).length, 1, 'one left click: ' + JSON.stringify(masks));
+  assert.ok(masks.every(m => !(m & 4)), 'no right click: ' + JSON.stringify(masks));
+});
+
 test('Trackpad: turning the phone releases a held drag', { skip: noVncSkip }, async t => {
   const { evaluate, touch, peers, cdp } = await trackpadPhone(t);
   const peer = peers.at(-1);

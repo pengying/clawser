@@ -1015,6 +1015,8 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
     // Phones reuse touch ids, so drop any whose end never arrived before counting the new finger.
     const down = new Set([...event.touches].map(t => t.identifier));
     for (const id of pageTouches) if (!down.has(id)) pageTouches.delete(id);
+    // A new finger may reuse the id of one whose end went to a removed overlay. An id that lands off the page is dropped too.
+    for (const t of changed) if (!ours.includes(t)) pageTouches.delete(t.identifier);
     for (const t of ours) pageTouches.add(t.identifier);
   } else if (type !== 'touchmove') for (const t of changed) pageTouches.delete(t.identifier);
   if (!touchGesture && !padGesture && !event.composedPath().includes(viewport)) return;
