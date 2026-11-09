@@ -705,7 +705,7 @@ function placePointer() {
 }
 viewport.addEventListener('scroll', drawPointer);
 function clampPointer() {
-  if (!pointer || !framebufferSize()) return;
+  if (inputMode !== 'trackpad' || !pointer || !framebufferSize()) return;
   pointer = movePointer(pointer, { dx: 0, dy: 0 }, displayScale, framebufferSize());
   drawPointer();
   followView();

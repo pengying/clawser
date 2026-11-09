@@ -966,3 +966,16 @@ test('Trackpad: the pointer is pulled back on screen after a resize.', { skip: n
   assert.ok(r.left + 1.5 >= 0 && r.left + 1.5 < r.w && r.top + 1.5 >= 0 && r.top + 1.5 < r.h, 'pointer hotspot inside the window: ' + JSON.stringify(r));
   assert.ok((await evaluate('__viewer.pointer()')).x <= width - 1);
 });
+
+test('Touch: a resize does not scroll the view toward a leftover Trackpad pointer', { skip: noVncSkip }, async t => {
+  const { evaluate, touch, cdp } = await trackpadPhone(t);
+  await evaluate('__viewer.zoomTo(1)');
+  await settle();
+  for (let n = 0; n < 8; n++) { await touch('touchStart', [[50, 600]]); await touch('touchMove', [[150, 600]]); await touch('touchMove', [[250, 600]]); await touch('touchMove', [[350, 600]]); await touch('touchEnd', []); await pause(50); }
+  await evaluate("__viewer.setInputMode('touch')");
+  await evaluate("document.querySelector('#viewport').scrollLeft = 0");
+  await settle();
+  await cdp.send('Emulation.setDeviceMetricsOverride', { width: 300, height: 844, deviceScaleFactor: 2, mobile: true });
+  await settle();
+  assert.equal(await evaluate("document.querySelector('#viewport').scrollLeft"), 0, 'Touch mode keeps the view where the owner left it');
+});
