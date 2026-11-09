@@ -979,3 +979,90 @@ test('Touch: a resize does not scroll the view toward a leftover Trackpad pointe
   await settle();
   assert.equal(await evaluate("document.querySelector('#viewport').scrollLeft"), 0, 'Touch mode keeps the view where the owner left it');
 });
+
+test('a tap on the page while in control hides the bar and still clicks there', { skip: noVncSkip }, async t => {
+  const { evaluate, tap, point, peers } = await phone(t, undefined);
+  await evaluate('__viewer.showBar()');
+  // The brief's tap(960, 900) is outside the 1280x720 framebuffer, so aim at a page point below the bar.
+  const [px, py] = await point(640, 500);
+  const barBottom = await evaluate(`document.querySelector('#bar').getBoundingClientRect().bottom`);
+  assert.ok(px >= 0 && px <= 390 && py <= 844 && py > barBottom + 4, `the tap point (${px}, ${py}) is on screen below the bar (${barBottom})`);
+  const before = peers.at(-1).pointers.length;
+  await tap(640, 500);
+  await settle();
+  assert.equal(await evaluate('__viewer.barHidden()'), true);
+  assert.deepEqual(peers.at(-1).pointers.slice(before).map(e => e.mask), [1, 0], 'the same tap clicked once');
+});
+
+test('taps and slides that start on the bar, the sheet or the tab never reach the remote screen', { skip: noVncSkip }, async t => {
+  const { evaluate, press, touch, peers } = await phone(t, undefined);
+  const peer = peers.at(-1);
+  for (const mode of ['touch', 'trackpad']) {
+    await evaluate(`__viewer.setInputMode('${mode}')`);
+    for (const view of ['fit', 'zoomed']) {
+      await evaluate(view === 'fit' ? "__viewer.zoomTo('fit')" : "__viewer.zoomTo(3); document.querySelector('#viewport').scrollTop = 0");
+      await settle();
+      await evaluate('__viewer.closeSheet(); __viewer.showBar()');
+      await settle();
+      const before = peer.pointers.length;
+      const label = `${mode}, ${view}`;
+      // The empty middle of the bar, between the status badge and the centre group.
+      const [mx, my] = await evaluate(`(() => { const a = document.querySelector('#bar-status').getBoundingClientRect(), c = document.querySelector('#input-mode').getBoundingClientRect(), row = document.querySelector('.bar-row').getBoundingClientRect(); return [(a.right + c.left) / 2, row.top + row.height / 2]; })()`);
+      assert.equal(await evaluate(`document.elementFromPoint(${mx}, ${my}).closest('#bar') !== null`), true, `${label}: the point (${mx}, ${my}) is on the bar`);
+      await touch('touchStart', [[mx, my]]); await touch('touchEnd', []);
+      await press('#bar-status');
+      await press('#more');
+      for (const selector of ['#zoom-out', '#zoom-in', '#zoom-toggle']) await press(selector);
+      // A slide that starts on the bar and ends on the page.
+      await touch('touchStart', [[mx, my]]); await touch('touchMove', [[mx, my + 150]]); await touch('touchMove', [[mx + 40, my + 400]]); await touch('touchEnd', []);
+      await evaluate('__viewer.hideBar()');
+      const [tx, ty] = await evaluate(`(() => { const r = document.querySelector('#bar-tab').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+      await touch('touchStart', [[tx, ty]]); await touch('touchMove', [[tx, ty + 80]]); await touch('touchEnd', []);
+      await settle();
+      const leaked = peer.pointers.slice(before);
+      assert.deepEqual(leaked.filter(e => (e.mask & 7) || (e.mask & 0x78)), [], `${label}: no button or wheel packet reached the remote screen`);
+      assert.deepEqual(await evaluate('__viewer.gestures()'), { touch: false, pad: false }, `${label}: no gesture is left alive`);
+    }
+  }
+});
+
+test('showing and hiding the bar leaves zoom and scroll exactly where they were', { skip: noVncSkip }, async t => {
+  const { evaluate } = await phone(t, undefined);
+  await evaluate('__viewer.zoomTo(2)');
+  await settle();
+  await evaluate(`(() => { const v = document.querySelector('#viewport'); v.scrollLeft = 120; v.scrollTop = 90; })()`);
+  const state = () => evaluate(`(() => { const v = document.querySelector('#viewport'); return { scale: document.querySelector('#zoom-level').dataset.scale, left: v.scrollLeft, top: v.scrollTop }; })()`);
+  const start = await state();
+  assert.ok(start.left > 0 && start.top > 0, 'the view is scrolled');
+  await evaluate('__viewer.showBar()');
+  assert.deepEqual(await state(), start, 'showing the bar changes nothing');
+  await evaluate('__viewer.hideBar()');
+  assert.deepEqual(await state(), start, 'hiding the bar changes nothing');
+  await evaluate('__viewer.showBar()');
+  assert.deepEqual(await state(), start, 'showing it again changes nothing');
+});
+
+test('the hidden tab brings the bar back with a tap or a pull down', { skip: noVncSkip }, async t => {
+  const { evaluate, press, touch, peers } = await phone(t, undefined);
+  const before = peers.at(-1).pointers.length;
+  const inBar = () => evaluate(`document.querySelector('#bar').contains(document.activeElement) && document.activeElement.tagName === 'BUTTON'`);
+  const onTab = async dy => {
+    const [x, y] = await evaluate(`(() => { const r = document.querySelector('#bar-tab').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+    await touch('touchStart', [[x, y]]); await touch('touchMove', [[x, y + dy]]); await touch('touchEnd', []);
+    await settle();
+  };
+  await evaluate('__viewer.hideBar()');
+  await press('#bar-tab');
+  await settle();
+  assert.equal(await evaluate('__viewer.barHidden()'), false, 'a tap shows the bar');
+  assert.equal(await inBar(), true, 'a tap moves focus onto a bar button');
+  await evaluate('document.activeElement.blur(); __viewer.hideBar()');
+  await onTab(30);
+  assert.equal(await evaluate('__viewer.barHidden()'), false, 'a pull of 30 px shows the bar');
+  assert.equal(await inBar(), false, 'a pull does not also fire the tap click and its focus jump');
+  await evaluate('__viewer.hideBar()');
+  await onTab(5);
+  assert.equal(await evaluate('__viewer.barHidden()'), false, 'a 5 px wobble counts as a tap');
+  assert.equal(await inBar(), true, 'the wobble went through the normal click');
+  assert.equal(peers.at(-1).pointers.length, before, 'none of these sent a pointer packet');
+});

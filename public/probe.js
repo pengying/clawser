@@ -380,6 +380,16 @@ barTab.addEventListener('click', () => {
   showBar();
   [...bar.querySelectorAll('button')].find(button => !button.disabled && button.getClientRects().length)?.focus();
 });
+// A pull down on the tab shows the bar as well. The touchend then cancels the click, so focus does not jump a second time.
+let tabPull;
+barTab.addEventListener('touchstart', event => { tabPull = { y: event.touches[0].clientY, done: false }; }, { passive: true });
+barTab.addEventListener('touchmove', event => {
+  if (!tabPull || tabPull.done || !event.touches.length || event.touches[0].clientY - tabPull.y < 12) return;
+  tabPull.done = true;
+  showBar();
+}, { passive: true });
+barTab.addEventListener('touchend', event => { if (tabPull?.done && event.cancelable) event.preventDefault(); tabPull = undefined; }, { passive: false });
+barTab.addEventListener('touchcancel', () => { tabPull = undefined; });
 function setBarState(state) {
   const inControl = state === 'control';
   const badge = document.getElementById('bar-status');
@@ -946,6 +956,8 @@ for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) windo
     // While the sheet is open a tap on the page only closes it. The whole gesture is swallowed.
     if (touchGesture?.swallowed) return;
     if (sheetOpen() && !touchGesture && !padGesture) { closeSheet(); touchGesture = { swallowed: true }; return; }
+    // The first touch on the page in control tucks the bar away, and the same gesture carries on below. Focus stays where it is.
+    if (controlReady && !accessEnded && !barHidden() && !touchGesture && !padGesture) hideBar();
     if (padGesture || (!touchGesture && inputMode === 'trackpad' && controlReady && !accessEnded)) return trackpadTouch(type, touches);
     if (touches.length >= 2) beginPinch(touches);
     else if (!touchGesture) {
