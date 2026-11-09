@@ -11,6 +11,17 @@ const MAX_BODY = 16_384;
 const PUBLIC = new URL('../public/', import.meta.url);
 const assets = new Map([['/assets/viewer.js', ['viewer.js', 'text/javascript']], ['/assets/editing.js', ['editing.js', 'text/javascript']], ['/assets/picker.js', ['picker.js', 'text/javascript']], ['/assets/style.css', ['style.css', 'text/css']]]);
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
+// Per handoff, per minute, as in the noVNC viewer. Only wrong invitations and cookies spend the guess
+// budget, and the owner's own calls spend the request budget, so a flood from someone without the link
+// never locks the owner out. Done spends nothing.
+const GUESS_LIMIT = 30;
+const REQUEST_LIMIT = 240;
+// The viewer files are small and fixed, so a flood of page loads costs no disk reads.
+const files = new Map();
+function publicFile(file) {
+  if (!files.has(file)) files.set(file, readFile(new URL(file, PUBLIC)).catch((error) => { files.delete(file); throw error; }));
+  return files.get(file);
+}
 function security(res) {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Referrer-Policy', 'no-referrer');
@@ -45,7 +56,6 @@ export class HandoffServer {
     this.server = createServer((req, res) => { void this.handle(req, res); });
     this.server.headersTimeout = 10_000; this.server.requestTimeout = 15_000;
     this.server.maxConnections = 128;
-    this.requestWindow = { at: Date.now(), count: 0 };
     this.server.on('upgrade', (req, socket, head) => this.upgrade(req, socket, head));
     this.store.on('release', (share) => { const entry = this.streams.get(share.id); if (entry) this.cancelEntry(entry); });
     this.store.on('ended', ({ id }) => this.stopStream(id));
@@ -102,20 +112,20 @@ export class HandoffServer {
   async handle(req, res) {
     security(res);
     try {
-      if (Date.now() - this.requestWindow.at > 1000) this.requestWindow = { at: Date.now(), count: 0 };
-      if (++this.requestWindow.count > 100) { req.resume(); throw fail('Request rate exceeded', 429); }
       if (this.comparisonProxy?.matches(req.url)) { this.comparisonProxy.handle(req, res); return; }
       const path = new URL(req.url, 'http://localhost').pathname;
       const asset = assets.get(path);
       const route = path.match(/^\/s\/([a-f0-9]{32})\/(claim|state|control|release|done)?$/);
       if (req.method === 'GET' && (asset || route && !route[2])) {
         const [file, type] = asset || ['index.html', 'text/html'];
-        const data = await readFile(new URL(file, PUBLIC));
+        const data = await publicFile(file);
         res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8` }); res.end(data); return;
       }
       if (!route) throw fail('Not found', 404);
       const [, id, action] = route;
       this.requireBinding();
+      let share;
+      try { share = this.store.get(id); } catch { throw fail('Invalid or expired viewer session', 401); }
       if (req.method === 'POST') {
         if (!this.originAllowed(req)) throw fail('Origin rejected', 403);
         const input = await body(req);
@@ -123,14 +133,14 @@ export class HandoffServer {
         if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail('Invalid request');
         if (action === 'claim') {
           let session;
-          try { session = this.store.claim(id, input.token); } catch { throw fail('Invalid, claimed, or expired invitation', 401); }
+          try { session = this.store.claim(id, input.token); } catch { this.spend(share, 'guesses', GUESS_LIMIT); throw fail('Invalid, claimed, or expired invitation', 401); }
           const secure = (this.publicBaseUrl || this.localUrl).startsWith('https:') ? '; Secure' : '';
           res.setHeader('Set-Cookie', 'handoff=' + session.secret + '; Path=/s/' + id + '/; HttpOnly; SameSite=Strict; Max-Age=' + Math.max(1, Math.floor((session.expiresAt - Date.now()) / 1000)) + secure);
           json(res, 200, this.store.state(this.store.authorize(id, session.secret))); return;
         }
       } else if (req.method !== 'GET' || action !== 'state') throw fail('Method not allowed', 405);
-      let share;
-      try { share = this.store.authorize(id, cookie(req)); } catch { throw fail('Invalid or expired viewer session', 401); }
+      try { share = this.store.authorize(id, cookie(req)); } catch { this.spend(share, 'guesses', GUESS_LIMIT); throw fail('Invalid or expired viewer session', 401); }
+      if (action !== 'done') this.spend(share, 'requests', REQUEST_LIMIT);
       if (req.method === 'GET') { json(res, 200, this.store.state(share)); return; }
       if (action === 'control') {
         if (share.permission !== 'control') throw fail('Watch-only invitation', 403);
@@ -150,6 +160,14 @@ export class HandoffServer {
       else throw fail('Not found', 404);
       json(res, 200, this.store.state(share));
     } catch (error) { json(res, error.status || 400, { error: error.status ? error.message : 'Request unavailable', ...(error.recoveryRequired === true ? { recoveryRequired: true } : {}) }); }
+  }
+  // A budget holds at most its limit of timestamps, so a flood cannot grow it. It ends with its share.
+  spend(share, budget, limit) {
+    const cutoff = Date.now() - 60_000;
+    const budgets = share.budgets ??= { guesses: [], requests: [] };
+    const times = budgets[budget] = budgets[budget].filter((at) => at > cutoff);
+    if (times.length >= limit) throw fail(budget === 'guesses' ? 'Authentication rate exceeded' : 'Request rate exceeded', 429);
+    times.push(Date.now());
   }
   upgrade(req, socket, head) {
     if (this.comparisonProxy?.matches(req.url)) { this.comparisonProxy.upgrade(req, socket, head); return; }

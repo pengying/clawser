@@ -167,7 +167,7 @@ def group_pids(pgid):
 
 @serialized
 def retire(lease_id,may_be_writable=None,reason='controller_request'):
-    global actor,tainted,epoch
+    global actor,tainted,epoch,clipboard_owner
     if actor is None and lease_id in settlements:
         cached=settlements[lease_id]
         if may_be_writable is True and cached['readOnly']:
@@ -202,6 +202,10 @@ def retire(lease_id,may_be_writable=None,reason='controller_request'):
             if lease is current:
                 stop_clipboard_owner(owner)
                 pending_clipboard.pop(pid,None)
+        # Text pasted from the phone, such as a password or code, must not outlive control.
+        if current['role']=='control' and clipboard_owner is not None:
+            stop_clipboard_owner(clipboard_owner)
+            clipboard_owner=None
         if display_lost():
             tainted=True
             current['reason']=reason='critical_child_exit'

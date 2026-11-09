@@ -579,6 +579,16 @@ test('clipboard round-trips for the control lease only', opts, async t => {
   await assert.rejects(h.rpc('clipboardRead'), /control lease/);
 });
 
+test('ending control clears a pasted secret from the browser clipboard', opts, async t => {
+  const h = await desktop(t);
+  const viewer = await h.start('clipboard-clear', 'control');
+  const owner = await h.rpc('clipboardWrite', { text: 'one-time-code-48213', leaseId: viewer.leaseId, epoch: viewer.epoch });
+  h.track(owner.ownerPid);
+  await h.rpc('stopViewerAndSettle', { leaseId: viewer.leaseId });
+  assert.equal(alive(owner.ownerPid), false, 'the paste helper is gone when control ends');
+  assert.equal((await h.x.json('selection-owner')).pid, 0, 'nothing holds the clipboard afterwards');
+});
+
 test('SIGTERM retires the active viewer and removes the control socket, leaving the display', opts, async t => {
   const h = await desktop(t);
   const viewer = await h.start('sigterm', 'control');
