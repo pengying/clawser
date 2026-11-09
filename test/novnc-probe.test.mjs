@@ -881,6 +881,8 @@ async function openProbeFixture(t, options = {}) {
   const fixtureScript = String.raw`<script>
     (() => {
       const config = ${JSON.stringify(options)};
+      // A phone reports touch points, which keeps the phone-only bar controls on screen.
+      if (config.touch) Object.defineProperty(Navigator.prototype, 'maxTouchPoints', { configurable: true, get: () => 5 });
       const realSetTimeout = window.setTimeout.bind(window);
       let apiBodyDeadline = false;
       window.setTimeout = (callback, delay, ...args) => {
@@ -1105,7 +1107,7 @@ test('Take control hides the controls once control connects, and a drop brings t
 });
 
 test('the top bar shows Watching with Take control centered, and In control with Keyboard', { skip: !existsSync(chromePath) }, async (t) => {
-  const { evaluate, waitFor } = await openProbeFixture(t, { signalPromotionClose: true, credentialsDemoting: 2 });
+  const { evaluate, waitFor } = await openProbeFixture(t, { signalPromotionClose: true, credentialsDemoting: 2, touch: true });
   await waitFor('fixture.rfbs.length === 1 && document.querySelector("#control").disabled === false', 'watch ready');
   const bar = () => evaluate(`(() => { const c = document.querySelector('#control').getBoundingClientRect(), b = document.querySelector('#bar').getBoundingClientRect();
     return { status: document.querySelector('#bar-status').getAttribute('aria-label'), top: b.top, centerOffset: Math.abs((c.left + c.right) / 2 - innerWidth / 2),

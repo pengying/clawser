@@ -567,6 +567,32 @@ async function phone(t, focus, options = {}) {
       left: r.left, right: r.right, top: r.top, bottom: r.bottom, height: r.height, width: r.width }; })()`);
   return { ...ctx, errors, touch, tap, keyboard, press: selector => press(ctx, selector), shown, point, hold, doubleTap, pill };
 }
+// A desktop browser: a mouse and a real keyboard, no touch. The bar stays shown until a click on the page.
+async function desktop(t, options = {}) {
+  const ctx = await fixture(t, options);
+  await ctx.cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  const errors = [];
+  await ctx.cdp.send('Runtime.enable');
+  ctx.cdp.on('Runtime.exceptionThrown', e => errors.push(JSON.stringify(e.exceptionDetails?.text) + JSON.stringify(e.exceptionDetails?.exception?.description)));
+  await ctx.cdp.send('Page.navigate', { url: ctx.url });
+  await ctx.waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'RFB connected');
+  // Clicks at a framebuffer point with the mouse.
+  const click = async (fx, fy) => {
+    const [x, y] = await ctx.evaluate(`(() => { const r = document.querySelector('canvas').getBoundingClientRect(), s = r.width / ${width}; return [Math.round(r.left + ${fx} * s), Math.round(r.top + ${fy} * s)]; })()`);
+    await ctx.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, buttons: 0 });
+    await ctx.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
+    await ctx.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
+  };
+  // A key chord as the browser receives it from a physical keyboard. modifiers: 2 is Ctrl, 4 is Meta.
+  const chord = async (key, code, keyCode, modifiers) => {
+    const mod = modifiers === 4 ? { key: 'Meta', code: 'MetaLeft', windowsVirtualKeyCode: 91 } : { key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17 };
+    await ctx.cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', modifiers, ...mod });
+    await ctx.cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', modifiers, key, code, windowsVirtualKeyCode: keyCode });
+    await ctx.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', modifiers, key, code, windowsVirtualKeyCode: keyCode });
+    await ctx.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', modifiers: 0, ...mod });
+  };
+  return { ...ctx, errors, click, chord, press: selector => press(ctx, selector) };
+}
 async function trackpadPhone(t, focus) {
   const ctx = await phone(t, focus);
   await ctx.evaluate("__viewer.setInputMode('trackpad')");
@@ -903,6 +929,142 @@ test('Trackpad: a bar finger that reuses the id of a page finger whose end was l
   const masks = peer.pointers.slice(before).map(e => e.mask);
   assert.equal(masks.filter(m => m === 1).length, 1, 'one left click: ' + JSON.stringify(masks));
   assert.ok(masks.every(m => !(m & 4)), 'no right click: ' + JSON.stringify(masks));
+});
+
+test('desktop: a click on the page closes the open sheet and leaves the bar', { skip: noVncSkip }, async t => {
+  const { evaluate, click, press, peers, errors } = await desktop(t);
+  assert.equal(await evaluate('__viewer.barHidden()'), false, 'the bar starts shown');
+  await press('#more');
+  assert.equal(await evaluate('__viewer.sheetOpen()'), true);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  await click(640, 420);
+  await settle();
+  assert.equal(await evaluate('__viewer.sheetOpen()'), false, 'the click closed the sheet');
+  assert.equal(await evaluate('__viewer.barHidden()'), false, 'closing the sheet leaves the bar in place');
+  assert.ok(peer.pointers.slice(before).every(e => !(e.mask & 1)), 'the click that closed the sheet did not reach the browser');
+  assert.deepEqual(errors, []);
+});
+
+test('desktop: in control a click on the page tucks the bar away and still clicks', { skip: noVncSkip }, async t => {
+  const { evaluate, click, peers, errors } = await desktop(t);
+  const peer = peers.at(-1), before = peer.pointers.length;
+  await click(640, 420);
+  await settle();
+  assert.equal(await evaluate('__viewer.barHidden()'), true, 'the click tucked the bar away');
+  assert.equal(await evaluate(`!document.querySelector('#bar-tab').hidden`), true, 'the tab that brings it back is shown');
+  const down = peer.pointers.slice(before).find(e => e.mask & 1);
+  assert.ok(down && Math.abs(down.x - 640) <= 2 && Math.abs(down.y - 420) <= 2, 'the same click reached the browser: ' + JSON.stringify(down));
+  await evaluate('__viewer.showBar()');
+  const again = peer.pointers.length;
+  await click(400, 300);
+  await settle();
+  assert.equal(await evaluate('__viewer.barHidden()'), true, 'a later click tucks it away again');
+  assert.ok(peer.pointers.slice(again).some(e => e.mask & 1), 'and clicks');
+  assert.deepEqual(errors, []);
+});
+
+test('desktop: the bar has no Touch / Trackpad switch and no Keyboard button', { skip: noVncSkip }, async t => {
+  const { evaluate, errors } = await desktop(t);
+  const shown = await evaluate(`['input-mode', 'keyboard', 'more', 'done'].map(id => { const e = document.getElementById(id); return [id, !e.hidden && e.getClientRects().length > 0]; })`);
+  assert.deepEqual(Object.fromEntries(shown), { 'input-mode': false, keyboard: false, more: true, done: true });
+  assert.equal(await evaluate(`document.querySelector('#pointer').hasAttribute('hidden')`), true, 'no on-screen pointer');
+  assert.deepEqual(errors, []);
+});
+
+test('desktop: the sheet names the copy and paste shortcuts, not touch gestures', { skip: noVncSkip }, async t => {
+  const { evaluate, errors } = await desktop(t);
+  await evaluate('__viewer.openSheet()');
+  const mac = await evaluate(`/Mac|iPhone|iPad/.test(navigator.userAgentData?.platform ?? navigator.platform)`);
+  assert.equal(await evaluate(`document.querySelector('#hint').textContent`), mac ? '\u2318C to copy \u00b7 \u2318V to paste' : 'Ctrl+C to copy \u00b7 Ctrl+V to paste');
+  assert.deepEqual(errors, []);
+});
+
+test('desktop: a stored Trackpad choice from a phone does not apply to a mouse', { skip: noVncSkip }, async t => {
+  const ctx = await fixture(t);
+  await ctx.cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await ctx.cdp.send('Page.navigate', { url: ctx.url });
+  await ctx.waitFor(`document.querySelector('#status')?.textContent === 'Control connected.'`, 'RFB connected');
+  await ctx.evaluate(`localStorage.setItem('clawser.inputMode', 'trackpad')`);
+  await ctx.cdp.send('Page.reload');
+  await ctx.waitFor(`document.querySelector('#status')?.textContent === 'Control connected.' && document.querySelector('canvas')?.width === ${width}`, 'reconnected');
+  assert.equal(await ctx.evaluate(`document.querySelector('#pointer').hasAttribute('hidden')`), true, 'no Trackpad pointer on a desktop');
+  assert.equal(await ctx.evaluate(`document.querySelector('#mode-touch').getAttribute('aria-checked')`), 'true');
+});
+
+test('desktop: Ctrl+V and Cmd+V paste this device clipboard into the browser', { skip: noVncSkip }, async t => {
+  const { evaluate, chord, peers, errors } = await desktop(t);
+  const peer = peers.at(-1);
+  await evaluate(`window.clipboardReads = 0; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText: async () => { window.clipboardReads++; return 'from the desk'; }, writeText: async () => {} } }); document.querySelector('canvas').focus()`);
+  for (const [modifiers, n] of [[2, 1], [4, 2]]) {
+    const keysBefore = peer.keys.length;
+    await chord('v', 'KeyV', 86, modifiers);
+    for (let i = 0; i < 200 && peer.clipboards.length < n; i++) await pause(10);
+    assert.equal(peer.clipboards.at(-1), 'from the desk', 'the text went to the browser clipboard');
+    // The viewer first releases the Ctrl or Cmd that noVNC already pressed. Only a Ctrl release after V ends the chord.
+    const chordDone = () => { const fresh = peer.keys.slice(keysBefore); const v = fresh.findIndex(k => !k.down && k.keysym === 0x76); return v >= 0 && fresh.slice(v).some(k => !k.down && k.keysym === 0xffe3); };
+    for (let i = 0; i < 200 && !chordDone(); i++) await pause(10);
+    const fresh = peer.keys.slice(keysBefore);
+    const downs = fresh.filter(k => k.down).map(k => k.keysym);
+    assert.ok(downs.includes(0xffe3) && downs.includes(0x76), 'Ctrl+V went to the browser: ' + JSON.stringify(fresh));
+    // Pressing Cmd reaches the browser before V does. It must be released before Ctrl+V arrives.
+    const atV = new Set();
+    for (const k of fresh) { if (k.keysym === 0x76 && k.down) break; if (k.down) atV.add(k.keysym); else atV.delete(k.keysym); }
+    assert.deepEqual([...atV], [0xffe3], 'only Ctrl was held when V went down: ' + JSON.stringify(fresh));
+    const held = new Map(); for (const k of fresh) held.set(k.keysym, k.down);
+    assert.ok([...held.values()].every(v => !v), 'every key it pressed was let go: ' + JSON.stringify(fresh));
+  }
+  assert.deepEqual(errors, []);
+});
+
+test('desktop: Ctrl+C copies the browser selection to this device', { skip: noVncSkip }, async t => {
+  const { evaluate, chord, peers, waitFor, errors } = await desktop(t);
+  const peer = peers.at(-1);
+  await evaluate(`window.clipboardWrites = []; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText: async () => '', writeText: async text => { window.clipboardWrites.push(text); } } }); document.querySelector('canvas').focus()`);
+  const keysBefore = peer.keys.length;
+  // The browser answers Ctrl+C by publishing its selection, as Chrome on the agent desktop does.
+  const answer = setInterval(() => {
+    if (peer.keys.slice(keysBefore).some(k => k.down && k.keysym === 0x63)) {
+      clearInterval(answer);
+      const cut = Buffer.from('picked on the desk'); const packet = Buffer.alloc(8); packet[0] = 3; packet.writeUInt32BE(cut.length, 4);
+      peer.socket.send(Buffer.concat([packet, cut]));
+    }
+  }, 5);
+  t.after(() => clearInterval(answer));
+  await chord('c', 'KeyC', 67, 2);
+  await waitFor('window.clipboardWrites.length === 1', 'copied to this device');
+  assert.deepEqual(await evaluate('window.clipboardWrites'), ['picked on the desk']);
+  assert.match(await evaluate(`document.querySelector('#status').textContent`), /Copied to this device/);
+  assert.deepEqual(errors, []);
+});
+
+test('desktop: other Ctrl and Cmd shortcuts still go to the browser unchanged', { skip: noVncSkip }, async t => {
+  const { evaluate, chord, peers } = await desktop(t);
+  const peer = peers.at(-1);
+  await evaluate(`window.clipboardReads = 0; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText: async () => { window.clipboardReads++; return 'x'; }, writeText: async () => {} } }); document.querySelector('canvas').focus()`);
+  const keysBefore = peer.keys.length;
+  await chord('a', 'KeyA', 65, 2);
+  for (let i = 0; i < 100 && !peer.keys.slice(keysBefore).some(k => k.down && k.keysym === 0x61); i++) await pause(10);
+  assert.ok(peer.keys.slice(keysBefore).some(k => k.down && k.keysym === 0x61), 'Ctrl+A reached the browser');
+  assert.equal(await evaluate('window.clipboardReads'), 0, 'and read nothing');
+  assert.deepEqual(peer.clipboards, []);
+});
+
+test('desktop: holding Ctrl+V pastes once, not once per key repeat', { skip: noVncSkip }, async t => {
+  const { evaluate, cdp, peers } = await desktop(t);
+  const peer = peers.at(-1);
+  await evaluate(`window.clipboardReads = 0; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { readText: async () => { window.clipboardReads++; return 'once'; }, writeText: async () => {} } }); document.querySelector('canvas').focus()`);
+  const v = { modifiers: 2, key: 'v', code: 'KeyV', windowsVirtualKeyCode: 86 };
+  await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', modifiers: 2, key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17 });
+  await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...v });
+  // A held key repeats after about half a second, then every few dozen milliseconds.
+  await pause(500);
+  for (let i = 0; i < 4; i++) { await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', autoRepeat: true, ...v }); await pause(40); }
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...v });
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', modifiers: 0, key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17 });
+  for (let i = 0; i < 200 && peer.clipboards.length < 1; i++) await pause(10);
+  await pause(400);
+  assert.deepEqual(peer.clipboards, ['once'], 'one paste');
+  assert.equal(peer.keys.filter(k => k.down && k.keysym === 0x76).length, 1, 'one Ctrl+V in the browser');
 });
 
 test('Trackpad: turning the phone releases a held drag', { skip: noVncSkip }, async t => {

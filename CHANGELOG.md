@@ -1,5 +1,11 @@
 # Changes
 
+## 0.8.2
+
+- The noVNC viewer now behaves like a desktop page when it is opened on a computer with a mouse. A click on the page closes the ⋯ sheet, as a tap does on a phone. In control, a click tucks the bar away and still clicks.
+- On a computer, the bar no longer shows the Touch / Trackpad switch or the Keyboard button. Neither helps with a mouse and a real keyboard. A Trackpad choice saved on a phone does not carry over. A laptop with a touch screen keeps both, as a phone does.
+- Copy and paste now work with the usual keyboard shortcuts on a computer. Ctrl+C or ⌘C copies the selection in the agent's browser to your computer. Ctrl+V or ⌘V pastes your computer's clipboard into the focused field. On a Mac, ⌘ works as it does in any other app. Other shortcuts, such as Ctrl+A, still go to the agent's browser unchanged. The ⋯ sheet names the shortcuts instead of the touch gestures.
+
 ## 0.8.1
 
 - The bundled skill now tells OpenClaw that it runs only on Linux. `openclaw skills list` and `skills check` show it as unavailable on macOS and Windows, where setup refuses to install anyway. On Linux nothing changes.
