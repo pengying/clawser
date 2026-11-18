@@ -7,7 +7,7 @@ Setup writes five systemd user services: the display, the window manager, the br
 - `supervisor.py` serves a private Unix control socket and owns the x11vnc actors.
 - `xproof.py` lists X clients by PID through XRes, and settles held input through XTest. It uses Python `ctypes` and the host's X libraries, so it needs no compiler.
 - `clipboard.py` owns and reads the X clipboard over libX11, so it needs no xclip.
-- `openbox_config.py` writes Clawser's own openbox config from the system `rc.xml`.
+- `openbox_config.py` writes Clawser's own openbox config from the system `rc.xml`. It keeps only focus, raise, window cycling and mouse move/resize, removes every menu, command and window-manager action, and points the menu at an empty `menu.xml` that setup writes beside it.
 - `index.mjs` exports `HostDesktopRuntime`, the controller's adapter for the supervisor.
 
 ```js

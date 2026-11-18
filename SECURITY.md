@@ -70,6 +70,35 @@ the viewer origin.
   machine you don't share.
 - **A link shows every tab.** Whoever opens a noVNC link sees every tab in the
   agent's browser, not just the one the agent was using.
+- **What a control link can reach.** Whoever holds control can send any key
+  or click to the virtual screen, so treat a control link like handing over
+  the agent's browser, running as your account.
+  - The window manager offers nothing beyond the browser windows. Clawser's
+    openbox config has no menu, command, desktop switching, show-desktop,
+    close or minimize action, by key or by mouse, and its menu file is an
+    empty one of Clawser's own, so openbox can't fall back to the system menu,
+    which opens a terminal. Clicks still focus and raise windows, Alt+Tab moves
+    between them, and an Alt-drag moves one. Tested against openbox 3.6.1 on a
+    scratch display: a click on the bare screen, Alt+Space, Super+D and Alt+F4
+    do nothing. Installs set up by 1.0.1 or earlier get this config on the
+    next `setup --yes`. Until then the controller refuses control links (watch
+    links still work), the Gateway log warns when the plugin starts, and
+    doctor fails its `window manager config` row.
+  - Chrome doesn't start other programs on that screen. It runs with
+    refusing stand-ins for `xdg-open`, `xdg-email` and similar launchers first
+    on its `PATH`, and with no session bus. Tested with Chrome 157 on a
+    scratch display: Show in folder, opening a download, and accepting a
+    `mailto:` or `ssh:` link open no other window. Without them, Show in
+    folder opened a file manager on the screen.
+  - The browser itself reads and writes your files. `file://` pages show any
+    file your account can read, Chrome's Save, upload and print-to-file
+    dialogs read and write any file your account can (a page saved over
+    `~/.bashrc` runs as you the next time you open a shell), and the print
+    dialog reaches your printers. Clawser leaves `file://` alone because the
+    agent may use it. Closing the rest needs Chrome policies that only root
+    can set (`AllowFileSelectionDialogs`, `URLBlocklist`), which Clawser
+    doesn't install. Give control links only to someone you would trust with
+    your account, and prefer watch links otherwise.
 - **Cookies are protected by file permissions only.** Clawser's browser uses
   Chrome's basic password store, so it starts signed in after a reboot with
   nobody at the machine. Cookies are stored unencrypted on disk. The profile

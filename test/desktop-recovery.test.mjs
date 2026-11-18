@@ -18,7 +18,7 @@ async function fixture(t, overrides = {}) {
   const ledger = { version: 1, calls: {}, leases: { [id]: row() } };
   await writeFile(join(stateDir, 'ledger.json'), JSON.stringify(ledger), { mode: 0o600 });
   const events = [];
-  const runtime = { status: async () => { events.push('status'); return status(); }, stopViewerAndSettle: async params => { events.push('retire'); assert.deepEqual(params, { leaseId: id, mayBeWritable: true }); return receipt(); }, ...overrides };
+  const runtime = { status: async () => { events.push('status'); return status(); }, stopViewerAndSettle: async params => { events.push('retire'); assert.deepEqual(params, { leaseId: id, mayBeWritable: true, displayGeneration: 'display' }); return receipt(); }, ...overrides };
   const options = { stateDir, profile: 'fixture', runtime, leaseId: id };
   const dependencies = { observe: async () => { events.push('observe'); return observation(); } };
   const journal = async () => JSON.parse(await readFile(join(stateDir, 'ledger.json'), 'utf8'));

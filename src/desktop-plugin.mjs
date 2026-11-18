@@ -1,5 +1,7 @@
 import { authorizedSession, ownerAuthorized, ownerGuard } from './authorization.mjs';
 import { isAbsolute } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { STALE_WINDOW_MANAGER, receiptForSocket, windowManagerState } from './window-manager.mjs';
 import { activationStatusForTarget, createBrowserActivation } from './browser-activation.mjs';
 import { cdpOrigin } from './browser-config.mjs';
 import { createBrowserBindingGuard, monitorBrowserBinding, registerBrowserAccessPolicy } from './browser-policy.mjs';
@@ -32,13 +34,64 @@ function duration(value, fallback, min, max, label) {
   if (!Number.isInteger(result) || result < min || result > max) throw new Error('Invalid ' + `${label}`);
   return result;
 }
+// Each admission names this Gateway process. Once it exits, the controller knows none of its browser calls can
+// still act, so a Gateway restart clears the uncertain calls a crash or a reload in mid-call left behind.
+let gatewayIdentity;
+function readGatewayIdentity() {
+  if (gatewayIdentity === undefined) {
+    gatewayIdentity = null;
+    try {
+      const stat = readFileSync('/proc/self/stat', 'utf8'), startTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
+      if (/^\d+$/.test(startTicks || '')) gatewayIdentity = { pid: process.pid, startTicks };
+    } catch { /* Without /proc the controller simply never clears this Gateway's calls on its own. */ }
+  }
+  return gatewayIdentity;
+}
+// With desktop.enabled the controller unit serves the viewer and runs its own tunnel, so these CDP viewer
+// settings do nothing. Each set of them is reported once per process, not on every reload.
+const ignoredSymbol = Symbol.for('openclaw.browser-handoff.ignored-desktop-settings.v1');
+export function ignoredDesktopSettings(pluginConfig = {}) {
+  return [
+    ...pluginConfig.port !== undefined ? ['port'] : [],
+    ...pluginConfig.publicBaseUrl !== undefined ? ['publicBaseUrl'] : [],
+    ...pluginConfig.comparisonProxyUrl !== undefined ? ['comparisonProxyUrl'] : [],
+    ...pluginConfig.funnel?.enabled === true ? ['funnel'] : [],
+    // Setup itself writes cloudflare.enabled=false next to the desktop settings.
+    ...pluginConfig.cloudflare?.enabled === true ? ['cloudflare'] : [],
+  ];
+}
+function warnIgnoredDesktopSettings(api) {
+  const names = ignoredDesktopSettings(api.pluginConfig);
+  if (!names.length) return;
+  const seen = globalThis[ignoredSymbol] ??= new Set(), key = names.join(',');
+  if (seen.has(key)) return;
+  seen.add(key);
+  api.logger?.warn?.('Browser Handoff desktop mode ignores plugin settings ' + names.join(', ') + ': the noVNC controller serves the viewer on its own port with its own on-demand tunnel. Remove them, or set desktop.enabled=false for the CDP viewer.');
+}
+// Sessions that ended suppress the completions of handoffs they owned. A handoff lives at most 30 minutes plus
+// its retirement, so an hour covers it; entries then expire, and at most CANCELED_LIMIT are kept.
+const CANCELED_TTL_MS = 3_600_000, CANCELED_LIMIT = 512;
+export function canceledSet({ ttlMs = CANCELED_TTL_MS, limit = CANCELED_LIMIT, now = Date.now } = {}) {
+  const entries = new Map();
+  const prune = () => { const at = now(); for (const [key, expires] of entries) if (expires <= at) entries.delete(key); };
+  return {
+    add(key) {
+      entries.delete(key); entries.set(key, now() + ttlMs);
+      prune();
+      while (entries.size > limit) entries.delete(entries.keys().next().value);
+    },
+    has(key) { const expires = entries.get(key); if (expires === undefined) return false; if (expires > now()) return true; entries.delete(key); return false; },
+    clear() { entries.clear(); },
+    get size() { prune(); return entries.size; },
+  };
+}
 function liveInstanceKey(api, origin = cdpOrigin(api.config?.browser?.profiles?.[api.pluginConfig.desktop.profile]?.cdpUrl)) {
   return JSON.stringify([api.pluginConfig || {}, origin]);
 }
 
 // Only private control-plane RPC runs in the Gateway. VNC, HTTP viewers, browser
 // supervision and the authoritative automation gate live in the controller.
-export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFactory, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic } = {}) {
+export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFactory, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic, readWindowManager = windowManagerState } = {}) {
   let config = api.pluginConfig.desktop;
   const allowed = ctx => ownerAuthorized(ctx, api.pluginConfig);
   if (api.registrationMode === 'tool-discovery') {
@@ -62,7 +115,8 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     return;
   }
   if (api.registrationMode !== undefined && api.registrationMode !== 'full') return;
-  let client, running = false, fault, pollTimer, serviceEpoch, publication, stopBindingMonitor, activation;
+  warnIgnoredDesktopSettings(api);
+  let client, running = false, fault, pollTimer, serviceEpoch, publication, stopBindingMonitor, activation, revocation;
   const unpublish = () => {
     if (publication && liveInstances().get(publication.key) === publication) liveInstances().delete(publication.key);
     publication = undefined;
@@ -73,10 +127,31 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     activation?.retire();
     // The controller remains authoritative for uncertain input and admissions.
     // Retire its invitations without clearing the Gateway admission ledger.
-    if (client) void client.request('revokeAll', { reason: 'plugin_stop' }, { timeoutMs: 180_000 }).catch(() => api.logger.warn('Browser Handoff configuration-change retirement was not confirmed; controller fencing remains authoritative.'));
+    if (client) revocation = client.request('revokeAll', { reason: 'plugin_stop' }, { timeoutMs: 180_000 }).catch(() => api.logger.warn('Browser Handoff configuration-change retirement was not confirmed; controller fencing remains authoritative.'));
   } });
   const calls = new Map(), notifications = new Map();
-  const canceledOwners = new Set(), canceledSessions = new Set();
+  // Each admitted browser call is tied to the connection that admitted it: the controller accepts its release
+  // only there, and treats a closed connection's admissions as uncertain. A connection this instance no longer
+  // uses (a later activate(), or a retired generation) therefore closes only once its own calls are released.
+  // busy counts work still in flight on a connection: an automationEnter not yet answered (its call may already be
+  // recorded) and a drift revocation. A connection in use is drained at once, so a finishing call's release still
+  // goes out on it, and it closes only when nothing is left.
+  const callClients = new Map(), draining = new Set(), busy = new Map();
+  const inUse = rpc => busy.has(rpc) || [...callClients.values()].includes(rpc);
+  const hold = rpc => { busy.set(rpc, (busy.get(rpc) || 0) + 1); };
+  const unhold = rpc => {
+    const count = (busy.get(rpc) || 1) - 1;
+    if (count) busy.set(rpc, count); else busy.delete(rpc);
+    if (draining.has(rpc)) releaseClient(rpc);
+  };
+  function releaseClient(rpc, pending) {
+    if (!rpc) return;
+    if (pending) { hold(rpc); void Promise.resolve(pending).catch(() => {}).finally(() => unhold(rpc)); }
+    if (inUse(rpc)) { draining.add(rpc); return; }
+    draining.delete(rpc);
+    rpc.close();
+  }
+  const canceledOwners = canceledSet(), canceledSessions = canceledSet();
   const sessionRuntime = api.runtime?.agent?.session, system = api.runtime?.system;
   const requestWake = typeof system?.requestHeartbeat === 'function'
     ? (options) => system.requestHeartbeat(options)
@@ -118,12 +193,12 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
         if (entry?.sessionId !== sessionId || entry.abortedLastRun === true || canceled(completion.owner, sessionKey)) { await ack(completion.id); continue; }
         const agentId = /^agent:([^:]+):/i.exec(sessionKey)[1];
         if (!notifications.has(notificationKey)) {
-          const reason = ['done', 'expired', 'disconnect', 'disconnected', 'revoke', 'revoked', 'tunnel_exit', 'heartbeat_timeout'].includes(completion.reason) ? completion.reason : 'ended';
+          const reason = ['done', 'expired', 'disconnect', 'disconnected', 'revoke', 'revoked', 'tunnel_exit', 'heartbeat_timeout', 'abandoned'].includes(completion.reason) ? completion.reason : 'ended';
           const safe = !fault && completion.resumeAllowed === true && completion.recoveryRequired !== true;
           const text = 'Browser Handoff ' + JSON.stringify(completion.id) + ' ended (' + reason + ') for profile ' + JSON.stringify(config.profile) + '. ' +
             (safe ? 'Input authority returned safely (resumeAllowed=true). Continue only if the original task remains pending. Take a fresh normal browser snapshot and check the actual outcome before continuing. '
               : 'resumeAllowed=false: browser automation must remain paused; operator recovery is required. ') +
-            'This event does not prove a CAPTCHA or form succeeded. After expiry, disconnect, or revoke, do not recreate handoff links automatically; ask the owner if further human action is needed. Do not resume a canceled task.';
+            'This event does not prove a CAPTCHA or form succeeded. After expiry, disconnect, revoke, or abandoned (nobody had the link open for a while), do not recreate handoff links automatically; ask the owner if further human action is needed. Do not resume a canceled task.';
           // This synchronous enqueue+wake pair follows the latest incarnation
           // read. Published SDK wake APIs do not accept an expected sessionId.
           if (system.enqueueSystemEvent(text, { sessionKey, agentId, contextKey: 'browser-handoff:' + completion.id + ':' + sessionId, fromConversationTurn: true }) !== true) continue;
@@ -162,9 +237,11 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     const count = calls.get(key) || 0;
     if (!count) return;
     if (count > 1) calls.set(key, count - 1);
-    else calls.delete(key);
-    const receipt = await rpc.request('automationLeave', { callKey: key }, { timeoutMs: 15_000 });
-    if (receipt?.released !== true) throw new Error('Uncertain completion receipt');
+    else { calls.delete(key); callClients.delete(key); }
+    try {
+      const receipt = await rpc.request('automationLeave', { callKey: key }, { timeoutMs: 15_000 });
+      if (receipt?.released !== true) throw new Error('Uncertain completion receipt');
+    } finally { if (draining.has(rpc)) releaseClient(rpc); }
   };
   const completionFault = () => {
     fault = 'Browser Handoff could not verify browser-call completion; operator recovery is required';
@@ -173,11 +250,16 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
   };
   registerBrowserAccessPolicy(api, { binding, assertAvailable: () => getClient() });
   const lifecycle = {
-    async activate({ prepared, assertCurrent }) {
+    async activate({ prepared, assertCurrent, setPublicTransport }) {
       assertCurrent(); config = prepared.pluginConfig.desktop;
       unpublish();
       stopBindingMonitor?.(); stopBindingMonitor = undefined;
       running = false; fault = undefined;
+      // A host may activate again without stopping first. The old poll timer and connection must not linger:
+      // the controller accepts only 16 connections.
+      clearInterval(pollTimer); pollTimer = undefined;
+      const prior = client; client = undefined;
+      releaseClient(prior, revocation); revocation = undefined;
       const epoch = serviceEpoch = Symbol();
       if (!isAbsolute(config.socketPath || '')) throw new Error('desktop.socketPath must be an absolute private Unix socket path');
       if (typeof config.profile !== 'string' || !config.profile.trim()) throw new Error('desktop.profile is required');
@@ -191,6 +273,10 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
         assertCurrent();
         if (serviceEpoch !== epoch || client !== rpc) throw new Error('Browser Handoff service changed during controller startup');
         validateIdentity(identity); assertCurrent();
+        // An upgrade that skipped setup keeps openbox's old menus, and the running controller keeps its old code too.
+        void readWindowManager(receiptForSocket(config.socketPath)).then(state => { if (state === 'stale') api.logger?.warn?.('Browser Handoff: ' + STALE_WINDOW_MANAGER); }, () => {});
+        // The controller knows whether its tunnel runs on demand (the default) or always.
+        setPublicTransport?.(identity.publicTransport === 'always-on' ? 'always-on' : 'on-demand');
         running = true;
         publication = { key: liveInstanceKey(api, binding.current().binding.cdpUrl), factory: toolFactory };
         liveInstances().set(publication.key, publication);
@@ -210,13 +296,26 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
         throw error;
       }
     },
+    // A retired generation keeps nothing that does not fence: no publication, binding monitor, poll timer or idle
+    // connection. A connection still carrying admitted calls, or the drift revocation, closes once they finish.
+    retire() {
+      unpublish();
+      running = false; serviceEpoch = undefined;
+      stopBindingMonitor?.(); stopBindingMonitor = undefined;
+      clearInterval(pollTimer); pollTimer = undefined;
+      const rpc = client; client = undefined;
+      releaseClient(rpc, revocation); revocation = undefined;
+    },
     async stop() {
       unpublish();
       running = false; serviceEpoch = undefined;
       stopBindingMonitor?.(); stopBindingMonitor = undefined;
       clearInterval(pollTimer); pollTimer = undefined;
       const rpc = client;
-      client = undefined; calls.clear();
+      client = undefined; calls.clear(); canceledOwners.clear(); canceledSessions.clear();
+      // Stopping makes every admission uncertain, as it always did for the current connection.
+      callClients.clear(); busy.clear(); revocation = undefined;
+      for (const old of [...draining]) { draining.delete(old); old.close(); }
       if (!rpc) return;
       // The dedicated controller survives Gateway restarts. Its ledger,
       // rather than this plugin's memory, identifies every profile lease.
@@ -237,7 +336,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     },
   };
   activation = createBrowserActivation({ api, binding, scheduler: activationScheduler, writeDiagnostic: activationWriteDiagnostic,
-    activate: options => lifecycle.activate(options), cleanup: reason => reason === 'retired' ? undefined : lifecycle.stop() });
+    activate: options => lifecycle.activate(options), cleanup: reason => reason === 'retired' ? lifecycle.retire() : lifecycle.stop() });
   api.registerService({ id: 'browser-handoff', start: ctx => activation.start(ctx), stop: () => activation.stop() });
   api.on('before_tool_call', async (event, ctx) => {
     if (!browserTool(event.toolName)) return;
@@ -246,12 +345,19 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     try {
       const rpc = getClient();
       if (fault) throw new Error(fault);
-      const receipt = await rpc.request('automationEnter', { callKey: key }, { timeoutMs: 15_000 });
+      const gateway = readGatewayIdentity();
+      // Counted before it is sent: a generation replaced during the round trip drains this connection instead of
+      // closing it under an admission the controller may already have recorded.
+      let receipt;
+      hold(rpc);
+      try {
+        receipt = await rpc.request('automationEnter', { callKey: key, ...gateway ? { gateway } : {} }, { timeoutMs: 15_000 });
+        if (receipt?.admitted === true) { calls.set(key, (calls.get(key) || 0) + 1); callClients.set(key, rpc); }
+      } finally { unhold(rpc); }
       if (receipt?.admitted !== true) {
         fault = 'Browser Handoff controller returned uncertain automation admission; operator recovery is required';
         throw new Error(fault);
       }
-      calls.set(key, (calls.get(key) || 0) + 1);
       try {
         if (!running || rpc !== client) throw new Error('Browser Handoff controller stopped during admission');
         await ensure(rpc, undefined, key);
@@ -266,7 +372,10 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     if (!browserTool(event.toolName)) return;
     const key = callKey(event, ctx), count = calls.get(key) || 0;
     if (!count) return;
-    try { await releaseAdmission(getClient(true), key); }
+    // The call finished, so its release is reported on the connection that admitted it: the controller accepts it only
+    // there. That holds for a connection being drained, and after a configuration drift unpublished this generation.
+    const admitting = callClients.get(key);
+    try { await releaseAdmission(admitting ?? getClient(true), key); }
     catch { completionFault(); }
   });
   api.on('session_end', async (event, ctx) => {
@@ -309,6 +418,9 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
               const permission = params.permission ?? 'control';
               if (!['watch', 'control'].includes(permission)) throw new Error('Invalid handoff permission');
               if (params.reason !== undefined && (typeof params.reason !== 'string' || params.reason.length > 500)) throw new Error('Invalid handoff reason');
+              // The controller refuses this too, but one started before the upgrade still runs the older code.
+              if (permission === 'control' && await readWindowManager(receiptForSocket(config.socketPath)).catch(() => undefined) === 'stale') throw new Error(STALE_WINDOW_MANAGER);
+              current();
               // Request cancellation closes only this short-lived connection;
               // the controller retires an unpublished canceled invitation.
               result = await rpc.request('create', { owner, profile: config.profile, ...(params.targetId !== undefined ? { targetId: params.targetId } : {}), permission, ttlSeconds, ...(params.reason !== undefined ? { reason: params.reason } : {}) }, { signal, timeoutMs: 120_000 });

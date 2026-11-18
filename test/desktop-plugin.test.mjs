@@ -5,7 +5,7 @@ import { registerDesktopPlugin } from '../src/desktop-plugin.mjs';
 const ownerContext = () => ({ senderIsOwner: true, sessionKey: 'agent:main:telegram:direct:1', sessionId: 'incarnation', assertInvocationCurrent() {} });
 const browserEvent = { toolName: 'browser', params: { action: 'snapshot', profile: 'handoff' } };
 const invocation = () => ({ ...ownerContext(), runId: 'run', toolCallId: 'call' });
-function setup({ request, runtime = {}, registrationMode, configure, connect, register = registerDesktopPlugin, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic = async () => {} } = {}) {
+function setup({ request, runtime = {}, registrationMode, configure, connect, register = registerDesktopPlugin, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic = async () => {}, readWindowManager = async () => 'missing' } = {}) {
   const hooks = new Map(), tools = [], services = [], requests = [], clients = [], policies = [];
   const api = {
     pluginConfig: { desktop: { enabled: true, profile: 'handoff', socketPath: '/tmp/browser-handoff/controller.sock' } },
@@ -32,7 +32,7 @@ function setup({ request, runtime = {}, registrationMode, configure, connect, re
   api.config.plugins = { entries: { 'browser-handoff': { enabled: true, config: api.pluginConfig } } };
   api.runtime.config ||= { current: () => api.config };
   configure?.(api);
-  register(api, { desktopRpcFactory: rpcFactory, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic });
+  register(api, { desktopRpcFactory: rpcFactory, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic, readWindowManager });
   return { api, hooks, tools, services, requests, clients, policies, tool: () => tools[0].create(ownerContext()) };
 }
 
@@ -113,6 +113,27 @@ test('production tools enforce owner-private identity and explicit whole-profile
   const tabs = await f.tool().execute('tabs', { action: 'tabs' });
   assert.equal(tabs.details.profile, 'handoff');
   assert.equal(tabs.details.tabs[0].targetId, 'tab');
+});
+
+// Review V2: an upgrade that skipped setup keeps openbox's menus, and the controller started before it keeps its old code.
+test('a stale window manager config warns at activation and refuses control links; watch still works', async t => {
+  const warnings = [], reads = [];
+  let state = 'stale';
+  const created = { id: 'lease', url: 'https://handoff.example/s/lease/#invite=secret', scope: 'browser-profile', profile: 'handoff', mode: 'unclaimed', resumeAllowed: false };
+  const f = setup({ readWindowManager: async path => { reads.push(path); return state; }, configure: api => { api.logger.warn = message => warnings.push(message); },
+    request: async (method, params, options, defaults) => method === 'create' ? created : defaults(method) });
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  await new Promise(setImmediate);
+  assert.equal(reads[0], '/tmp/setup.json', 'the receipt beside the state folder that holds the socket');
+  assert.ok(warnings.some(text => /^Browser Handoff: Control links are unavailable: .*Run openclaw clawser setup --yes/.test(text)), warnings.join('\n'));
+  await assert.rejects(f.tool().execute('create', { action: 'create' }), /Control links are unavailable: .*Run openclaw clawser setup --yes.*Watch links still work/);
+  await assert.rejects(f.tool().execute('create', { action: 'create', permission: 'control' }), /Control links are unavailable/);
+  assert.equal(f.requests.some(r => r.method === 'create'), false);
+  await f.tool().execute('create', { action: 'create', permission: 'watch' });
+  assert.deepEqual(f.requests.filter(r => r.method === 'create').map(r => r.params.permission), ['watch']);
+  // Unknown receipts are left to the controller, which knows exactly where setup put its receipt.
+  for (state of ['current', 'none', 'missing', 'invalid']) await f.tool().execute('create', { action: 'create' });
+  assert.deepEqual(f.requests.filter(r => r.method === 'create').map(r => r.params.permission), ['watch', 'control', 'control', 'control', 'control']);
 });
 
 test('production create checks stale invocation after ensure and retires a raced invitation', async t => {
@@ -772,4 +793,155 @@ test('stopping hot noVNC activation with pending health prevents late publicatio
   assert.ok(f.clients.every(client => client.closed));
   assert.equal(f.requests.filter(r => r.method === 'completions').length, 0); assert.equal(runtime.events.length, 0); assert.equal(runtime.wakes.length, 0);
   await assert.rejects(tools[0].create(ownerContext()).execute('late', { action: 'tabs' }), /unavailable|stopped/i);
+});
+
+test('activation reports the controller tunnel mode as the public transport', async t => {
+  for (const [reported, expected] of [[undefined, 'on-demand'], ['on-demand', 'on-demand'], ['always-on', 'always-on']]) {
+    const diagnostics = [];
+    const f = setup({ activationWriteDiagnostic: async value => { diagnostics.push(value); },
+      request: async (method, params, options, defaults) => method === 'health' ? { ...await defaults(method), ...reported ? { publicTransport: reported } : {} } : defaults(method) });
+    await f.services[0].start(); t.after(() => f.services[0].stop());
+    await eventually(() => assert.equal(diagnostics.at(-1)?.phase, 'active'));
+    assert.equal(diagnostics.at(-1).publicTransport, expected, String(reported));
+    await f.services[0].stop();
+  }
+});
+
+test('desktop mode warns once about plugin settings only the CDP viewer reads', async () => {
+  const { ignoredDesktopSettings } = await import('../src/desktop-plugin.mjs');
+  assert.deepEqual(ignoredDesktopSettings({ desktop: { enabled: true }, cloudflare: { enabled: false } }), [], 'setup writes cloudflare.enabled=false itself');
+  assert.deepEqual(ignoredDesktopSettings({ port: 19798, comparisonProxyUrl: 'http://127.0.0.1:1', funnel: { enabled: true }, cloudflare: { enabled: true }, publicBaseUrl: 'https://x.example' }),
+    ['port', 'publicBaseUrl', 'comparisonProxyUrl', 'funnel', 'cloudflare']);
+  const warnings = [];
+  setup({ configure: api => { api.pluginConfig.port = 19798; api.pluginConfig.comparisonProxyUrl = 'http://127.0.0.1:19799'; api.logger.warn = message => warnings.push(message); } });
+  setup({ configure: api => { api.pluginConfig.port = 29798; api.pluginConfig.comparisonProxyUrl = 'http://127.0.0.1:19799'; api.logger.warn = message => warnings.push(message); } });
+  assert.equal(warnings.length, 1, 'one warning for the same settings across reloads');
+  assert.match(warnings[0], /desktop mode ignores plugin settings port, comparisonProxyUrl: the noVNC controller serves the viewer/);
+});
+
+test('ended-session suppression entries expire, stay bounded and clear', async () => {
+  const { canceledSet } = await import('../src/desktop-plugin.mjs');
+  let time = 0;
+  const set = canceledSet({ ttlMs: 1000, limit: 3, now: () => time });
+  set.add('a'); time = 500; set.add('b');
+  assert.equal(set.has('a'), true);
+  time = 1000;
+  assert.equal(set.has('a'), false, 'expired after its TTL');
+  assert.equal(set.has('b'), true);
+  for (const key of ['c', 'd', 'e']) set.add(key);
+  assert.equal(set.size, 3);
+  assert.equal(set.has('b'), false, 'the oldest goes once the limit is reached');
+  set.add('c');
+  set.add('f');
+  assert.equal(set.has('c'), true, 'adding again refreshes an entry');
+  assert.equal(set.has('d'), false);
+  set.clear();
+  assert.equal(set.size, 0);
+});
+
+// The activation registry is keyed by the service state folder: a second start there supersedes the first without stopping it.
+const supersedeScope = '/clawser-test/superseded-generation';
+
+test('a superseded generation stops polling and closes its idle controller connection', async t => {
+  const old = setup({ runtime: wakeRuntime(), request: async (method, params, options, defaults) => method === 'completions' ? { completions: [] } : defaults(method) });
+  await old.services[0].start({ stateDir: supersedeScope });
+  await eventually(() => assert.ok(old.requests.some(r => r.method === 'completions')));
+  const replacement = setup({ runtime: wakeRuntime() });
+  await replacement.services[0].start({ stateDir: supersedeScope }); t.after(() => replacement.services[0].stop());
+  await eventually(() => assert.equal(old.clients[0].closed, true));
+  const polls = old.requests.filter(r => r.method === 'completions').length;
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  assert.equal(old.requests.filter(r => r.method === 'completions').length, polls, 'the retired poll timer is gone');
+  assert.equal(replacement.clients[0].closed, false);
+});
+
+test('a superseded generation keeps a connection that carries an admitted call until that call is released on it', async t => {
+  const old = setup();
+  await old.services[0].start({ stateDir: supersedeScope });
+  assert.equal(await old.hooks.get('before_tool_call')(browserEvent, invocation()), undefined);
+  const replacement = setup();
+  await replacement.services[0].start({ stateDir: supersedeScope }); t.after(() => replacement.services[0].stop());
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const oldClient = old.clients[0];
+  assert.equal(oldClient.closed, false, 'closing it would turn the running call into uncertain input');
+  await old.hooks.get('after_tool_call')(browserEvent, invocation());
+  const leave = old.requests.find(r => r.method === 'automationLeave');
+  assert.equal(leave.client, oldClient, 'released where it was admitted');
+  assert.equal(oldClient.closed, true);
+});
+
+test('a drifted generation closes its connection only after the drift revocation finishes on it', async t => {
+  let tick, release;
+  const scheduler = { setInterval(fn) { tick = fn; return { unref() {} }; }, clearInterval() {} };
+  const f = setup({ bindingMonitorScheduler: scheduler, request: async (method, params, options, defaults) => method === 'revokeAll' && !release ? new Promise(resolve => { release = resolve; }) : defaults(method) });
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  f.api.config.browser.profiles.handoff.attachOnly = false; tick();
+  await eventually(() => assert.equal(typeof release, 'function'));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(f.clients[0].closed, false);
+  release({ revoked: 0, allRetired: true, recoveryRequired: false });
+  await eventually(() => assert.equal(f.clients[0].closed, true));
+});
+
+// Review V4: the admission round trip includes the controller's fsync, so a reload can land in the middle of it.
+test('a generation superseded while an admission is in flight drains that connection and releases the call on it', async t => {
+  let admit;
+  const old = setup({ request: async (method, params, options, defaults, client) => {
+    if (method === 'automationEnter') return new Promise(resolve => { admit = () => resolve({ admitted: true }); });
+    if (client.closed) throw Object.assign(new Error('closed'), { code: 'CONTROLLER_DISCONNECTED' });
+    return defaults(method);
+  } });
+  await old.services[0].start({ stateDir: supersedeScope });
+  const pending = old.hooks.get('before_tool_call')(browserEvent, invocation());
+  await eventually(() => assert.equal(typeof admit, 'function'));
+  const replacement = setup();
+  await replacement.services[0].start({ stateDir: supersedeScope }); t.after(() => replacement.services[0].stop());
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const oldClient = old.clients[0];
+  assert.equal(oldClient.closed, false, 'the controller may already have recorded this admission');
+  admit();
+  const result = await pending;
+  assert.equal(result.block, true, 'the call no longer belongs to a current generation');
+  const leave = old.requests.find(r => r.method === 'automationLeave');
+  assert.equal(leave?.client, oldClient, 'released on the admitting connection');
+  await eventually(() => assert.equal(oldClient.closed, true));
+  assert.equal(replacement.clients[0].closed, false);
+});
+
+test('a superseded admission that the controller refused or lost closes the drained connection', async t => {
+  for (const answer of [async () => ({ admitted: false }), async () => { throw new Error('RPC connection lost'); }]) {
+    let admit;
+    const old = setup({ request: async (method, params, options, defaults) => method === 'automationEnter' ? new Promise(resolve => { admit = () => resolve(answer()); }) : defaults(method) });
+    const scope = supersedeScope + '-' + String(answer).length;
+    await old.services[0].start({ stateDir: scope });
+    const pending = old.hooks.get('before_tool_call')(browserEvent, invocation());
+    await eventually(() => assert.equal(typeof admit, 'function'));
+    const replacement = setup();
+    await replacement.services[0].start({ stateDir: scope });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(old.clients[0].closed, false);
+    admit();
+    assert.equal((await pending).block, true);
+    await eventually(() => assert.equal(old.clients[0].closed, true));
+    assert.equal(old.requests.some(r => r.method === 'automationLeave'), false, 'nothing was admitted to release');
+    await replacement.services[0].stop();
+  }
+});
+
+// Review V5: during a drift revocation the connection was not yet draining, so a finishing call's release never went out.
+test('a call that finishes during a drift revocation is released on its connection, which closes after the revocation', async t => {
+  let tick, release;
+  const scheduler = { setInterval(fn) { tick = fn; return { unref() {} }; }, clearInterval() {} };
+  const f = setup({ bindingMonitorScheduler: scheduler, request: async (method, params, options, defaults) => method === 'revokeAll' && !release ? new Promise(resolve => { release = resolve; }) : defaults(method) });
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  assert.equal(await f.hooks.get('before_tool_call')(browserEvent, invocation()), undefined);
+  f.api.config.browser.profiles.handoff.attachOnly = false; tick();
+  await eventually(() => assert.equal(typeof release, 'function'));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  await f.hooks.get('after_tool_call')(browserEvent, invocation());
+  const leave = f.requests.find(r => r.method === 'automationLeave');
+  assert.equal(leave?.client, f.clients[0], 'sent during the revocation, on the admitting connection');
+  assert.equal(f.clients[0].closed, false, 'the revocation is still running on it');
+  release({ revoked: 0, allRetired: true, recoveryRequired: false });
+  await eventually(() => assert.equal(f.clients[0].closed, true));
 });

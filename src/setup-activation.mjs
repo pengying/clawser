@@ -4,7 +4,7 @@ import { resolveHandoffBrowser } from './browser-config.mjs';
 
 const terminal = new Set(['failed', 'stopped', 'retired']);
 const phases = new Set(['prepared', 'awaiting-commit', 'activating', 'active', ...terminal]);
-const transports = new Set(['warming', 'ready', 'failed', 'on-demand', 'disabled']);
+const transports = new Set(['warming', 'ready', 'failed', 'on-demand', 'always-on', 'disabled']);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const pending = message => Object.assign(new Error(message), { pending: true });
 
@@ -94,7 +94,9 @@ export function logSetupActivation(status, d) {
   d.log('Gateway activation: ' + status.phase + '\nPublic transport: ' + status.publicTransport +
     (status.publicTransport === 'warming' ? status.phase === 'active'
       ? ' (local backend is active; public readiness continues in the background)'
-      : ' (activation and public readiness are pending)' : ''));
+      : ' (activation and public readiness are pending)'
+      : status.publicTransport === 'on-demand' ? ' (the tunnel starts with a link and stops after the idle period)'
+        : status.publicTransport === 'always-on' ? ' (the tunnel stays up while the controller runs)' : ''));
 }
 
 export async function waitForSetupActivation(expected, d, localReady) {

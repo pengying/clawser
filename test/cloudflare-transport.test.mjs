@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { CloudflareTransport } from '../src/cloudflare-transport.mjs';
@@ -15,6 +16,7 @@ async function setup(t, spawnImpl, options = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), 'handoff-cloudflare-test-'));
   const transport = new CloudflareTransport({ binaryPath: '/fixture/cloudflared', stateDir, spawnImpl, probeImpl: async () => true, dnsProbeImpl: async () => true, ...options });
   t.after(async () => { await transport.close(); await rm(stateDir, { recursive: true, force: true }); });
+  transport.stateDir = stateDir;
   return transport;
 }
 test('public URL requires both allocated hostname and registered connection; target stays loopback', async t => {
@@ -152,4 +154,58 @@ test('readiness keeps desktop default and supports only the harmless existing-br
   await new CloudflareTransport({ ...options, probePath: '/assets/style.css' }).probe('https://fixture.trycloudflare.com', AbortSignal.timeout(1000));
   assert.deepEqual(paths, ['/browser/assets/probe.css', '/assets/style.css']);
   for (const probePath of ['/json/version', '//evil.example/', '/s/token/']) assert.throws(() => new CloudflareTransport({ ...options, probePath }), /readiness/);
+});
+
+// A fake /proc: one folder per pid with a NUL-separated cmdline. killImpl removes it, as an exit would.
+async function fakeProc(t) {
+  const root = await mkdtemp(join(tmpdir(), 'handoff-cloudflare-proc-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const signals = [];
+  return {
+    root, signals,
+    async add(pid, argv) { await mkdir(join(root, String(pid)), { recursive: true }); await writeFile(join(root, String(pid), 'cmdline'), argv.join('\0') + '\0'); },
+    kill: (stubborn = new Set()) => (pid, signal) => {
+      signals.push([pid, signal]);
+      if (!stubborn.has(pid) || signal === 'SIGKILL') return rm(join(root, String(pid)), { recursive: true, force: true });
+    },
+  };
+}
+const tunnelArgs = (stateDir, binary = '/fixture/cloudflared') => [binary, 'tunnel', '--config', join(stateDir, 'quick-tunnel.yml'), '--no-autoupdate', '--metrics', '127.0.0.1:0', '--url', 'http://127.0.0.1:19410'];
+const readyChild = () => { const child = new Child(); setImmediate(() => child.stdout.write('https://fixture.trycloudflare.com\nRegistered tunnel connection\n')); return child; };
+
+test('a cloudflared left by a killed parent is stopped before a new tunnel starts, and only that one', async t => {
+  const proc = await fakeProc(t);
+  let spawned = 0;
+  const transport = await setup(t, () => { spawned++; assert.deepEqual([...new Set(proc.signals.map(([pid]) => pid))], [4001, 4003], 'reaped before the spawn'); return readyChild(); }, { procRoot: proc.root, killImpl: proc.kill(new Set([4003])) });
+  const { stateDir } = transport;
+  await mkdir(stateDir, { recursive: true });
+  // 4001: our orphan from the pid record. 4002: the pid was reused by an unrelated program.
+  // 4003: our orphan from the old receipt, which ignores SIGTERM. 4004: another state folder's tunnel.
+  await proc.add(4001, tunnelArgs(stateDir));
+  await proc.add(4002, ['/usr/bin/vim', 'notes.txt']);
+  await proc.add(4003, tunnelArgs(stateDir));
+  await proc.add(4004, tunnelArgs('/elsewhere'));
+  await writeFile(join(stateDir, 'cloudflared.pid'), JSON.stringify({ pid: 4001 }));
+  await writeFile(join(stateDir, 'transport.json'), JSON.stringify({ pid: 4003, origin: 'https://old.trycloudflare.com', port: 19410 }));
+  assert.equal(await transport.ensure(19410), 'https://fixture.trycloudflare.com');
+  assert.equal(spawned, 1);
+  assert.deepEqual(proc.signals, [[4001, 'SIGTERM'], [4003, 'SIGTERM'], [4003, 'SIGKILL']]);
+  for (const pid of [4002, 4004]) assert.ok(existsSync(join(proc.root, String(pid))), pid + ' must keep running');
+  for (const [pid, stateFolder, binary] of [[4005, stateDir, '/other/cloudflared'], [4006, '/elsewhere', '/fixture/cloudflared']]) {
+    await proc.add(pid, tunnelArgs(stateFolder, binary));
+    await writeFile(join(stateDir, 'cloudflared.pid'), JSON.stringify({ pid }));
+    await transport.reapOrphans();
+    assert.ok(existsSync(join(proc.root, String(pid))), 'a different binary or state folder is not ours');
+  }
+});
+
+test('the child pid is recorded at spawn and forgotten once it exits', async t => {
+  let child;
+  const transport = await setup(t, () => { child = readyChild(); child.pid = 4100; return child; }, { procRoot: (await fakeProc(t)).root });
+  await transport.ensure(19410);
+  const recorded = JSON.parse(await readFile(join(transport.stateDir, 'cloudflared.pid'), 'utf8'));
+  assert.equal(recorded.pid, 4100);
+  await transport.close();
+  for (let attempt = 0; attempt < 100 && existsSync(join(transport.stateDir, 'cloudflared.pid')); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(existsSync(join(transport.stateDir, 'cloudflared.pid')), false);
 });

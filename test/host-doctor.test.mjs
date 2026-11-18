@@ -8,7 +8,7 @@ import { hostWorld, movePackage, systemctl } from './host-fixture.mjs';
 import { applyWorld, cookieDirs, cookieStore, exportsThree, userProfile } from './host-existing-fixture.mjs';
 
 const HOST_ROWS = ['installation', 'ownership', 'configuration', 'pinned assets', 'host dependencies', 'services', 'display', 'browser window',
-  'CDP origin', 'profile directory', 'linger', 'units current', 'controller health', 'Gateway activation'];
+  'CDP origin', 'profile directory', 'linger', 'units current', 'browser launchers', 'window manager config', 'controller health', 'Gateway activation'];
 const LINGER = 'Linger is off, so these services stop when you log out. Run: loginctl enable-linger';
 const KEYRING = n => `${n} cookies are still encrypted with the desktop keyring, which Clawser's browser can't read; sign in again to sites that ask.`;
 const EXPORT = folders => `An earlier setup run saved cookies in ${folders.join(', ')}; rerun openclaw clawser setup to move them over and remove ${folders.length > 1 ? 'them' : 'it'}.`;
@@ -151,6 +151,41 @@ test('linger off prints the enable-linger command', async t => {
   assert.deepEqual(row(result, 'linger'), { name: 'linger', ok: false, message: LINGER });
   assert.deepEqual(failed(result), ['linger']);
   assert.ok(w.logs.includes('FAIL linger: ' + LINGER), w.logs.join('\n'));
+});
+
+// 1.0.1 and earlier left openbox's menu, which opens a terminal, and its commands in rc.xml.
+test('an rc.xml from before the window manager lockdown fails doctor until setup reruns', async t => {
+  const w = await installed(t);
+  const path = join(w.stateDir, 'setup.json');
+  const saved = JSON.parse(await fs.readFile(path, 'utf8'));
+  delete saved.openboxGenerator;
+  await fs.writeFile(path, JSON.stringify(saved, null, 2) + '\n', { mode: 0o600 });
+  const result = await doctor(w);
+  assert.equal(result.ok, false);
+  assert.match(row(result, 'window manager config').message, /a control link can reach them; rerun openclaw clawser setup --yes$/);
+  assert.deepEqual(failed(result), ['window manager config']);
+});
+
+// Review V1: setup recorded the new config, then failed before it restarted openbox.
+test('doctor fails while openbox still runs a config from before rc.xml was last written', async t => {
+  const w = await installed(t);
+  w.entered.set(w.names.windowManager, Number(process.hrtime.bigint() / 1000n) - 120_000_000);
+  const result = await doctor(w);
+  assert.equal(result.ok, false);
+  assert.match(row(result, 'window manager config').message, /^openbox is still running the config it had before .*rc\.xml was last written.*rerun openclaw clawser setup --yes$/);
+  assert.deepEqual(failed(result), ['window manager config']);
+  w.entered.set(w.names.windowManager, Number(process.hrtime.bigint() / 1000n));
+  assert.equal(row(await doctor(w), 'window manager config').ok, true);
+});
+
+test('a changed browser launcher stand-in fails doctor until setup reruns', async t => {
+  const w = await installed(t);
+  const dir = join(w.stateDir, 'launchers');
+  await fs.rm(join(dir, 'xdg-open'));
+  const result = await doctor(w);
+  assert.equal(result.ok, false);
+  assert.match(row(result, 'browser launchers').message, /launchers, which keeps the agent's browser from starting other programs, is missing or changed; rerun openclaw clawser setup --yes$/);
+  assert.deepEqual(failed(result), ['browser launchers']);
 });
 
 test('a moved plugin directory says to rerun setup', async t => {

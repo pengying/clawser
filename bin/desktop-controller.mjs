@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { lstat, readFile } from 'node:fs/promises';
 import { isAbsolute, resolve, dirname } from 'node:path';
-import { DesktopController } from '../src/desktop-controller.mjs';
+import { DesktopController, maximizeObservedWindow } from '../src/desktop-controller.mjs';
 import { HostDesktopRuntime } from '../runtime/desktop/index.mjs';
 import { CloudflareTransport } from '../src/cloudflare-transport.mjs';
+import { receiptBesideConfig, windowManagerState } from '../src/window-manager.mjs';
 
 // This file is local operator configuration, never an invitation or browser API.
 const configPath=process.argv[2];
@@ -20,7 +21,14 @@ const runtimeOptions={stateDir:runtimeConfig.stateDir?fromConfig(runtimeConfig.s
 const transportOptions={binaryPath:transportConfig.binaryPath,startupTimeoutMs:transportConfig.startupTimeoutMs,stateDir:resolve(stateDir,'tunnel')};
 const runtime=new HostDesktopRuntime(runtimeOptions);
 const transport=new CloudflareTransport(transportOptions);
-const controller=new DesktopController({stateDir,profile:config.profile,runtime,transport,port:config.port??19420,...(config.socketPath?{socketPath:fromConfig(config.socketPath)}:{}),...(config.noVncAssetsDir?{noVncAssetsDir:fromConfig(config.noVncAssetsDir)}:{})});
+// Setup writes transport.mode and transport.idleMs only when they differ from the defaults (on demand, 10 minutes).
+const tunnel={...(transportConfig.mode!==undefined?{transportMode:transportConfig.mode}:{}),...(transportConfig.idleMs!==undefined?{transportIdleMs:transportConfig.idleMs}:{})};
+// viewer.idleMs: how long a claimed handoff may have no viewer attached before it ends (default 10 minutes).
+const viewer=config.viewer?.idleMs!==undefined?{abandonMs:config.viewer.idleMs}:{};
+// Control links need the locked-down window manager config that setup records in its receipt beside this file.
+const windowManager=()=>windowManagerState(receiptBesideConfig(configPath));
+// After control, the window the person left in front is maximized again (they may have moved or resized it).
+const controller=new DesktopController({stateDir,profile:config.profile,runtime,transport,windowManager,maximize:maximizeObservedWindow,...tunnel,...viewer,port:config.port??19420,...(config.socketPath?{socketPath:fromConfig(config.socketPath)}:{}),...(config.noVncAssetsDir?{noVncAssetsDir:fromConfig(config.noVncAssetsDir)}:{})});
 await controller.start();
 process.stdout.write('Browser Handoff desktop controller ready\n');
 let stopping=false;

@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, join } from 'node:path';
 import { captureSetupActivation, waitForSetupActivation } from './setup-activation.mjs';
-import { cdpUrlFor, chromeArgs, renderUnits, unitNames } from './host-units.mjs';
+import { BROWSER_LAUNCHERS, LAUNCHER_SCRIPT, cdpUrlFor, chromeArgs, renderUnits, unitNames } from './host-units.mjs';
 import { freeDisplay, xauthorityEntry } from './host-display.mjs';
 import { classifyOwner, findBrowserBinary, portHolder, portInUse, showProperties } from './host-browser.mjs';
 import { describeHostPlan, installHostDeps, planHostDeps, verifyHostDeps } from './host-deps.mjs';
@@ -17,6 +17,22 @@ const json = value => JSON.stringify(value, null, 2) + '\n';
 const fieldsMatch = (current, wanted) => object(current) && Object.entries(wanted).every(([key, value]) => current[key] === value) && Object.keys(current).every(key => own(wanted, key));
 const profileConfig = cdpPort => ({ cdpUrl: cdpUrlFor(cdpPort), driver: 'openclaw', engine: 'chromium', attachOnly: true });
 export const ROLES = ['display', 'windowManager', 'browser', 'supervisor', 'controller'];
+// The controller and the plugin read the generator too, to refuse control links on an older config.
+export { OPENBOX_GENERATOR } from './window-manager.mjs';
+import { OPENBOX_GENERATOR } from './window-manager.mjs';
+// openbox falls back to the system menu.xml, which opens a terminal, when its menu file is missing or invalid.
+export const EMPTY_OPENBOX_MENU = '<?xml version="1.0" encoding="UTF-8"?>\n<openbox_menu xmlns="http://openbox.org/3.4/menu"/>\n';
+// Host settings a setup flag changes. The receipt and controller.json hold only those that differ from these.
+export const HOST_SETTING_DEFAULTS = Object.freeze({ tunnel: 'on-demand', tunnelIdleMinutes: 10, viewerIdleMinutes: 10 });
+/** The flags given now, else the receipt's, else the defaults; `saved` lists only the non-default ones. */
+export function hostSettings(o, receiptSettings = {}) {
+  const effective = {}, saved = {};
+  for (const [key, fallback] of Object.entries(HOST_SETTING_DEFAULTS)) {
+    effective[key] = o[key] ?? receiptSettings[key] ?? fallback;
+    if (effective[key] !== fallback) saved[key] = effective[key];
+  }
+  return { effective, saved };
+}
 const CDP_PORTS = Array.from({ length: 10 }, (_, i) => 18820 + i);
 const resolver = d => d.hostResolver ?? { plan: planHostDeps, install: installHostDeps, verify: verifyHostDeps, describe: describeHostPlan };
 
@@ -26,9 +42,9 @@ export function hostLocations(o, d) {
   const state = join(o.stateDir, 'state'), runtime = join(state, 'runtime'), desktop = join(d.packageDir, 'runtime/desktop');
   return {
     marker: join(o.stateDir, 'setup.json'), config: join(o.stateDir, 'controller.json'), xauthority: join(o.stateDir, 'xauthority'),
-    openboxConfig: join(o.stateDir, 'openbox/rc.xml'), profileDir: join(o.stateDir, 'browser/profile'),
+    openboxConfig: join(o.stateDir, 'openbox/rc.xml'), openboxMenu: join(o.stateDir, 'openbox/menu.xml'), profileDir: join(o.stateDir, 'browser/profile'),
     state, socket: join(state, 'desktop.sock'), runtime, supervisorConfig: join(runtime, 'supervisor.json'), control: join(runtime, 'control.sock'), vncDir: join(runtime, 'vnc'),
-    binary: join(o.stateDir, 'bin/cloudflared'), assets: join(o.stateDir, 'vendor/novnc-1.7.0'),
+    binary: join(o.stateDir, 'bin/cloudflared'), assets: join(o.stateDir, 'vendor/novnc-1.7.0'), launchers: join(o.stateDir, 'launchers'),
     unitDir: join(configRoot, 'systemd/user'), names: unitNames(o.stateDir),
     supervisorScript: join(desktop, 'supervisor.py'), openboxScript: join(desktop, 'openbox_config.py'), controllerScript: join(d.packageDir, 'bin/desktop-controller.mjs'),
   };
@@ -114,9 +130,49 @@ async function classify(path, desired, recorded, d, h) {
 }
 
 async function unitStatus(name, p, d) {
-  const status = showProperties(await d.run('systemctl', ['--user', 'show', name, '--property=LoadState,FragmentPath,ActiveState', '--no-pager']));
+  const status = showProperties(await d.run('systemctl', ['--user', 'show', name, '--property=LoadState,FragmentPath,ActiveState,ActiveEnterTimestampMonotonic', '--no-pager']));
   if (status.LoadState !== 'not-found' && status.FragmentPath !== unitPath(p, name)) throw new Error('Refusing unmanaged conflicting user service: ' + name);
   return status;
+}
+
+// openbox reads rc.xml when it starts. One that became active before the file was last written still runs an older
+// config, as after a setup run that failed between the write and the restart. ActiveEnterTimestampMonotonic is in
+// microseconds of CLOCK_MONOTONIC, which every systemd reports; the file's mtime is wall time, so a second of slack.
+export async function wmPredatesConfig(status, path, d) {
+  const entered = Number(status?.ActiveEnterTimestampMonotonic);
+  if (status?.ActiveState !== 'active' || !Number.isFinite(entered) || entered <= 0) return false;
+  const info = await d.fs.stat(path).catch(() => undefined);
+  if (!info?.isFile()) return false;
+  // Both clocks are the host's own: systemd's monotonic stamp is only meaningful against the real clocks.
+  const enteredAt = Date.now() - (Number(process.hrtime.bigint() / 1000n) - entered) / 1000;
+  return info.mtimeMs > enteredAt + 1000;
+}
+
+// The browser's stand-ins for xdg-open and friends (see BROWSER_LAUNCHERS). They close Chrome's own one-click routes
+// out of the browser. Someone deliberately saving files over them through Chrome's Save dialog could undo that, but
+// that same dialog can already write any file the owner can (see SECURITY.md); doctor reports a changed stand-in.
+export async function launchersState(dir, d, h) {
+  await h.noSymlinks(dir, d);
+  const info = await h.stat(dir, d);
+  if (!info) return 'write';
+  if (!info.isDirectory() || info.uid !== d.uid) throw new Error(`${dir} is not a folder of this user; move it aside, then rerun setup`);
+  if ((info.mode & 0o777) !== 0o700) return 'write';
+  const names = (await d.fs.readdir(dir)).sort();
+  if (names.join('/') !== [...BROWSER_LAUNCHERS].sort().join('/')) return 'write';
+  for (const name of names) {
+    const file = await d.fs.lstat(join(dir, name));
+    if (!file.isFile() || file.uid !== d.uid || (file.mode & 0o777) !== 0o500 || await d.fs.readFile(join(dir, name), 'utf8') !== LAUNCHER_SCRIPT) return 'write';
+  }
+  return 'current';
+}
+
+async function writeLaunchers(dir, d, h) {
+  await h.noSymlinks(dir, d);
+  if (await h.stat(dir, d)) {
+    await d.fs.chmod(dir, 0o700);
+    for (const name of await d.fs.readdir(dir)) await d.fs.rm(join(dir, name), { recursive: true, force: true });
+  } else await d.fs.mkdir(dir, { mode: 0o700 });
+  for (const name of BROWSER_LAUNCHERS) await d.fs.writeFile(join(dir, name), LAUNCHER_SCRIPT, { mode: 0o500, flag: 'wx' });
 }
 
 async function openboxSource(openbox, d, h) {
@@ -157,15 +213,18 @@ const dockerEraFromCdp = name => `This state folder holds a Docker-era install, 
 const noWm = 'Chrome popups and dialogs open at 0,0 without stacking';
 
 /** Pure: the unit texts and the two configs they read. `browser` is `{ path, args, env }`; the args already carry the profile folder. */
-export function renderHost({ p, display, cdpPort, port, profile, browser, bins, wm, execPath }) {
+export function renderHost({ p, display, cdpPort, port, profile, browser, bins, wm, execPath, settings = HOST_SETTING_DEFAULTS }) {
   const cdpUrl = cdpUrlFor(cdpPort);
   const units = renderUnits({
     names: p.names, marker: p.marker, display, xauthority: p.xauthority, xvfb: bins.Xvfb.path, openbox: wm, openboxConfig: p.openboxConfig,
     python: bins.python3.path, supervisorScript: p.supervisorScript, supervisorConfig: p.supervisorConfig,
-    node: execPath, controllerScript: p.controllerScript, controllerConfig: p.config, browser,
+    node: execPath, controllerScript: p.controllerScript, controllerConfig: p.config, browser, launchers: p.launchers,
   });
   const controller = { stateDir: p.state, profile, port, socketPath: p.socket, noVncAssetsDir: p.assets,
-    runtime: { stateDir: p.runtime, controlSocket: p.control, cdpUrl }, transport: { binaryPath: p.binary, startupTimeoutMs: 90_000 } };
+    runtime: { stateDir: p.runtime, controlSocket: p.control, cdpUrl }, transport: { binaryPath: p.binary, startupTimeoutMs: 90_000,
+      ...settings.tunnel !== HOST_SETTING_DEFAULTS.tunnel ? { mode: settings.tunnel } : {},
+      ...settings.tunnelIdleMinutes !== HOST_SETTING_DEFAULTS.tunnelIdleMinutes ? { idleMs: settings.tunnelIdleMinutes * 60_000 } : {} },
+    ...settings.viewerIdleMinutes !== HOST_SETTING_DEFAULTS.viewerIdleMinutes ? { viewer: { idleMs: settings.viewerIdleMinutes * 60_000 } } : {} };
   // The supervisor restarts an idle browser that a package upgrade replaced underneath it, found by this port.
   const supervisor = { display, xauthority: p.xauthority, controlSocket: p.control, vncDir: p.vncDir, cdpUrl, browserPort: Number(new URL(cdpUrl).port), x11vnc: bins.x11vnc.path };
   return { units, controller, supervisor };
@@ -203,12 +262,17 @@ export async function planHost(o, d, h) {
   for (const n of found?.sourceCdpUrl ? [port] : [cdpPort, port]) await checkPort(n, p, d);
   const wm = source ? bins.openbox.path : undefined;
   const profile = found ? found.profile : 'clawser', userDataDir = found ? found.userDataDir : p.profileDir;
-  const { units, controller, supervisor } = renderHost({ p, display, cdpPort, port, profile, bins, wm, execPath: d.execPath,
+  const settings = hostSettings(o, v2?.settings);
+  const { units, controller, supervisor } = renderHost({ p, display, cdpPort, port, profile, bins, wm, execPath: d.execPath, settings: settings.effective,
     browser: { path: browser.path, args: found ? found.args : chromeArgs({ existing: [], userDataDir, cdpPort }), env: browser.env } });
   const names = ROLES.map(role => p.names[role]).filter(name => units[name]);
   const files = [
     { path: p.xauthority, kind: 'xauthority', consumer: p.names.display },
-    ...wm ? [{ path: p.openboxConfig, key: 'openboxDigest', recorded: v2?.openboxDigest, consumer: p.names.windowManager }] : [],
+    // Chrome looks its launchers up on each use, so a rewritten folder needs no browser restart.
+    { path: p.launchers, kind: 'launchers' },
+    // The empty menu goes first, so rc.xml never names a missing menu file.
+    ...wm ? [{ path: p.openboxMenu, text: EMPTY_OPENBOX_MENU, key: 'openboxMenuDigest', recorded: v2?.openboxMenuDigest, consumer: p.names.windowManager },
+      { path: p.openboxConfig, key: 'openboxDigest', recorded: v2?.openboxDigest, generator: OPENBOX_GENERATOR, consumer: p.names.windowManager }] : [],
     { path: p.supervisorConfig, text: json(supervisor), key: 'supervisorConfigDigest', recorded: v2?.supervisorConfigDigest, consumer: p.names.supervisor },
     { path: p.config, text: json(controller), key: 'configDigest', recorded: (v2 ?? v1)?.configDigest, consumer: p.names.controller },
     ...names.map(name => ({ path: unitPath(p, name), text: units[name], unit: name, consumer: name,
@@ -216,9 +280,12 @@ export async function planHost(o, d, h) {
   ];
   // The v1 controller config and unit count as owned under their v1 digests, so classify verifies them too.
   for (const file of files) {
-    if (file.kind !== 'xauthority') file.state = await classify(file.path, file.text, file.recorded, d, h);
+    if (file.kind === 'launchers') file.state = await launchersState(file.path, d, h);
+    else if (file.kind !== 'xauthority') file.state = await classify(file.path, file.text, file.recorded, d, h);
     else if (await h.stat(file.path, d)) { await h.privatePath(file.path, 'file', d); file.state = 'current'; }
     else file.state = 'write';
+    // An rc.xml an older generator wrote still binds menus and commands, so it is generated again.
+    if (file.generator && file.state === 'current' && v2?.openboxGenerator !== file.generator) file.state = 'rewrite';
   }
   const status = {};
   for (const name of names) status[name] = await unitStatus(name, p, d);
@@ -227,7 +294,7 @@ export async function planHost(o, d, h) {
   const start = [], restart = [];
   for (const name of names) {
     const unit = files.find(file => file.unit === name);
-    const touched = files.some(file => file.consumer === name && file.state !== 'current');
+    const touched = files.some(file => file.consumer === name && file.state !== 'current') || (name === p.names.windowManager && await wmPredatesConfig(status[name], p.openboxConfig, d));
     const active = status[name].ActiveState === 'active' && !stop.some(item => item.unit === name);
     if (unit.state === 'write' || !active) start.push(name);
     else if (touched) restart.push(name);
@@ -239,7 +306,7 @@ export async function planHost(o, d, h) {
   // The Docker-era controller stop, re-stopping a replaced unit and resuming cookies into a stopped browser are not disruptive; closing or taking over a browser is.
   const takesOver = Boolean(found && (found.takeover.length || found.stop.some(item => !item.replaced) || (found.cookies?.migrate && (!found.cookies.resumeFrom || found.cookies.closesBrowser))));
   return {
-    option, profile, display, cdpPort, port, userDataDir, ...found?.profileDirectory !== undefined ? { profileDirectory: found.profileDirectory } : {}, ...found?.sourceCdpUrl ? { sourceCdpUrl: found.sourceCdpUrl } : {}, browser, units,
+    option, profile, display, cdpPort, port, userDataDir, settings, ...found?.profileDirectory !== undefined ? { profileDirectory: found.profileDirectory } : {}, ...found?.sourceCdpUrl ? { sourceCdpUrl: found.sourceCdpUrl } : {}, browser, units,
     writes: files.filter(file => file.state !== 'current').map(file => ({ path: file.path, digest: file.text === undefined ? null : sha256(file.text), ...file.unit ? { unit: file.unit } : {}, consumer: file.consumer })),
     start, restart, stop, takeover: found?.takeover ?? [], ...found?.cookies ? { cookies: found.cookies } : {}, staleCookies: found?.staleCookies ?? [],
     disruptive: takesOver || restart.some(name => [p.names.display, p.names.windowManager, p.names.browser].includes(name)),
@@ -254,6 +321,7 @@ export const describeHost = plan => [
     : 'Browser profile: clawser (new and empty, at ' + plan.userDataDir + ')',
   'Display: :' + plan.display,
   'Browser: ' + plan.browser.path,
+  'Public tunnel: ' + (plan.settings.effective.tunnel === 'always' ? 'always on' : `on demand, stops ${plan.settings.effective.tunnelIdleMinutes} minute${plan.settings.effective.tunnelIdleMinutes === 1 ? '' : 's'} after the last handoff`),
   ...plan.takeover.map(item => 'Take over ' + item.unit + ' (its unit file is backed up first)'),
   ...plan.stop.filter(item => item.replaced).map(item => 'Stop ' + item.unit + ' again (Clawser replaced it)'),
   ...plan.stop.filter(item => item.kind === 'close-browser').map(item => 'Close the browser running in your desktop session (pid ' + item.pid + ')'),
@@ -271,17 +339,19 @@ export function assertHealth(health, cdpPort, profile) {
   if (health?.ready !== true || health.recoveryRequired === true || health.profile !== profile || health.cdpUrl !== cdpUrlFor(cdpPort)) throw new Error('Controller health or profile identity is not ready; inspect its user-service journal before retrying');
 }
 
+// openboxGenerator is recorded only once the window manager has restarted on the new rc.xml (see applyHost).
 const record = (saved, file, digest) => { if (file.unit) saved.units[file.unit] = digest; else if (file.key) saved[file.key] = digest; };
 const save = (saved, p, d, h) => h.atomicPrivate(p.marker, json(saved), d);
 
 const browserRecord = plan => ({ path: plan.browser.path, existingArgs: plan.browser.existingArgs, env: plan.browser.env });
+const settingsRecord = plan => Object.keys(plan.settings.saved).length ? { settings: plan.settings.saved } : {};
 
 function receiptFor(plan, o, d, extra) {
   const p = plan.locations;
   return { identity, uid: d.uid, option: plan.option, profile: plan.profile, cdpPort: plan.cdpPort, port: plan.port, display: plan.display,
     stateDir: o.stateDir, packageDir: d.packageDir, execPath: d.execPath, unitDir: p.unitDir, userDataDir: plan.userDataDir,
     ...plan.profileDirectory !== undefined ? { profileDirectory: plan.profileDirectory } : {},
-    browser: browserRecord(plan), previousDefaultProfile: plan.previousDefaultProfile, units: {}, replaced: [], ...extra,
+    browser: browserRecord(plan), previousDefaultProfile: plan.previousDefaultProfile, units: {}, replaced: [], ...settingsRecord(plan), ...extra,
     ...o.pendingInertDesktop ? { pendingInertDesktop: true } : {} };
 }
 
@@ -319,6 +389,7 @@ export async function applyHost(plan, o, d, h) {
       await save(saved, p, d, h);
     } else if (plan.receipt === 'v2') {
       Object.assign(saved, { packageDir: d.packageDir, execPath: d.execPath, browser: browserRecord(plan) });
+      delete saved.settings; Object.assign(saved, settingsRecord(plan));
       if (!same(saved, plan.saved)) await save(saved, p, d, h);
     }
     // Saved cookies nobody will import are plaintext; they go before anything stops.
@@ -337,6 +408,7 @@ export async function applyHost(plan, o, d, h) {
         if (file.text !== undefined && file.recorded !== sha256(file.text)) { record(saved, file, sha256(file.text)); await save(saved, p, d, h); }
         continue;
       }
+      if (file.kind === 'launchers') { await writeLaunchers(file.path, d, h); continue; }
       if (file.kind === 'xauthority') {
         await h.noSymlinks(file.path, d);
         await d.fs.writeFile(file.path, xauthorityEntry(plan.display, (d.randomBytes ?? randomBytes)(16)), { flag: 'wx', mode: 0o600 });
@@ -357,6 +429,9 @@ export async function applyHost(plan, o, d, h) {
     for (const name of ROLES.map(role => p.names[role])) {
       if (plan.start.includes(name)) await d.run('systemctl', ['--user', 'enable', '--now', name]);
       else if (plan.restart.includes(name)) await d.run('systemctl', ['--user', 'restart', name]);
+      else continue;
+      // Until this restart succeeds the running openbox still has the old config, so a rerun must plan it again.
+      if (name === p.names.windowManager && saved.openboxGenerator !== OPENBOX_GENERATOR) { saved.openboxGenerator = OPENBOX_GENERATOR; await save(saved, p, d, h); }
     }
     let healthError;
     for (let attempt = 0; attempt < 120; attempt++) {

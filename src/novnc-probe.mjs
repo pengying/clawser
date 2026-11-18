@@ -4,6 +4,7 @@ import { connect as connectSocket, isIPv4 } from 'node:net';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, resolve, sep } from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
+import { closeServer, refuseSocket } from './sockets.mjs';
 
 const PREFIX = '/probe/novnc/';
 const PUBLIC = new URL('../public/', import.meta.url);
@@ -58,9 +59,8 @@ function sendJson(res, status, value, headers = {}) {
 }
 
 function rejectUpgrade(socket, status, label) {
-  if (socket.destroyed) return;
   const text = `${status} ${label}`;
-  socket.end(`HTTP/1.1 ${text}\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: ${Buffer.byteLength(label)}\r\n\r\n${label}`);
+  refuseSocket(socket, `HTTP/1.1 ${text}\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: ${Buffer.byteLength(label)}\r\n\r\n${label}`);
 }
 
 async function jsonBody(req, maximum = MAX_BODY) {
@@ -139,7 +139,8 @@ function validRegistration(registration) {
 export class NoVncProbeGateway {
   sessions = new Map();
   creations = new Set();
-  constructor({ supervisor, publicBaseUrl, allowLanHttp = false, noVncAssetsDir, upstreamConnect = defaultUpstreamConnect, now = Date.now, monotonicNow = () => performance.now(), promotionMs = 10_000, heartbeatMs = 10_000, upstreamConnectMs = 5_000, maxProbes = 8, prefix = PREFIX, completionDisposition, capabilities = {}, onEnded } = {}) {
+  upgradeSockets = new Set();
+  constructor({ supervisor, publicBaseUrl, allowLanHttp = false, noVncAssetsDir, upstreamConnect = defaultUpstreamConnect, now = Date.now, monotonicNow = () => performance.now(), promotionMs = 10_000, heartbeatMs = 10_000, upstreamConnectMs = 5_000, maxProbes = 8, prefix = PREFIX, completionDisposition, capabilities = {}, onEnded, closeGraceMs = 2000, abandonMs = 600_000, endedRetentionMs = 600_000 } = {}) {
     for (const method of ['create', 'read', 'register', 'destroy', 'verifyExited']) {
       if (typeof supervisor?.[method] !== 'function') throw new Error(`Probe supervisor requires ${method}()`);
     }
@@ -165,12 +166,22 @@ export class NoVncProbeGateway {
     this.heartbeatMs = heartbeatMs ?? 10_000;
     this.upstreamConnectMs = upstreamConnectMs;
     this.maxProbes = maxProbes;
+    this.closeGraceMs = closeGraceMs;
+    if (!Number.isInteger(abandonMs) || abandonMs < 1000 || abandonMs > 3_600_000) throw new Error('Invalid abandoned viewer timeout');
+    this.abandonMs = abandonMs;
+    if (!Number.isInteger(endedRetentionMs) || endedRetentionMs < 0) throw new Error('Invalid ended session retention');
+    this.endedRetentionMs = endedRetentionMs;
     this.wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: MAX_BUFFERED });
     this.server = createServer((req, res) => { void this.handle(req, res); });
     this.server.headersTimeout = 10_000;
     this.server.requestTimeout = 15_000;
     this.server.maxConnections = 64;
-    this.server.on('upgrade', (req, socket, head) => { void this.upgrade(req, socket, head); });
+    this.server.on('upgrade', (req, socket, head) => {
+      // An upgraded socket leaves the HTTP server's own connection list, so close() tracks it here.
+      this.upgradeSockets.add(socket);
+      socket.once('close', () => this.upgradeSockets.delete(socket));
+      void this.upgrade(req, socket, head);
+    });
   }
 
   async start({ port = 19400, host = '127.0.0.1' } = {}) {
@@ -697,6 +708,7 @@ export class NoVncProbeGateway {
       try { await this.onEnded?.(session, { ...this.status(session.id), mode }); }
       catch { verified = false; }
       session.mode = verified ? 'ended' : 'cleanup_failed';
+      if (verified) session.endedAt = this.now();
     })();
     session.cleanupInFlight = attempt;
     try { await attempt; }
@@ -712,10 +724,26 @@ export class NoVncProbeGateway {
     return { mode: session.mode, reason: session.reason };
   }
 
+  // A closed tab or a phone gone to sleep leaves a claimed handoff with no viewer, holding its x11vnc until the
+  // link expires (up to 30 minutes). It ends once no viewer has been attached for abandonMs, ten minutes by
+  // default: long enough to switch to an authenticator or mail app on the phone and come back, and far longer than
+  // a reload or a short network drop, both of which come back with the same cookie. The window is measured on the
+  // monotonic clock, so a wall-clock step can neither end a handoff early nor keep it.
+  unattended(session) {
+    return session.mode === 'watch' && Boolean(session.sessionHash) && !session.socket && !session.connecting;
+  }
+
   async sweep() {
-    const work = [];
+    const work = [], now = this.now();
     for (const session of this.sessions.values()) {
-      if (!['ending', 'ended', 'cleanup_failed'].includes(session.mode) && session.expiresAt <= this.now()) work.push(this.end(session, 'expired'));
+      // An ended session answers a late Done or page load with "ended" for a while, then goes. A cleanup_failed one stays retryable.
+      if (session.mode === 'ended') { session.endedAt ??= now; if (now - session.endedAt >= this.endedRetentionMs) this.sessions.delete(session.id); continue; }
+      if (['ending', 'ended', 'cleanup_failed'].includes(session.mode)) continue;
+      if (session.expiresAt <= now) { work.push(this.end(session, 'expired')); continue; }
+      if (!this.unattended(session)) { delete session.unattendedSince; continue; }
+      const elapsed = this.monotonicNow();
+      session.unattendedSince ??= elapsed;
+      if (elapsed - session.unattendedSince >= this.abandonMs) work.push(this.end(session, 'abandoned'));
     }
     await Promise.allSettled(work);
   }
@@ -734,7 +762,7 @@ export class NoVncProbeGateway {
       await Promise.allSettled([...this.creations]);
       for (const ws of this.wss.clients) ws.terminate();
       this.wss.close();
-      if (this.server.listening) await new Promise((resolvePromise) => this.server.close(resolvePromise));
+      await closeServer(this.server, this.upgradeSockets, this.closeGraceMs);
     })();
     return this.closePromise;
   }

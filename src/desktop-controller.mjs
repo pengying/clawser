@@ -6,6 +6,7 @@ import { NoVncProbeGateway } from './novnc-probe.mjs';
 import { CdpConnection, validateCdpUrl } from './cdp.mjs';
 import { DesktopRpcServer } from './desktop-rpc.mjs';
 import { readFocus as readBrowserFocus } from './focus-state.mjs';
+import { controlRefusal } from './window-manager.mjs';
 
 const receiptFlags=['vncProcessesExited','xClientsAbsent','heldInputCleared','xSyncComplete'];
 const recoveryMessage='Browser input outcome uncertain; operator recovery is required';
@@ -14,6 +15,18 @@ const validateActor=(actor,id,role)=>{if(actor?.leaseId!==id||actor.role!==role|
 const inputFenced=receipt=>receipt?.vncProcessesExited===true&&receipt?.xClientsAbsent===true&&((receipt.readOnly===true&&receipt.inputResetRequired===false)||receiptFlags.every(key=>receipt[key]===true));
 export const safeCompletion=row=>inputFenced(row.receipt)&&((row.mayBeWritable===false&&row.receipt.readOnly===true)||row.receipt.snapshotObserved===true);
 const terminal=row=>row.state==='ended'||row.state==='recovery_required';
+const bootOf=generation=>typeof generation==='string'&&generation?generation.split(':')[0]:undefined;
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+// A fence a restarted supervisor proved for a lease of its earlier boot. Generations and epochs restart with
+// the boot, so only this receipt may differ from the lease in them, and only when it names the lease's own.
+const supervisorRestarted=(row,receipt)=>receipt?.retirementReason==='supervisor_restarted'&&typeof row.displayGeneration==='string'&&receipt.previousGeneration===row.displayGeneration&&!!bootOf(receipt.displayGeneration)&&bootOf(receipt.displayGeneration)!==bootOf(row.displayGeneration);
+// The pid and start time of a process of this user, or null when there is no such pid.
+export async function readProcessInfo(pid){
+  let stat,status;
+  try{[stat,status]=await Promise.all([readFile('/proc/'+pid+'/stat','utf8'),readFile('/proc/'+pid+'/status','utf8')]);}
+  catch(error){if(error.code==='ENOENT'||error.code==='ESRCH')return null;throw error;}
+  return{startTicks:stat.slice(stat.lastIndexOf(')')+2).trim().split(/\s+/)[19],uid:Number(/^Uid:\s+(\d+)/m.exec(status)?.[1])};
+}
 const ownerParts=value=>{let parts;try{parts=JSON.parse(value);}catch{}if(!Array.isArray(parts)||parts.length!==2||parts.some(x=>typeof x!=='string'||!x||x.length>1000))throw new Error('Invalid owner session');return parts;};
 const checkedKey=value=>{if(typeof value!=='string'||!value||value.length>4096)throw new Error('Invalid browser call key');return value;};
 const targetIdentity=tab=>typeof (tab.id||tab.targetId)==='string'&&/^[A-Za-z0-9_-]{1,256}$/.test(tab.id||tab.targetId)?tab.id||tab.targetId:undefined;
@@ -38,6 +51,34 @@ export async function activateDesktopTarget(runtime,targetId){
     await page.send('Page.bringToFront');
   }finally{page.close();}
   return{targetId};
+}
+
+// A person in control may Alt-drag or resize the browser window; the agent gets it back maximized. Only the window
+// of the page the handback observed, which is the one the person left in front, so no other window is raised and
+// the human-selected context stays. Best effort: only window bounds change, never a page.
+export async function maximizeObservedWindow(runtime,targetId){
+  if(typeof targetId!=='string'||!/^[A-Za-z0-9_-]{1,256}$/.test(targetId))return false;
+  const origin=validateCdpUrl(runtime.cdpUrl).origin;
+  const response=await fetch(origin + '/json/version',{redirect:'error',signal:AbortSignal.timeout(5000)});
+  if(!response.ok)throw new Error('Browser unavailable');
+  const endpoint=new URL((await response.json()).webSocketDebuggerUrl);
+  if(endpoint.protocol!=='ws:'||endpoint.host!==new URL(origin).host||endpoint.username||endpoint.password)throw new Error('Invalid local CDP endpoint');
+  const browser=await new CdpConnection({commandTimeoutMs:3000}).connect(endpoint.href);
+  try{
+    const window=await browser.send('Browser.getWindowForTarget',{targetId});
+    if(!Number.isInteger(window?.windowId))return false;
+    const state=window.bounds?.windowState;
+    if(state==='maximized'||state==='fullscreen')return false;
+    // Chrome draws its own minimize button; a minimized window comes back first, as when a link is created.
+    // Chrome refuses to maximize a window it still reports minimized, and the restore finishes only when the window
+    // manager has mapped it again, so wait for that (2 seconds at most) before asking for maximized.
+    if(state==='minimized'){
+      await browser.send('Browser.setWindowBounds',{windowId:window.windowId,bounds:{windowState:'normal'}});
+      for(let n=0;n<20&&(await browser.send('Browser.getWindowForTarget',{targetId})).bounds?.windowState==='minimized';n++)await new Promise(resolve=>setTimeout(resolve,100));
+    }
+    await browser.send('Browser.setWindowBounds',{windowId:window.windowId,bounds:{windowState:'maximized'}});
+    return true;
+  }finally{browser.close();}
 }
 
 // This connection observes state only. The resumed agent still needs a normal
@@ -82,32 +123,123 @@ export class DesktopController {
   createGeneration=0;
   writes=Promise.resolve();
   runtimeQueue=Promise.resolve();
-  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,transportRewarmMs=5000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
+  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,supervisorWaitMs=45_000,processInfo=readProcessInfo,windowManager,transportRewarmMs=5000,transportMode='on-demand',transportIdleMs=600_000,leaseRetentionMs=7*86_400_000,acknowledgedRetentionMs=3_600_000,observe=observeDesktop,activateTarget=activateDesktopTarget,maximize,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
     if(!stateDir||!profile||!runtime||!transport)throw new Error('Desktop controller requires stateDir, profile, runtime and transport');
     if(!Number.isInteger(supervisorHeartbeatMs)||supervisorHeartbeatMs<1||supervisorHeartbeatMs>5000)throw new Error('Invalid supervisor heartbeat interval');
     if(!Number.isInteger(transportRewarmMs)||transportRewarmMs<0||transportRewarmMs>600_000)throw new Error('Invalid tunnel restart delay');
-    Object.assign(this,{stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs});
+    if(!['on-demand','always'].includes(transportMode))throw new Error('Invalid tunnel mode');
+    if(!Number.isInteger(transportIdleMs)||transportIdleMs<0||transportIdleMs>86_400_000)throw new Error('Invalid tunnel idle period');
+    for(const value of [leaseRetentionMs,acknowledgedRetentionMs])if(!Number.isInteger(value)||value<0)throw new Error('Invalid lease retention');
+    if(!Number.isInteger(supervisorWaitMs)||supervisorWaitMs<0||supervisorWaitMs>300_000)throw new Error('Invalid supervisor wait');
+    Object.assign(this,{supervisorWaitMs,processInfo,windowManager,maximize,stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs,transportMode,transportIdleMs,leaseRetentionMs,acknowledgedRetentionMs});
     this.socketPath=socketPath||join(this.stateDir,'desktop.sock');
-    this.transport.on?.('failure',()=>{void this.transportFailed();this.scheduleTransportWarm();});
+    // The outage ends every handoff first. Rewarming only afterwards finds the idle grace already running; a timer
+    // set at once could fire after a lease ended but before its grace began, and leave the tunnel down.
+    this.transport.on?.('failure',()=>{void this.transportFailed().finally(()=>this.scheduleTransportWarm());});
     this.supervisor={create:params=>this.createActor(params),read:async id=>({state:this.actors.has(id)?'running':'stopped'}),register:params=>this.registration(params.ownedId),promote:params=>this.promote(params),cancelPromotion:id=>this.cancelPromotion(id),demote:params=>this.demote(params),destroy:(id,options)=>this.retire(id,options),verifyExited:async id=>this.ledger.leases[id]?.state==='ended'&&safeCompletion(this.ledger.leases[id]),clipboardRead:id=>this.clipboard(id),clipboardWrite:(id,text)=>this.clipboard(id,text),focusRead:id=>this.focus(id)};
     this.gateway=gatewayFactory({...gatewayOptions,supervisor:this.supervisor,noVncAssetsDir,prefix:'/browser/',completionDisposition:'retained',capabilities:{clipboard:'utf8'},maxProbes:1,promotionMs:120_000,onEnded:(session,status)=>this.ended(session,status)});
-    this.rpc=new DesktopRpcServer({socketPath:this.socketPath,handler:(method,params,context)=>this.request(method,params,context),onDisconnect:keys=>this.disconnected(keys),onLockLost:()=>{this.poison();this.ready=false;void this.gateway.close();}});
+    this.rpc=new DesktopRpcServer({socketPath:this.socketPath,handler:(method,params,context)=>this.request(method,params,context),onDisconnect:keys=>this.disconnected(keys),onLockLost:()=>{this.poison(true);this.ready=false;void this.gateway.close();}});
   }
-  poison(){this.gate.poison();this.gate.poisonReason=recoveryMessage;}
-  // A cold tunnel takes up to a minute, so start it before the first link and again after a drop.
-  // A failed start is not retried here: the next create starts it and reports the error.
+  // A poison that the ledger explains (an uncertain call, a recovery_required lease) lifts once that state is
+  // provably gone. One from a lost lock or a failed write is latched until the controller restarts.
+  poison(latched=false){this.gate.poison();this.gate.poisonReason=recoveryMessage;if(latched)this.poisonLatched=true;}
+  reconsiderPoison(){
+    if(!this.gate.poisonReason||this.poisonLatched)return false;
+    if(Object.keys(this.ledger.calls).length||Object.values(this.ledger.leases).some(row=>row.state==='recovery_required'))return false;
+    this.gate.poisonReason=null;return true;
+  }
+  // A browser call carries the identity of the Gateway process that admitted it, recorded only after it was
+  // checked against a live process of this user. That process exiting proves the call can no longer act, so
+  // its admission, uncertain or not, is cleared. Calls with no verified identity are never cleared here.
+  async callOwner(identity){
+    if(!Number.isSafeInteger(identity?.pid)||identity.pid<1||typeof identity.startTicks!=='string'||!/^\d{1,20}$/.test(identity.startTicks))return{};
+    const key=identity.pid+':'+identity.startTicks;
+    if(!this.verifiedOwners?.has(key)){
+      const info=await this.processInfo(identity.pid).catch(()=>undefined);
+      if(!info||info.startTicks!==identity.startTicks||info.uid!==process.getuid())return{};
+      if((this.verifiedOwners??=new Set()).size>=16)this.verifiedOwners.clear();
+      this.verifiedOwners.add(key);
+    }
+    return{ownerPid:identity.pid,ownerStartTicks:identity.startTicks};
+  }
+  async resolveStaleCalls({persist=true}={}){
+    const stale=[];
+    for(const [key,call] of Object.entries(this.ledger.calls)){
+      if(!Number.isSafeInteger(call?.ownerPid)||typeof call.ownerStartTicks!=='string')continue;
+      let info;try{info=await this.processInfo(call.ownerPid);}catch{continue;}
+      if(!info||info.startTicks!==call.ownerStartTicks)stale.push(key);
+    }
+    if(!stale.length)return 0;
+    for(const key of stale){delete this.ledger.calls[key];this.gate.leave(key);}
+    process.stderr.write('Browser Handoff controller: cleared '+stale.length+' browser call admission(s) whose Gateway process has exited\n');
+    this.reconsiderPoison();
+    if(persist)await this.persist();
+    return stale.length;
+  }
+  // A restarting supervisor is unreachable for a few seconds (its unit restarts after 3 s; at boot it first waits
+  // for the display), so the fence is retried for supervisorWaitMs before the lease counts as unproven.
+  async settleViewer(leaseId,mayBeWritable,displayGeneration){
+    const deadline=Date.now()+this.supervisorWaitMs;
+    for(;;){
+      try{return await this.runtimeOperation(()=>this.runtime.stopViewerAndSettle({leaseId,mayBeWritable,...(displayGeneration?{displayGeneration}:{})}));}
+      catch(error){if(!['ENOENT','ECONNREFUSED'].includes(error?.code)||Date.now()>=deadline||this.closePromise)throw error;await sleep(500);}
+    }
+  }
+  async supervisorBoot(){
+    for(const deadline=Date.now()+this.supervisorWaitMs;;){
+      const boot=bootOf((await this.runtime.status().catch(()=>undefined))?.displayGeneration);
+      if(boot||Date.now()>=deadline||this.closePromise)return boot;
+      await sleep(500);
+    }
+  }
+  // The tunnel makes the viewer reachable from the internet, so by default it runs only on demand: a link starts
+  // it, and it stops transportIdleMs after the last handoff ends, which keeps back-to-back links quick. A cold
+  // tunnel takes up to a minute. transportMode 'always' starts it with the controller instead (the 1.0.0
+  // behaviour). After a drop it is started again only while it is wanted: always, during a handoff, or in the
+  // idle grace. A failed start is not retried here: the next create starts it and reports the error.
+  transportWanted(){return !!this.creating||Object.values(this.ledger.leases).some(row=>!terminal(row));}
   warmTransport(){
     if(!this.ready||this.closePromise||typeof this.transport.ensure!=='function')return;
+    if(this.transportMode!=='always'&&!this.transportWanted()&&!this.transportIdleTimer)return;
     void this.transport.ensure(new URL(this.gateway.localUrl).port*1).catch(()=>{});
+  }
+  scheduleTransportIdle(){
+    if(this.transportMode==='always'||this.closePromise||typeof this.transport.stop!=='function'||this.transportWanted())return;
+    clearTimeout(this.transportIdleTimer);
+    this.transportIdleTimer=setTimeout(()=>{
+      this.transportIdleTimer=undefined;
+      if(this.transportWanted()||this.closePromise)return;
+      clearTimeout(this.transportWarmTimer);
+      void this.transport.stop().catch(()=>{});
+    },this.transportIdleMs);
+    this.transportIdleTimer.unref?.();
   }
   scheduleTransportWarm(){
     clearTimeout(this.transportWarmTimer);
     this.transportWarmTimer=setTimeout(()=>this.warmTransport(),this.transportRewarmMs);
     this.transportWarmTimer.unref?.();
   }
+  // The whole ledger is rewritten and fsynced on every change, and completions must fit one RPC frame, so ended
+  // leases do not stay forever. A lease goes once it has ended with a proven fence and its viewer session is gone:
+  // an hour after the plugin acknowledged its completion (however late that was), or a week after it ended if
+  // nothing ever did. A
+  // recovery_required lease is the durable record of a poisoned gate and is never pruned.
+  pruneLeases(now=Date.now()){
+    let pruned=0;
+    for(const [id,row] of Object.entries(this.ledger.leases)){
+      if(row?.state!=='ended'||!safeCompletion(row)||row.retirement)continue;
+      const session=this.gateway.sessions.get(id);
+      if(session&&session.mode!=='ended')continue;
+      const age=now-(row.completedAt??row.createdAt??0);
+      // A row acknowledged before acknowledgedAt existed counts from its completion.
+      const sinceAcknowledged=row.acknowledged===true?now-(row.acknowledgedAt??row.completedAt??row.createdAt??0):-1;
+      if(sinceAcknowledged>=this.acknowledgedRetentionMs||age>=this.leaseRetentionMs){delete this.ledger.leases[id];pruned++;}
+    }
+    return pruned;
+  }
   runtimeOperation(operation){const next=this.runtimeQueue.then(operation);this.runtimeQueue=next.catch(()=>{});return next;}
   async persist(){
-    if(!this.rpc?.lockHolder||this.rpc.lockHolder.lost){this.poison();throw new Error('Controller authority lock is unavailable; persistence denied');}
+    if(!this.rpc?.lockHolder||this.rpc.lockHolder.lost){this.poison(true);throw new Error('Controller authority lock is unavailable; persistence denied');}
     const contents=JSON.stringify(this.ledger)+'\n';
     const next=this.writes.then(async()=>{
       const temporary=join(this.stateDir,'ledger.' + process.pid + '.' + randomBytes(8).toString('hex') + '.tmp');
@@ -116,8 +248,8 @@ export class DesktopController {
       await rename(temporary,join(this.stateDir,'ledger.json'));
       const directory=await open(this.stateDir,'r');try{await directory.sync();}finally{await directory.close();}
     });
-    this.writes=next.catch(()=>{this.poison();});
-    try{await next;}catch{this.poison();throw new Error('Could not persist browser authority; operator recovery is required');}
+    this.writes=next.catch(()=>{this.poison(true);});
+    try{await next;}catch{this.poison(true);throw new Error('Could not persist browser authority; operator recovery is required');}
   }
   async start(){
     await mkdir(this.stateDir,{recursive:true,mode:0o700});
@@ -125,21 +257,34 @@ export class DesktopController {
     try{
       try{const saved=JSON.parse(await readFile(join(this.stateDir,'ledger.json'),'utf8'));if(saved.version!==1||!saved.calls||!saved.leases)throw new Error('Invalid authority ledger');this.ledger=saved;}catch(error){if(error.code!=='ENOENT')throw error;}
       this.gate.holder='startup_reconciliation';
+      await this.resolveStaleCalls({persist:false});
       const uncertain=Object.keys(this.ledger.calls).length>0;
       for(const row of Object.values(this.ledger.leases))if(!terminal(row)){
         row.reason='controller_restart';
         await this.retire(row.id,{reconcile:true}).catch(()=>{});
       }
+      // A recovery_required lease from an earlier supervisor boot is checked again: that supervisor and its
+      // actors are gone, and the current one proves a fresh fence (and a writable lease a fresh observation)
+      // before the lease may end. A read-only lease gets the same second chance on any boot. A writable lease
+      // that failed on this boot is left to the offline reconcile helper.
+      const healable=Object.values(this.ledger.leases).filter(row=>row.state==='recovery_required');
+      const boot=healable.some(row=>row.mayBeWritable!==false)?await this.supervisorBoot():undefined;
+      for(const row of healable)if(row.mayBeWritable===false||(boot&&bootOf(row.displayGeneration)&&bootOf(row.displayGeneration)!==boot)){
+        await this.retire(row.id,{reconcile:true}).catch(()=>{});
+      }
       this.gate.holder=null;
+      this.pruneLeases();
       if(uncertain||Object.values(this.ledger.leases).some(row=>row.state==='recovery_required'))this.poison();
       await this.persist();
       await this.gateway.start({port:this.port});
+      // A cloudflared that a killed controller left running still forwards an old public address here.
+      void this.transport.reapOrphans?.().catch(()=>{});
       this.ready=true;
-      this.warmTransport();
+      if(this.transportMode==='always')this.warmTransport();
       this.supervisorHeartbeatTimer=setInterval(()=>{void this.heartbeatViewers();},this.supervisorHeartbeatMs);
       this.supervisorHeartbeatTimer.unref();
       return this;
-    }catch(error){this.poison();await this.rpc.close();throw error;}
+    }catch(error){this.poison(true);await this.rpc.close();throw error;}
   }
   async ensure(params={},context={}){
     const callKey=params.callKey===undefined?undefined:checkedKey(params.callKey);
@@ -159,7 +304,7 @@ export class DesktopController {
       return{ready:true,profile:this.profile,cdpUrl:this.runtime.cdpUrl,browserGeneration:status.browserGeneration||status.displayGeneration,displayGeneration:status.displayGeneration,recoveryRequired:false};
     });
   }
-  health(){return{ready:this.ready===true&&!this.gate.poisonReason,profile:this.profile,cdpUrl:this.runtime.cdpUrl,recoveryRequired:!!this.gate.poisonReason};}
+  health(){return{ready:this.ready===true&&!this.gate.poisonReason,profile:this.profile,cdpUrl:this.runtime.cdpUrl,recoveryRequired:!!this.gate.poisonReason,publicTransport:this.transportMode==='always'?'always-on':'on-demand'};}
   heartbeatCurrent(id,actor){
     const row=this.ledger.leases[id],session=this.gateway.sessions.get(id);
     return this.ready===true&&!this.gateway.closed&&this.actors.get(id)===actor&&
@@ -247,35 +392,45 @@ export class DesktopController {
         if(!readOnly&&!reconcile&&this.gate.holder!==id){if(this.gate.poisonReason&&this.gate.holder===null)this.gate.holder=id;else await this.gate.acquire(id);}
         row.state='retiring';row.recoveryStage='input_fence';recoveryCode='journal_persistence';await this.persist();
         recoveryCode='input_fence_rpc';
-        const receipt=await this.runtimeOperation(()=>this.runtime.stopViewerAndSettle({leaseId:id,mayBeWritable:!readOnly}));
+        const receipt=await this.settleViewer(id,!readOnly,row.displayGeneration);
         recoveryCode='input_fence_receipt';
-        if(!Number.isSafeInteger(receipt.epoch)||receipt.epoch<1||(Number.isSafeInteger(row.epoch)&&receipt.epoch<=row.epoch)||receipt.leaseId!==id||receipt.vncProcessesExited!==true||receipt.xClientsAbsent!==true||(readOnly?(receipt.readOnly!==true||receipt.inputResetRequired!==false):receiptFlags.some(key=>receipt[key]!==true))||!receipt.displayGeneration||(row.displayGeneration&&row.displayGeneration!==receipt.displayGeneration)||(row.browserGeneration&&receipt.browserGeneration&&row.browserGeneration!==receipt.browserGeneration))throw new Error('Input retirement was not proven');
+        const restarted=supervisorRestarted(row,receipt);
+        if(!Number.isSafeInteger(receipt.epoch)||receipt.epoch<1||(!restarted&&Number.isSafeInteger(row.epoch)&&receipt.epoch<=row.epoch)||receipt.leaseId!==id||receipt.vncProcessesExited!==true||receipt.xClientsAbsent!==true||(readOnly?(receipt.readOnly!==true||receipt.inputResetRequired!==false):receiptFlags.some(key=>receipt[key]!==true))||!receipt.displayGeneration||(!restarted&&row.displayGeneration&&row.displayGeneration!==receipt.displayGeneration)||(!restarted&&row.browserGeneration&&receipt.browserGeneration&&row.browserGeneration!==receipt.browserGeneration))throw new Error('Input retirement was not proven');
+        if(restarted&&[undefined,'controller_restart','supervisor_unavailable','retirement_failed'].includes(row.reason))row.reason='supervisor_restarted';
         row.receipt={leaseId:id,...Object.fromEntries(receiptFlags.map(key=>[key,receipt[key]===true])),readOnly,inputResetRequired:!readOnly,displayGeneration:receipt.displayGeneration,browserGeneration:receipt.browserGeneration,epoch:receipt.epoch,snapshotObserved:false};
         if(!readOnly){row.recoveryStage='browser_observation';recoveryCode='journal_persistence';await this.persist();
         recoveryCode='browser_observation';
-        const observation=await this.runtimeOperation(()=>this.observe(this.runtime,row));
+        // After a restart the browser may still be starting too, and no person can be waiting on this lease.
+        let observation;
+        for(const deadline=Date.now()+(restarted?this.supervisorWaitMs:0);;){
+          try{observation=await this.runtimeOperation(()=>this.observe(this.runtime,row));break;}
+          catch(error){if(Date.now()>=deadline||this.closePromise)throw error;await sleep(500);}
+        }
         if(observation?.snapshotObserved!==true||observation.displayGeneration!==receipt.displayGeneration||(receipt.browserGeneration&&observation.browserGeneration!==receipt.browserGeneration))throw new Error('Fresh browser observation was not proven');
         // Copy only nonsecret fence fields into the journal.
         row.receipt={leaseId:id,...Object.fromEntries(receiptFlags.map(key=>[key,true])),displayGeneration:receipt.displayGeneration,browserGeneration:observation.browserGeneration||receipt.displayGeneration,epoch:receipt.epoch,readOnly:false,inputResetRequired:true,snapshotObserved:true,...observedContext(observation)};}
         if(resume){row.state='settled';delete row.recoveryStage;delete row.recoveryCode;recoveryCode='journal_persistence';await this.persist();this.actors.delete(id);return;}
         row.state='ended';delete row.recoveryStage;delete row.recoveryCode;row.completedAt=Date.now();row.reason||='ended';
         recoveryCode='journal_persistence';await this.persist();this.actors.delete(id);
+        // Control has ended and is fenced; give the agent its window back the way setup made it.
+        if(!readOnly&&typeof this.maximize==='function'&&row.receipt?.observedTargetId)void this.runtimeOperation(()=>this.maximize(this.runtime,row.receipt.observedTargetId)).catch(()=>{});
         if(!reconcile)this.gate.release(id);
       }catch(error){row.state='recovery_required';row.recoveryCode=recoveryCode;row.reason||='retirement_failed';row.completedAt=Date.now();this.poison();await this.persist().catch(()=>{});throw new Error(recoveryMessage);}
     })();
     // A promise is process-local and must never enter the durable JSON journal.
     Object.defineProperty(row,'retirement',{value:retirement,writable:true,configurable:true,enumerable:false});
-    try{return await retirement;}finally{delete row.retirement;}
+    try{return await retirement;}finally{delete row.retirement;this.scheduleTransportIdle();}
   }
   async ended(session,status){
     const row=this.ledger.leases[session.id];if(!row)return;row.reason=session.reason||row.reason||'ended';
     if(status?.mode==='cleanup_failed'){row.state='recovery_required';row.recoveryStage ||= 'gateway_cleanup';this.poison();}
-    try{await this.persist();}catch(error){row.state='recovery_required';row.recoveryStage='completion_persistence';row.recoveryCode='journal_persistence';this.poison();await this.persist().catch(()=>{});throw error;}
+    try{await this.persist();}catch(error){row.state='recovery_required';row.recoveryStage='completion_persistence';row.recoveryCode='journal_persistence';this.poison(true);await this.persist().catch(()=>{});throw error;}
+    finally{this.scheduleTransportIdle();}
   }
   // Read-only, so it skips the runtime queue: a tap's focus check must not wait behind input retirement.
   async focus(id){const row=this.ledger.leases[id];if(!row||row.state!=='control'||this.gate.holder!==id||this.gate.poisonReason)throw new Error('Focus requires current human control');return this.readFocus(this.runtime);}
   async clipboard(id,text){const row=this.ledger.leases[id];if(!row||row.state!=='control'||this.gate.holder!==id||this.gate.poisonReason)throw new Error('Clipboard requires current human control');return this.runtimeOperation(async()=>{if(row.state!=='control')throw new Error('Clipboard authority ended');return text===undefined?this.runtime.clipboardRead({leaseId:id,epoch:row.epoch}):this.runtime.clipboardWrite(text,{leaseId:id,epoch:row.epoch});});}
-  owned(owner,id){ownerParts(owner);const row=this.ledger.leases[id];if(!row||row.owner!==owner)throw new Error('Lease belongs to another owner session');return row;}
+  owned(owner,id){ownerParts(owner);const row=this.ledger.leases[id];if(!row)throw new Error('Unknown browser handoff; an ended one is kept for an hour after its completion is delivered');if(row.owner!==owner)throw new Error('Lease belongs to another owner session');return row;}
   status(row){
     const gatewaySession=this.gateway.sessions.get(row.id);
     const mode=row.state==='recovery_required'?'recovery_required':row.state==='ended'?'ended':gatewaySession?.mode||row.state;
@@ -307,7 +462,8 @@ export class DesktopController {
     if(!this.ready&&!['health','automationLeave'].includes(method))throw new Error('Production controller is reconciling or stopping');
     if(params.profile!==undefined&&params.profile!==this.profile)throw new Error('Only the dedicated browser profile is managed');
     switch(method){
-      case 'health':return this.health();
+      // The plugin asks for health when it activates, as after a Gateway restart: calls the old Gateway left are cleared first.
+      case 'health':if(this.ready&&Object.keys(this.ledger.calls).length)await this.resolveStaleCalls();return this.health();
       case 'ensure':return this.ensure(params,context);
       case 'tabs':{
         await this.ensure();const tabs=await this.runtimeOperation(()=>this.runtime.tabs());
@@ -317,7 +473,9 @@ export class DesktopController {
       case 'automationEnter':{
         const key=checkedKey(params.callKey),connectionId=context.connectionId||'direct',existing=this.ledger.calls[key];
         if(existing&&(existing.connectionId!==connectionId||existing.state!=='active'))throw new Error('Browser call already admitted on another connection or uncertain');
-        this.gate.enter(key);this.ledger.calls[key]=existing?{...existing,count:existing.count+1}:{state:'active',count:1,connectionId,admittedAt:Date.now()};await this.persist();
+        const callOwner=existing?{}:await this.callOwner(params.gateway);
+        if(this.ledger.calls[key]!==existing)throw new Error('Browser call already admitted on another connection or uncertain');
+        this.gate.enter(key);this.ledger.calls[key]=existing?{...existing,count:existing.count+1}:{state:'active',count:1,connectionId,admittedAt:Date.now(),...callOwner};await this.persist();
         if(context.signal?.aborted){await this.disconnected([key]);throw new Error(recoveryMessage);}return{admitted:true};
       }
       case 'automationLeave':{
@@ -330,8 +488,13 @@ export class DesktopController {
       case 'create':{
         ownerParts(params.owner);if(this.revocationWork)throw new Error('Browser invitations are stopped during bulk retirement');if(this.creating||Object.values(this.ledger.leases).some(row=>!terminal(row)))throw new Error('A browser invitation is already active');
         if(!['watch','control'].includes(params.permission)||!Number.isInteger(params.ttlSeconds)||params.ttlSeconds<30||params.ttlSeconds>1800)throw new Error('Invalid invitation permission or lifetime');
+        // Control on an openbox that still has its menus would reach a terminal. Read afresh: setup may just have fixed it.
+        if(params.permission==='control'&&this.windowManager){const refusal=controlRefusal(await this.windowManager().catch(()=>'invalid'));if(refusal)throw new Error(refusal);}
+        if(this.revocationWork)throw new Error('Browser invitations are stopped during bulk retirement');if(this.creating||Object.values(this.ledger.leases).some(row=>!terminal(row)))throw new Error('A browser invitation is already active');
         if(params.targetId!==undefined&&(typeof params.targetId!=='string'||!params.targetId||params.targetId.length>256))throw new Error('Invalid task target');
+        if(this.pruneLeases())await this.persist();
         this.creating=params;const generation=this.createGeneration;
+        clearTimeout(this.transportIdleTimer);this.transportIdleTimer=undefined;
         const activationId=params.targetId?'activation:' + randomBytes(16).toString('hex'):undefined;
         let activationWaiting=false;
         const cancelActivation=()=>{if(activationWaiting)this.gate.release(activationId);};
@@ -351,7 +514,7 @@ export class DesktopController {
           current();const result=await this.gateway.createProbe({ttlSeconds:params.ttlSeconds,permission:params.permission});
           try{current();}catch(error){const session=this.gateway.sessions.get(result.id);if(session)await this.gateway.end(session,error.handoffReason||'plugin_stop');throw error;}
           return{...result,...this.status(this.ledger.leases[result.id])};
-        }finally{context.signal?.removeEventListener('abort',cancelActivation);if(activationId)this.gate.release(activationId);this.creating=undefined;}
+        }finally{context.signal?.removeEventListener('abort',cancelActivation);if(activationId)this.gate.release(activationId);this.creating=undefined;this.scheduleTransportIdle();}
       }
       case 'status':return this.status(this.owned(params.owner,params.id));
       case 'wait':{
@@ -370,10 +533,16 @@ export class DesktopController {
       case 'revokeOwner':{
         const work=[];for(const row of Object.values(this.ledger.leases)){const [key,id]=ownerParts(row.owner);if(key===params.sessionKey&&(params.sessionId===undefined||params.sessionId===id)&&!terminal(row))work.push(this.request('revoke',{owner:row.owner,id:row.id}));}await Promise.all(work);return{revoked:work.length};
       }
-      case 'completions':return{completions:Object.values(this.ledger.leases).filter(row=>terminal(row)&&!row.acknowledged).map(row=>({...this.status(row),owner:row.owner,completedAt:row.completedAt}))};
-      case 'acknowledgeCompletion':{const row=this.ledger.leases[params.id];if(!row||!terminal(row))throw new Error('Completion is unavailable');row.acknowledged=true;await this.persist();return{acknowledged:true};}
+      case 'completions':{
+        // Oldest first, and never more than the caller asked for, so one reply stays far below the 1 MB frame.
+        const limit=params.limit??50;
+        if(!Number.isInteger(limit)||limit<1||limit>100)throw new Error('Invalid completion limit');
+        const pending=Object.values(this.ledger.leases).filter(row=>terminal(row)&&!row.acknowledged).sort((a,b)=>(a.completedAt??0)-(b.completedAt??0));
+        return{completions:pending.slice(0,limit).map(row=>({...this.status(row),owner:row.owner,completedAt:row.completedAt})),...(pending.length>limit?{more:true}:{})};
+      }
+      case 'acknowledgeCompletion':{const row=this.ledger.leases[params.id];if(!row||!terminal(row))throw new Error('Completion is unavailable');if(row.acknowledged!==true){row.acknowledged=true;row.acknowledgedAt=Date.now();}this.pruneLeases();await this.persist();return{acknowledged:true};}
       default:throw new Error('Unsupported controller RPC method');
     }
   }
-  async close(){if(this.closePromise)return this.closePromise;clearInterval(this.supervisorHeartbeatTimer);clearTimeout(this.transportWarmTimer);this.ready=false;this.closePromise=(async()=>{await this.gateway.close();if(Object.keys(this.ledger.calls).length)this.poison();if(this.rpc.lockHolder&&!this.rpc.lockHolder.lost)await this.persist().catch(()=>{});await this.rpc.close();await this.transport.close();})();return this.closePromise;}
+  async close(){if(this.closePromise)return this.closePromise;clearInterval(this.supervisorHeartbeatTimer);clearTimeout(this.transportWarmTimer);clearTimeout(this.transportIdleTimer);this.ready=false;this.closePromise=(async()=>{await this.gateway.close();if(Object.keys(this.ledger.calls).length)this.poison();if(this.rpc.lockHolder&&!this.rpc.lockHolder.lost)await this.persist().catch(()=>{});await this.rpc.close();await this.transport.close();})();return this.closePromise;}
 }

@@ -118,37 +118,112 @@ test('tunnel failure retires the viewer while keeping the persistent browser',as
 });
 
 function countingTransport(ensure=async()=>'https://example.test') {
-  const ports=[];
-  return {ports,on(){},ensure:async port=>{ports.push(port);return ensure(port);},close:async()=>{}};
+  const ports=[],stops=[];
+  return {ports,stops,on(){},ensure:async port=>{ports.push(port);return ensure(port);},stop:async()=>{stops.push(ports.length);},close:async()=>{}};
 }
-const settle=()=>new Promise(resolve=>setTimeout(resolve,50));
+const settle=(ms=50)=>new Promise(resolve=>setTimeout(resolve,ms));
 
-test('the controller starts the public tunnel when it starts, so the first link does not wait for it',async t=>{
+test('on demand, the default, the controller starts no tunnel until a link is created',async t=>{
   const transport=countingTransport();
   const{controller:c}=await setup(t,{controller:{transport}});
   await settle();
+  assert.deepEqual(transport.ports,[]);
+  assert.equal(c.health().publicTransport,'on-demand');
+  await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
   assert.deepEqual(transport.ports,[new URL(c.gateway.localUrl).port*1]);
 });
 
-test('a dropped tunnel is started again in the background',async t=>{
+test('on demand, the tunnel stops an idle period after the last handoff ends, and a link inside it cancels the stop',async t=>{
+  const transport=countingTransport();
+  const{controller:c}=await setup(t,{controller:{transport,transportIdleMs:150}});
+  const first=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  await settle(200);
+  assert.deepEqual(transport.stops,[],'never while a handoff is open');
+  await c.request('revoke',{owner,id:first.id});
+  await settle(50);
+  // A second link inside the grace reuses the warm tunnel and keeps it running.
+  const second=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  await settle(200);
+  assert.deepEqual(transport.stops,[]);
+  await c.request('revoke',{owner,id:second.id});
+  await settle(250);
+  assert.deepEqual(transport.stops,[2],'stopped once, after the grace');
+});
+
+test('a link that fails to start still lets an on-demand tunnel stop when idle',async t=>{
+  const transport=countingTransport();
+  const{controller:c}=await setup(t,{controller:{transport,transportIdleMs:50},runtime:{startViewer:async()=>{throw new Error('no viewer');}}});
+  await assert.rejects(c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30}));
+  await settle(150);
+  assert.deepEqual(transport.stops,[1]);
+});
+
+test('on demand, a dropped tunnel comes back during a handoff or its idle grace, never afterwards',async t=>{
   const {EventEmitter}=await import('node:events');const transport=Object.assign(new EventEmitter(),countingTransport());
   delete transport.on;
-  await setup(t,{controller:{transport,transportRewarmMs:0}});
+  const{controller:c}=await setup(t,{controller:{transport,transportRewarmMs:0,transportIdleMs:200}});
+  await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  transport.emit('failure',new Error('owned tunnel exited'));
+  for(let n=0;n<40&&transport.ports.length<2;n++)await settle(10);
+  assert.equal(transport.ports.length,2,'restarted: the outage ended the handoff, and the idle grace is running');
+  await settle(250);
+  assert.deepEqual(transport.stops,[2]);
+  transport.emit('failure',new Error('owned tunnel exited'));
+  await settle();
+  assert.equal(transport.ports.length,2,'not restarted once idle');
+});
+
+test('after an outage, the tunnel comes back for the idle grace even when ending the handoff is slow',async t=>{
+  const {EventEmitter}=await import('node:events');const transport=Object.assign(new EventEmitter(),countingTransport());
+  delete transport.on;
+  const{controller:c}=await setup(t,{controller:{transport,transportRewarmMs:150,transportIdleMs:2000}});
+  await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  // Each journal write takes 100 ms, so a rewarm timer set at the outage fires after the lease ended, before its grace.
+  const persist=c.persist.bind(c);c.persist=async()=>{await settle(100);return persist();};
+  transport.emit('failure',new Error('owned tunnel exited'));
+  for(let n=0;n<100&&transport.ports.length<2;n++)await settle(10);
+  assert.equal(transport.ports.length,2,'rewarmed for the idle grace');
+  assert.ok(c.transportIdleTimer,'the idle grace is running');
+});
+
+test('with transportMode always, the controller starts the public tunnel when it starts and never stops it',async t=>{
+  const transport=countingTransport();
+  const{controller:c}=await setup(t,{controller:{transport,transportMode:'always',transportIdleMs:0}});
+  await settle();
+  assert.deepEqual(transport.ports,[new URL(c.gateway.localUrl).port*1]);
+  assert.equal(c.health().publicTransport,'always-on');
+  const lease=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  await c.request('revoke',{owner,id:lease.id});
+  await settle();
+  assert.deepEqual(transport.stops,[]);
+});
+
+test('with transportMode always, a dropped tunnel is started again in the background',async t=>{
+  const {EventEmitter}=await import('node:events');const transport=Object.assign(new EventEmitter(),countingTransport());
+  delete transport.on;
+  await setup(t,{controller:{transport,transportMode:'always',transportRewarmMs:0}});
   await settle();
   transport.emit('failure',new Error('owned tunnel exited'));
   await settle();
   assert.equal(transport.ports.length,2);
 });
 
-test('a failed tunnel warm-up is not retried in the background, and the next link starts it',async t=>{
+test('with transportMode always, a failed tunnel warm-up is not retried in the background, and the next link starts it',async t=>{
   let fail=true;
   const transport=countingTransport(async()=>{if(fail)throw new Error('offline');return 'https://example.test';});
-  const{controller:c}=await setup(t,{controller:{transport,transportRewarmMs:0}});
+  const{controller:c}=await setup(t,{controller:{transport,transportMode:'always',transportRewarmMs:0}});
   await settle();
   assert.equal(transport.ports.length,1);
   fail=false;
   await c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30});
   assert.equal(transport.ports.length,2);
+});
+
+test('tunnel mode and idle period are validated',async t=>{
+  const stateDir=await mkdtemp(join(tmpdir(),'desktop-controller-'));t.after(()=>rm(stateDir,{recursive:true,force:true}));
+  const base={stateDir,profile:'human',runtime:{cdpUrl:'http://127.0.0.1:18810'},transport:countingTransport()};
+  assert.throws(()=>new DesktopController({...base,transportMode:'sometimes'}),/tunnel mode/);
+  for(const transportIdleMs of [-1,1.5,86_400_001])assert.throws(()=>new DesktopController({...base,transportIdleMs}),/idle period/);
 });
 
 async function viewerClient(t,controller,lease) {
@@ -609,4 +684,218 @@ test('focus answers come from the browser only while the lease holds control',as
   await assert.rejects(c.supervisor.focusRead('someone-else'),/human control/i);
   await viewer.post('done');
   await assert.rejects(c.supervisor.focusRead(lease.id),/human control/i);
+});
+
+test('ended leases are pruned an hour after acknowledgement or after a week, never a recovery_required one',async t=>{
+  const{controller:c,stateDir}=await setup(t,{controller:{acknowledgedRetentionMs:1000,leaseRetentionMs:60_000}});
+  const first=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  await c.request('revoke',{owner,id:first.id});
+  await c.request('acknowledgeCompletion',{id:first.id});
+  assert.ok(c.ledger.leases[first.id],'kept while the agent may still read its status');
+  const second=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  await c.request('revoke',{owner,id:second.id});
+  const now=Date.now();
+  // Neither is old enough yet; then the acknowledged one passes its hour and the other its week.
+  assert.equal(c.pruneLeases(now),0);
+  assert.equal(c.pruneLeases(now+2000),1);
+  assert.equal(c.ledger.leases[first.id],undefined);
+  await assert.rejects(c.request('status',{owner,id:first.id}),/Unknown browser handoff/);
+  c.ledger.leases.broken={id:'broken',owner,profile:'human',permission:'control',state:'recovery_required',mayBeWritable:true,completedAt:0};
+  c.ledger.leases.running={id:'running',owner,profile:'human',permission:'watch',state:'watch',createdAt:0};
+  assert.equal(c.pruneLeases(now+120_000),1);
+  assert.deepEqual(Object.keys(c.ledger.leases).sort(),['broken','running']);
+  assert.equal(c.ledger.leases[second.id],undefined,'unacknowledged, but older than the week');
+  await c.persist();
+  const saved=JSON.parse(await readFile(join(stateDir,'ledger.json'),'utf8'));
+  assert.deepEqual(Object.keys(saved.leases).sort(),['broken','running']);
+});
+
+test('completions are oldest first and honour the limit',async t=>{
+  const{controller:c}=await setup(t);
+  const base={owner,profile:'human',permission:'watch',state:'ended',mayBeWritable:false,receipt:{vncProcessesExited:true,xClientsAbsent:true,readOnly:true,inputResetRequired:false}};
+  for(let n=0;n<130;n++)c.ledger.leases['l'+n]={...base,id:'l'+n,completedAt:1000+(130-n)};
+  const first=await c.request('completions',{limit:50});
+  assert.equal(first.completions.length,50);assert.equal(first.more,true);
+  assert.deepEqual(first.completions.slice(0,2).map(row=>row.id),['l129','l128']);
+  assert.equal((await c.request('completions',{})).completions.length,50,'50 when the caller names no limit');
+  const all=await c.request('completions',{limit:100});assert.equal(all.completions.length,100);
+  for(const limit of [0,101,1.5,'5'])await assert.rejects(c.request('completions',{limit}),/completion limit/);
+});
+
+// A supervisor restart or a reboot: the new supervisor has no actor and no cached settlement for the lease,
+// and proves a fresh fence itself, naming the lease's own generation from its earlier boot.
+const restartedReceipt=({leaseId,mayBeWritable},previous='old-boot:1:2')=>({leaseId,epoch:1,displayGeneration:'new-boot:1:3',browserGeneration:'new-boot:guid',readOnly:mayBeWritable===false,inputResetRequired:mayBeWritable!==false,vncProcessesExited:true,xClientsAbsent:true,heldInputCleared:mayBeWritable!==false,xSyncComplete:true,retirementReason:'supervisor_restarted',previousGeneration:previous});
+async function restartedController(t,leases,{runtime={},controller={},calls={}}={}){
+  const{controller:first,stateDir,events}=await setup(t);
+  await first.close();
+  await writeFile(join(stateDir,'ledger.json'),JSON.stringify({version:1,calls,leases}));
+  const settled=[];
+  const base={...first.runtime,status:async()=>({ready:true,browserReady:true,displayGeneration:'new-boot:1:3',browserGeneration:'new-boot:guid'}),stopViewerAndSettle:async params=>{settled.push(params);return restartedReceipt(params);},...runtime};
+  const restarted=new DesktopController({stateDir,profile:'human',runtime:base,transport:first.transport,port:0,supervisorWaitMs:300,observe:async()=>({snapshotObserved:true,displayGeneration:'new-boot:1:3',browserGeneration:'new-boot:guid'}),...controller});
+  await restarted.start();t.after(()=>restarted.close());
+  return{controller:restarted,settled,events,stateDir};
+}
+const controlRow=(id,extra={})=>({id,owner,profile:'human',permission:'control',state:'control',mayBeWritable:true,epoch:7,displayGeneration:'old-boot:1:2',browserGeneration:'old-boot:guid',expiresAt:Date.now()+60_000,...extra});
+
+test('after a reboot, a lease from the old supervisor boot ends as supervisor_restarted without poisoning the gate',async t=>{
+  const{controller:c,settled}=await restartedController(t,{lease:controlRow('lease')});
+  assert.deepEqual(settled,[{leaseId:'lease',mayBeWritable:true,displayGeneration:'old-boot:1:2'}],'the old generation is named so the supervisor can tell its boot apart');
+  const status=await c.request('status',{owner,id:'lease'});
+  assert.equal(status.mode,'ended');assert.equal(status.reason,'supervisor_restarted');
+  assert.equal(status.resumeAllowed,true);assert.equal(status.inputFenced,true);assert.equal(status.snapshotObserved,true);
+  assert.equal(c.health().ready,true);
+  await c.request('automationEnter',{callKey:'after-reboot'});
+});
+
+test('a restarted-supervisor receipt must name the lease\'s own earlier generation',async t=>{
+  for(const previous of ['other-boot:1:2',undefined]){
+    const{controller:c}=await restartedController(t,{lease:controlRow('lease')},{runtime:{stopViewerAndSettle:async params=>({...restartedReceipt(params,previous),...previous===undefined?{previousGeneration:undefined}:{}})}});
+    assert.equal((await c.request('status',{owner,id:'lease'})).mode,'recovery_required',String(previous));
+    assert.equal(c.health().recoveryRequired,true);
+  }
+  // Same boot: generations must still match exactly.
+  const{controller:same}=await restartedController(t,{lease:controlRow('lease',{displayGeneration:'new-boot:1:2'})},{runtime:{stopViewerAndSettle:async params=>restartedReceipt(params,'new-boot:1:2')}});
+  assert.equal((await same.request('status',{owner,id:'lease'})).mode,'recovery_required');
+});
+
+test('the fence waits for a supervisor that is still starting, within supervisorWaitMs',async t=>{
+  let refusals=0;
+  const down=async params=>{if(refusals++<2)throw Object.assign(new Error('connect ENOENT'),{code:'ENOENT'});return restartedReceipt(params);};
+  const{controller:c}=await restartedController(t,{lease:controlRow('lease')},{runtime:{stopViewerAndSettle:down}});
+  assert.equal(refusals,3);
+  assert.equal((await c.request('status',{owner,id:'lease'})).mode,'ended');
+  const{controller:never}=await restartedController(t,{lease:controlRow('lease')},{runtime:{stopViewerAndSettle:async()=>{throw Object.assign(new Error('connect ECONNREFUSED'),{code:'ECONNREFUSED'});}}});
+  assert.equal((await never.request('status',{owner,id:'lease'})).mode,'recovery_required','a supervisor that never answers still leaves recovery required');
+});
+
+test('a browser still starting after a reboot is observed again before the lease ends',async t=>{
+  let observations=0;
+  const{controller:c}=await restartedController(t,{lease:controlRow('lease')},{controller:{observe:async()=>{if(observations++<2)throw new Error('Browser observation unavailable');return{snapshotObserved:true,displayGeneration:'new-boot:1:3',browserGeneration:'new-boot:guid'};}}});
+  assert.equal(observations,3);
+  assert.equal((await c.request('status',{owner,id:'lease'})).mode,'ended');
+});
+
+test('recovery_required leases from an earlier supervisor boot are checked again at start, a writable one from this boot is not',async t=>{
+  const old=controlRow('old',{state:'recovery_required',recoveryCode:'input_fence_rpc',reason:'retirement_failed'});
+  const watch={id:'watch',owner,profile:'human',permission:'watch',state:'recovery_required',mayBeWritable:false,epoch:3,displayGeneration:'new-boot:1:3',browserGeneration:'new-boot:guid'};
+  const{controller:c}=await restartedController(t,{old,watch},{runtime:{stopViewerAndSettle:async params=>{return params.leaseId==='watch'?{leaseId:'watch',epoch:9,displayGeneration:'new-boot:1:3',browserGeneration:'new-boot:guid',readOnly:true,inputResetRequired:false,vncProcessesExited:true,xClientsAbsent:true,heldInputCleared:false,xSyncComplete:true,retirementReason:'no_actor'}:restartedReceipt(params);}}});
+  assert.equal((await c.request('status',{owner,id:'old'})).reason,'supervisor_restarted');
+  assert.equal((await c.request('status',{owner,id:'old'})).mode,'ended');
+  assert.equal((await c.request('status',{owner,id:'watch'})).mode,'ended','a read-only lease gets a second chance on any boot');
+  assert.equal(c.health().ready,true);
+  const current=controlRow('current',{state:'recovery_required',displayGeneration:'new-boot:1:3',browserGeneration:'new-boot:guid'});
+  const{controller:kept,settled:none}=await restartedController(t,{current});
+  assert.deepEqual(none,[],'left to the offline reconcile helper');
+  assert.equal(kept.health().recoveryRequired,true);
+});
+
+test('uncertain calls of a Gateway process that has exited are cleared at start; a live or unidentified one stays',async t=>{
+  const uid=process.getuid();
+  const processes=new Map([[200,{startTicks:'50',uid}]]);
+  const processInfo=async pid=>processes.get(pid)??null;
+  const calls={gone:{state:'uncertain',count:1,connectionId:'old',ownerPid:100,ownerStartTicks:'40'},reused:{state:'active',count:1,connectionId:'old',ownerPid:200,ownerStartTicks:'49'}};
+  const{controller:c}=await restartedController(t,{},{calls,controller:{processInfo}});
+  assert.deepEqual(Object.keys(c.ledger.calls),[],'an exited pid and a reused pid both prove the old Gateway is gone');
+  assert.equal(c.health().ready,true);
+  const live={state:'uncertain',count:1,connectionId:'old',ownerPid:200,ownerStartTicks:'50'},legacy={state:'uncertain',count:1,connectionId:'old'};
+  const{controller:kept}=await restartedController(t,{},{calls:{live,legacy},controller:{processInfo}});
+  assert.deepEqual(Object.keys(kept.ledger.calls).sort(),['legacy','live']);
+  assert.equal(kept.health().recoveryRequired,true);
+});
+
+test('a Gateway restart clears the uncertain call its predecessor left, on the next health check',async t=>{
+  const uid=process.getuid(),processes=new Map([[300,{startTicks:'77',uid}],[301,{startTicks:'78',uid:uid+1}]]);
+  const{controller:c}=await setup(t,{controller:{processInfo:async pid=>processes.get(pid)??null}});
+  const {DesktopRpcClient}=await import('../src/desktop-rpc.mjs');
+  const gateway=new DesktopRpcClient(c.socketPath);
+  await gateway.request('automationEnter',{callKey:'in-flight',gateway:{pid:300,startTicks:'77'}});
+  assert.equal(c.ledger.calls['in-flight'].ownerPid,300);
+  // Another user's process is never trusted as an owner.
+  await c.request('automationEnter',{callKey:'foreign',gateway:{pid:301,startTicks:'78'}},{connectionId:'foreign'});
+  assert.equal(c.ledger.calls.foreign.ownerPid,undefined);
+  await c.request('automationLeave',{callKey:'foreign'},{connectionId:'foreign'});
+  gateway.close();
+  for(let count=0;count<100&&!c.gate.poisonReason;count++)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal((await c.request('health')).recoveryRequired,true,'the Gateway is still running, so the call may still act');
+  processes.delete(300);
+  const health=await c.request('health');
+  assert.equal(health.ready,true);assert.equal(health.recoveryRequired,false);
+  assert.deepEqual(c.ledger.calls,{});
+  await c.request('automationEnter',{callKey:'next'});await c.request('automationLeave',{callKey:'next'});
+  assert.deepEqual(JSON.parse(await readFile(join(c.stateDir,'ledger.json'),'utf8')).calls,{});
+});
+
+test('a latched poison stays after its calls are cleared',async t=>{
+  const{controller:c}=await setup(t,{controller:{processInfo:async()=>null}});
+  c.ledger.calls.gone={state:'uncertain',count:1,connectionId:'old',ownerPid:400,ownerStartTicks:'1'};
+  c.poison(true);
+  await c.request('health');
+  assert.deepEqual(c.ledger.calls,{});
+  assert.equal(c.health().recoveryRequired,true,'a lost lock or failed write is not explained by the ledger');
+});
+
+// Review V2: control links on an openbox that still has its menus reach a terminal, so they wait for setup.
+test('control links are refused until the receipt says the window manager is locked down; watch links are not',async t=>{
+  let state='stale',reads=0;
+  const{controller:c}=await setup(t,{controller:{windowManager:async()=>{reads++;return state;}}});
+  for(state of ['stale','missing','invalid']){
+    await assert.rejects(c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30}),/^Error: Control links are unavailable: .*Run openclaw clawser setup --yes, then create the link again\. Watch links still work\.$/,state);
+  }
+  state='stale';
+  await assert.rejects(c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30}),/still runs a config from before Clawser's lockdown/);
+  assert.equal(Object.keys(c.ledger.leases).length,0,'nothing was created');
+  const watch=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  assert.equal(watch.permission,'watch');
+  await c.request('revoke',{owner,id:watch.id});
+  const before=reads;
+  state='current';
+  const control=await c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30});
+  assert.equal(control.permission,'control');
+  assert.equal(reads,before+1,'read afresh for every control link');
+  await c.request('revoke',{owner,id:control.id});
+  state='none';
+  await c.request('revoke',{owner,id:(await c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30})).id});
+  const{controller:failing}=await setup(t,{controller:{windowManager:async()=>{throw new Error('EACCES');}}});
+  await assert.rejects(failing.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30}),/can't read its setup receipt/);
+});
+
+// Review V7: the hour used to run from completedAt, so a completion acknowledged late was pruned at once and the
+// agent's next status read failed with "Unknown browser handoff".
+test('a completion acknowledged long after it ended is kept for an hour after the acknowledgement',async t=>{
+  const{controller:c}=await setup(t,{controller:{acknowledgedRetentionMs:3_600_000,leaseRetentionMs:7*86_400_000}});
+  const lease=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  await c.request('revoke',{owner,id:lease.id});
+  c.ledger.leases[lease.id].completedAt=Date.now()-5*3_600_000;
+  await c.request('acknowledgeCompletion',{id:lease.id});
+  assert.equal((await c.request('status',{owner,id:lease.id})).mode,'ended','still readable right after a late acknowledgement');
+  const acknowledgedAt=c.ledger.leases[lease.id].acknowledgedAt;
+  assert.ok(Math.abs(acknowledgedAt-Date.now())<5000);
+  await c.request('acknowledgeCompletion',{id:lease.id});
+  assert.equal(c.ledger.leases[lease.id].acknowledgedAt,acknowledgedAt,'a repeated acknowledgement does not restart the hour');
+  assert.equal(c.pruneLeases(acknowledgedAt+3_599_000),0);
+  assert.equal(c.pruneLeases(acknowledgedAt+3_600_000),1);
+  // A row acknowledged before acknowledgedAt existed still counts from its completion.
+  c.ledger.leases.legacy={id:'legacy',owner,profile:'human',permission:'watch',state:'ended',mayBeWritable:false,acknowledged:true,completedAt:Date.now()-2*3_600_000,receipt:{leaseId:'legacy',vncProcessesExited:true,xClientsAbsent:true,readOnly:true,inputResetRequired:false}};
+  assert.equal(c.pruneLeases(),1);
+});
+
+// Review nit: Alt-drag Move and Resize stay allowed in control, so the agent gets its window back maximized.
+test('the observed window is maximized again once control ends, never after a watch link, and a failure changes nothing',async t=>{
+  const calls=[];let fail=false;
+  const{controller:c}=await setup(t,{controller:{maximize:async(runtime,targetId)=>{calls.push([runtime,targetId]);if(fail)throw new Error('no window');return true;},
+    observe:async()=>({snapshotObserved:true,displayGeneration:'g1',browserGeneration:'g1',observedTargetId:'tab-7'})}});
+  const watch=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  await c.request('revoke',{owner,id:watch.id});
+  await settle(20);
+  assert.equal(calls.length,0);
+  for(fail of [false,true]){
+    const lease=await c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30});
+    c.ledger.leases[lease.id].mayBeWritable=true;
+    await c.request('revoke',{owner,id:lease.id});
+    await settle(20);
+    const status=await c.request('status',{owner,id:lease.id});
+    assert.equal(status.mode,'ended');
+    assert.equal(status.resumeAllowed,true,'a failed maximize leaves the handback alone');
+  }
+  assert.deepEqual(calls.map(([runtime,targetId])=>[runtime===c.runtime,targetId]),[[true,'tab-7'],[true,'tab-7']]);
 });

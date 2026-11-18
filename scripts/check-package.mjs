@@ -20,7 +20,7 @@ for (const required of [
   'src/browser-config.mjs', 'src/browser-policy.mjs', 'src/browser-activation.mjs',
   'src/cdp-setup.mjs', 'src/setup-activation.mjs', 'src/frame-keyboard.mjs', 'src/host-deps.mjs',
   'src/host-setup.mjs', 'src/host-units.mjs', 'src/host-browser.mjs', 'src/host-display.mjs',
-  'src/host-takeover.mjs', 'src/host-doctor.mjs', 'src/cookie-migration.mjs',
+  'src/host-takeover.mjs', 'src/host-doctor.mjs', 'src/cookie-migration.mjs', 'src/window-manager.mjs', 'src/desktop-recover.mjs',
   'bin/clawser.mjs', 'bin/desktop-controller.mjs',
   'public/probe.html', 'public/probe.js', 'public/probe.css', 'public/trackpad.js',
   'skills/browser-handoff/SKILL.md',

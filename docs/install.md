@@ -218,10 +218,12 @@ comes from the state directory. Setup and doctor print the exact names.
 | Service | What it runs |
 | --- | --- |
 | display | Xvfb, a 1920x1080 virtual screen that listens on no network port |
-| wm | openbox, with a config file Clawser generates |
-| browser | the agent's Chrome on that screen |
+| wm | openbox, with a config file Clawser generates. It has no menu, command, close or show-desktop bindings, by key or mouse |
+| browser | the agent's Chrome on that screen. Stand-ins in `<stateDir>/launchers`, first on its `PATH`, refuse `xdg-open`, `xdg-email` and similar launchers, and it has no session bus, so Chrome can't open a file manager, mail app or other program there |
 | supervisor | one short-lived x11vnc per viewer session, on a private socket |
 | desktop | the controller and the phone viewer |
+
+A control link still reaches everything the browser itself can: see "What a control link can reach" in [SECURITY.md](../SECURITY.md).
 
 The `wm` service is left out when openbox is unavailable. User services stop
 when you log out unless lingering is on. When it's off, setup and doctor say:
@@ -248,12 +250,46 @@ openclaw clawser doctor --help
 | `--port PORT` | `19420` | Loopback controller and viewer port |
 | `--cdp` | Off | Use the one-tab CDP viewer on an existing browser |
 | `--novnc` | Default | Use the private virtual screen |
+| `--tunnel on-demand\|always` | `on-demand` | noVNC only. `on-demand` starts the public tunnel with a link and stops it after the idle period. `always` keeps it up while the controller runs, so every link is quick, but the viewer is reachable from the internet all the time |
+| `--tunnel-idle-minutes N` | `10` | noVNC only. How long an on-demand tunnel stays up after the last handoff ends, from 0 to 1440 |
+| `--viewer-idle-minutes N` | `10` | noVNC only. A handoff someone has opened ends, with reason `abandoned`, once no viewer has been attached for this long, from 1 to 30. A reload or a short network drop within it keeps the handoff |
 
 Use the same state directory for setup and doctor. Setup refuses a state
 directory whose socket paths would be longer than 107 bytes. For a new profile,
 the first setup picks the first free CDP port from 18820 to 18829 and records
 it. Option B keeps the profile's own port. Setup refuses to start when another program
 holds the CDP port or the controller port, and it names that program.
+
+Setup remembers `--tunnel`, `--tunnel-idle-minutes` and `--viewer-idle-minutes` in its receipt, so a
+rerun without them keeps the last choice. Pass the default value to go back to
+it. A change rewrites the controller's configuration and restarts the
+controller.
+
+### The public tunnel
+
+On a noVNC install the controller runs its own Cloudflare quick tunnel, the
+only way the phone reaches the viewer. By default it is on demand: creating a
+link starts it and waits until it answers, which can take up to a minute on a
+cold start. Once the last handoff ends, the tunnel stays up for the idle period
+(10 minutes by default), so a second link soon after is quick, and then
+cloudflared stops. If the tunnel drops, the controller starts it again only
+while a handoff is open or during that idle period. Each start gets a new
+address, and each link carries the current one. `--tunnel always` restores the
+1.0.0 behaviour of starting the tunnel with the controller and restarting it
+whenever it drops. Doctor and setup report the mode as public transport
+`on-demand` or `always-on`.
+
+### Plugin settings the noVNC desktop ignores
+
+With `desktop.enabled=true`, which setup configures, the plugin only talks to
+the controller over its private socket. The controller serves the viewer on
+the setup `--port` (19420 by default) and runs the tunnel above. These plugin
+settings belong to the CDP viewer and have no effect in desktop mode: `port`,
+`publicBaseUrl`, `comparisonProxyUrl`, `funnel` and `cloudflare.enabled`.
+Setup itself writes `cloudflare.enabled=false`. When any of the others is set
+in desktop mode, or `cloudflare.enabled` is true, the Gateway log shows one
+warning naming them. Remove them, or switch to the CDP viewer with
+`setup --cdp`.
 
 The `--container-name`, `--cdp-port`, `--vnc-port` and `--no-default-profile`
 flags were removed in 0.7.0.
@@ -266,7 +302,9 @@ configuration; browser tools remain unavailable during that transition. A succes
 reload command alone does not prove activation. `doctor` reports the activation
 phase, selected browser identity and public transport state. `active` with public
 transport `warming` means the local service is ready while Cloudflare finishes
-starting; creating a link waits for public readiness. A terminal activation failure
+starting; creating a link waits for public readiness. On a noVNC install the
+public transport reads `on-demand` (the default) or `always-on`; see [The
+public tunnel](#the-public-tunnel). A terminal activation failure
 requires correcting the reported problem and reloading the plugin.
 
 Follow setup's printed activation/reload instructions, then run:
@@ -294,6 +332,8 @@ Doctor is read-only. On a noVNC install it prints one row per check:
 | `profile directory` | The profile folder exists and only you can read it |
 | `linger` | Lingering is on |
 | `units current` | The unit files match what setup would write now |
+| `browser launchers` | The stand-ins that keep the browser from starting other programs are as setup wrote them |
+| `window manager config` | openbox's config comes from this version's generator, with no menus or commands, and openbox has restarted on it. An older one fails until `setup --yes` reruns, and until then the controller refuses control links |
 | `controller health` | The controller is ready |
 | `Gateway activation` | OpenClaw is running this setup |
 | `cookie store` | Option B only: a warning when keyring cookies remain |
@@ -628,18 +668,80 @@ own setup receipt and is not an adoption tool for manual installations.
   setup as root.
 - **Port, configuration or ownership conflict:** compare options and receipts.
   Preserve resources and choose a separate state directory for a new installation.
-- **Tunnel not ready:** check DNS/outbound HTTPS. The controller starts the
-  tunnel when it starts, and a cold start allows up to 90 seconds. Never expose CDP/VNC or the Gateway as a replacement endpoint.
+- **Tunnel not ready:** check DNS/outbound HTTPS. On demand, the controller
+  starts the tunnel when a link is created, and a cold start allows up to 90
+  seconds; with `--tunnel always` it starts with the controller. Never expose CDP/VNC or the Gateway as a replacement endpoint.
 - **Recovery required or uncertain input:** keep automation paused. Inspect the
   original browser/controller and follow the reported recovery guidance. Do not
-  retry/replay input, clear ledgers, bypass the gate or treat another link as
-  recovery. Take a fresh gated observation only after safe handback.
+  retry/replay input, edit or delete ledgers, bypass the gate or treat another
+  link as recovery. See [After a restart, crash or
+  reboot](#after-a-restart-crash-or-reboot) for what clears by itself and for
+  `clawser recover`. Take a fresh gated observation only after safe handback.
 - **After maintenance:** reload `browser-handoff --wait`, run doctor and repeat
   the owner-session tabs check. Old invitations are not recovery mechanisms.
 
 Issue reports should contain versions, redacted doctor output and error text,
 not private state, browser data, signed-in screenshots or invitation credentials.
 See [SECURITY.md](../SECURITY.md) for vulnerability reporting.
+
+## After a restart, crash or reboot
+
+The noVNC controller keeps a journal of open handoffs and of agent browser
+calls in progress, so a restart can never let the agent act on the browser while
+a person might still hold control. It settles the common cases by itself:
+
+- **Supervisor restart or host reboot during a handoff.** The new supervisor
+  proves that the handoff's viewer is gone and releases any key or button it
+  held. For a control handoff the controller also takes a fresh look at the
+  browser. The handoff then ends with reason `supervisor_restarted` and the
+  agent can continue. A controller that starts while its supervisor is still
+  coming up waits up to 45 seconds for it. If the supervisor was down longer and
+  the handoff ended in `recovery_required`, the controller checks it again the
+  next time it starts:
+  `systemctl --user restart clawser-desktop-<hash>.service`. `recover` prints
+  the exact unit name, and `systemctl --user list-units 'clawser-*'` lists them
+  all.
+- **Gateway restart or crash during a browser call.** Each call records the
+  Gateway process that started it. Once that process has exited, the controller
+  clears the call, both when it starts and when the restarted Gateway's plugin
+  connects. It never clears a call whose Gateway is still running.
+
+Three cases still need the operator:
+
+- Calls that name no Gateway: Clawser 1.0.1 or earlier recorded none, and a
+  Gateway whose process Clawser couldn't check (one in another PID namespace,
+  for example) records none either. Run `openclaw gateway restart`, then
+  `recover --abandon-calls` as shown below.
+- A control handback that failed on the current supervisor boot. Use
+  [Operator reconciliation](#operator-reconciliation-after-a-failed-control-handback).
+- A lost controller lock or a failed journal write. Fix the cause (for example a
+  full disk), then restart the controller.
+
+### `clawser recover`
+
+`recover` works offline and only with the controller stopped. It clears the
+browser-call admissions it can prove are over, which are those whose Gateway
+process has exited. It never clears a call whose Gateway is still running and
+never changes a handoff.
+
+```sh
+systemctl --user stop clawser-desktop-<hash>.service
+openclaw clawser recover --dry-run
+openclaw clawser recover
+systemctl --user start clawser-desktop-<hash>.service
+```
+
+| Option | Purpose |
+| --- | --- |
+| `--state-dir <path>` | The state directory setup used, if not the default. |
+| `--dry-run` | Report what would be cleared without changing anything. |
+| `--abandon-calls` | Also clear calls that name no Gateway (from Clawser 1.0.1 or earlier, or from a Gateway it could not identify). Use it only after `openclaw gateway restart`, when no such call can still be running. |
+
+If the controller is running, `recover` refuses and prints the command that
+stops it. It reports any call whose Gateway is still running or that names no
+Gateway, and any lease that still needs recovery, and exits non-zero while any
+of them remains. On an install whose controller has not recorded anything yet,
+it says so and exits zero.
 
 ## Operator reconciliation after a failed control handback
 
@@ -665,9 +767,11 @@ an invitation.
    and the owner-session `tabs` check described above. Take a fresh browser
    observation before continuing the task.
 
-The helper requires exclusive controller ownership, no outstanding browser calls,
-no active viewer, unchanged browser/display generations, and a complete same-lease
+The helper requires exclusive controller ownership, no outstanding browser calls
+(clear those first with [`clawser recover`](#clawser-recover)), no active viewer, unchanged browser/display generations, and a complete same-lease
 retirement receipt newer than the failed actor. It keeps the original failed
 journal until fresh observation and the final runtime checks pass. Any refusal
 requires further operator investigation; do not delete the journal, force the
-gate open, or treat an ordinary service restart as recovery.
+gate open, or treat an ordinary service restart as recovery for a lease of the
+current supervisor boot. A restart is recovery only for a lease from an earlier
+supervisor boot, which the controller checks again when it starts.

@@ -6,8 +6,8 @@ import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { ARTIFACTS, setupHelpers as h } from '../src/setup.mjs';
-import { applyHost, describeHost, hostLocations, planHost } from '../src/host-setup.mjs';
-import { unitNames } from '../src/host-units.mjs';
+import { EMPTY_OPENBOX_MENU, OPENBOX_GENERATOR, applyHost, describeHost, hostLocations, planHost } from '../src/host-setup.mjs';
+import { BROWSER_LAUNCHERS, LAUNCHER_SCRIPT, unitNames } from '../src/host-units.mjs';
 import { xauthorityEntry } from '../src/host-display.mjs';
 import { SNAP_MESSAGE } from '../src/host-browser.mjs';
 import { activationFixture } from './setup-activation-fixture.mjs';
@@ -51,7 +51,7 @@ async function harness(t, { config = {}, openbox = true, stateName = 'state' } =
   const rc = join(root, 'rc.xml');
   await fs.writeFile(rc, '<openbox_config/>\n');
   const binaries = { Xvfb: entry('/usr/bin/Xvfb'), x11vnc: entry('/home/linuxbrew/.linuxbrew/bin/x11vnc'), python3: entry('/usr/bin/python3'), ...(openbox ? { openbox: entry('/usr/bin/openbox') } : {}) };
-  const calls = [], units = new Map(), holders = {};
+  const calls = [], units = new Map(), holders = {}, entered = new Map();
   let busy = [];
   const track = (name, real, writes = () => true) => async (...args) => { if (writes(...args)) calls.push({ command: 'fs', args: [name, args.at(name === 'rename' ? 1 : 0)] }); return real(...args); };
   const trackedFs = { ...fs, writeFile: track('writeFile', fs.writeFile), open: track('open', fs.open, (path, flags = 'r') => /[wa]/.test(flags)),
@@ -79,9 +79,9 @@ async function harness(t, { config = {}, openbox = true, stateName = 'state' } =
         const verb = args[1], name = args.at(-1);
         if (verb === 'show') {
           const state = units.get(args[2]);
-          return `LoadState=${state ? 'loaded' : 'not-found'}\nFragmentPath=${state ? join(unitDir, args[2]) : ''}\nActiveState=${state ?? 'inactive'}\n`;
+          return `LoadState=${state ? 'loaded' : 'not-found'}\nFragmentPath=${state ? join(unitDir, args[2]) : ''}\nActiveState=${state ?? 'inactive'}\nActiveEnterTimestampMonotonic=${entered.get(args[2]) ?? 0}\n`;
         }
-        if (verb === 'enable' || verb === 'restart') units.set(name, 'active');
+        if (verb === 'enable' || verb === 'restart') { units.set(name, 'active'); entered.set(name, Number(process.hrtime.bigint() / 1000n)); }
         if (verb === 'stop') units.set(name, 'inactive');
         return '';
       }
@@ -102,7 +102,7 @@ async function harness(t, { config = {}, openbox = true, stateName = 'state' } =
   const activation = activationFixture(config, d);
   const o = { command: 'setup', stateDir, port: 19420, option: 'new', profile: 'clawser', yes: false, dryRun: false, migrateCookies: true, specified: [] };
   return {
-    root, stateDir, unitDir, config, d, o, calls, units, holders, binaries, artifacts, pkg,
+    root, stateDir, unitDir, config, d, o, calls, units, holders, binaries, artifacts, pkg, entered,
     names: unitNames(stateDir), p: hostLocations(o, d),
     busy: ports => { busy = ports; },
     plan: () => planHost(o, d, h),
@@ -167,6 +167,10 @@ test('option A creates a private profile, a cookie and five owned units, then ma
   assert.equal(saved.configDigest, digest(await fs.readFile(x.p.config)));
   assert.equal(saved.supervisorConfigDigest, digest(await fs.readFile(x.p.supervisorConfig)));
   assert.equal(saved.openboxDigest, digest(await fs.readFile(x.p.openboxConfig)));
+  assert.equal(saved.openboxGenerator, OPENBOX_GENERATOR);
+  assert.equal(await fs.readFile(x.p.openboxMenu, 'utf8'), EMPTY_OPENBOX_MENU);
+  assert.equal(await mode(x.p.openboxMenu), 0o600);
+  assert.equal(saved.openboxMenuDigest, digest(EMPTY_OPENBOX_MENU));
   assert.match(saved.assetsDigest, /^[a-f0-9]{64}$/);
   assert.deepEqual(saved.hostDeps, { binaries: x.binaries });
   const supervisor = JSON.parse(await fs.readFile(x.p.supervisorConfig, 'utf8'));
@@ -427,6 +431,134 @@ test('a file already matching the plan with no receipt digest is current and the
   assert.deepEqual([plan.writes, plan.start, plan.restart], [[], [], []]);
   await applyHost(plan, x.o, x.d, h);
   assert.equal((await x.receipt()).units[x.names.browser], digest(await fs.readFile(join(x.unitDir, x.names.browser))));
+});
+
+test('the tunnel defaults to on demand and writes no tunnel settings', async t => {
+  const x = await harness(t);
+  const plan = await x.plan();
+  assert.ok(describeHost(plan).includes('Public tunnel: on demand, stops 10 minutes after the last handoff'));
+  await applyHost(plan, x.o, x.d, h);
+  assert.deepEqual(JSON.parse(await fs.readFile(x.p.config, 'utf8')).transport, { binaryPath: x.p.binary, startupTimeoutMs: 90_000 });
+  assert.equal((await x.receipt()).settings, undefined);
+});
+
+test('tunnel flags reach controller.json and the receipt, survive a plain rerun and go back to the defaults', async t => {
+  const x = await harness(t);
+  await x.install();
+  Object.assign(x.o, { tunnel: 'always', tunnelIdleMinutes: 30, viewerIdleMinutes: 5 });
+  let plan = await x.plan();
+  assert.ok(describeHost(plan).includes('Public tunnel: always on'));
+  assert.deepEqual([plan.writes.map(item => item.path), plan.restart], [[x.p.config], [x.names.controller]]);
+  await applyHost(plan, x.o, x.d, h);
+  const written = JSON.parse(await fs.readFile(x.p.config, 'utf8'));
+  assert.deepEqual(written.transport, { binaryPath: x.p.binary, startupTimeoutMs: 90_000, mode: 'always', idleMs: 1_800_000 });
+  assert.deepEqual(written.viewer, { idleMs: 300_000 });
+  assert.deepEqual((await x.receipt()).settings, { tunnel: 'always', tunnelIdleMinutes: 30, viewerIdleMinutes: 5 });
+  delete x.o.tunnel; delete x.o.tunnelIdleMinutes; delete x.o.viewerIdleMinutes;
+  plan = await x.plan();
+  assert.deepEqual([plan.writes, plan.restart], [[], []], 'a rerun without the flags keeps them');
+  Object.assign(x.o, { tunnel: 'on-demand', tunnelIdleMinutes: 10, viewerIdleMinutes: 10 });
+  plan = await x.plan();
+  await applyHost(plan, x.o, x.d, h);
+  assert.deepEqual(JSON.parse(await fs.readFile(x.p.config, 'utf8')).transport, { binaryPath: x.p.binary, startupTimeoutMs: 90_000 });
+  assert.equal(JSON.parse(await fs.readFile(x.p.config, 'utf8')).viewer, undefined);
+  assert.equal((await x.receipt()).settings, undefined);
+});
+
+// Before the lockdown, rc.xml kept openbox's menus and commands, and no menu.xml of Clawser's own existed.
+test('a rerun over an rc.xml an older generator wrote regenerates it, writes the empty menu and restarts only the window manager', async t => {
+  const x = await harness(t);
+  await x.install();
+  await fs.rm(x.p.openboxMenu);
+  await rewriteReceipt(x, saved => { delete saved.openboxGenerator; delete saved.openboxMenuDigest; });
+  const plan = await x.plan();
+  assert.deepEqual(plan.writes.map(item => item.path), [x.p.openboxMenu, x.p.openboxConfig]);
+  assert.deepEqual([plan.start, plan.restart, plan.disruptive], [[], [x.names.windowManager], true]);
+  x.calls.length = 0;
+  await applyHost(plan, x.o, x.d, h);
+  assert.equal(x.calls.filter(call => String(call.args?.[0]).endsWith('/openbox_config.py')).length, 1);
+  assert.deepEqual(systemctl(x.calls, 'restart'), [x.names.windowManager]);
+  const saved = await x.receipt();
+  assert.equal(saved.openboxGenerator, OPENBOX_GENERATOR);
+  assert.equal(saved.openboxDigest, digest(await fs.readFile(x.p.openboxConfig)));
+  assert.equal(await fs.readFile(x.p.openboxMenu, 'utf8'), EMPTY_OPENBOX_MENU);
+  const again = await x.plan();
+  assert.deepEqual([again.writes, again.restart], [[], []]);
+});
+
+// Review V1: the receipt used to say the new generator as soon as rc.xml was written, before openbox restarted on it.
+test('a run that fails before the window manager restarts leaves the generator unrecorded, and the rerun restarts it', async t => {
+  const x = await harness(t);
+  await x.install();
+  await fs.rm(x.p.openboxMenu);
+  await rewriteReceipt(x, saved => { delete saved.openboxGenerator; delete saved.openboxMenuDigest; });
+  const plan = await x.plan();
+  assert.deepEqual(plan.restart, [x.names.windowManager]);
+  const run = x.d.run;
+  x.d.run = async (command, args, ...rest) => { if (command === 'systemctl' && args[1] === 'restart') throw new Error('interrupted before the restart'); return run(command, args, ...rest); };
+  await assert.rejects(applyHost(plan, x.o, x.d, h), /interrupted before the restart/);
+  x.d.run = run;
+  const failed = await x.receipt();
+  assert.equal(failed.openboxGenerator, undefined, 'openbox still runs the old config');
+  assert.equal(failed.openboxDigest, digest(await fs.readFile(x.p.openboxConfig)), 'the new file itself is recorded as owned');
+  const again = await x.plan();
+  assert.deepEqual(again.restart, [x.names.windowManager], 'the rerun plans the restart it missed');
+  x.calls.length = 0;
+  await applyHost(again, x.o, x.d, h);
+  assert.deepEqual(systemctl(x.calls, 'restart'), [x.names.windowManager]);
+  assert.equal((await x.receipt()).openboxGenerator, OPENBOX_GENERATOR);
+  assert.deepEqual((await x.plan()).restart, []);
+});
+
+// An older setup recorded the generator before the restart; the unit's start time still shows it missed the new file.
+test('a window manager that started before rc.xml was last written is restarted', async t => {
+  const x = await harness(t);
+  await x.install();
+  assert.deepEqual((await x.plan()).restart, []);
+  x.entered.set(x.names.windowManager, Number(process.hrtime.bigint() / 1000n) - 120_000_000);
+  const plan = await x.plan();
+  assert.deepEqual([plan.writes, plan.restart, plan.disruptive], [[], [x.names.windowManager], true]);
+  x.calls.length = 0;
+  await applyHost(plan, x.o, x.d, h);
+  assert.deepEqual(systemctl(x.calls, 'restart'), [x.names.windowManager]);
+  assert.deepEqual((await x.plan()).restart, []);
+});
+
+// Review S1: Chrome starts xdg-open for Show in folder, an opened download and other protocols, and xdg-email for
+// mailto. On the virtual screen that put a file manager in front of a control link.
+test('the browser runs with refusing stand-ins for xdg-open and friends first on its PATH, and no session bus', async t => {
+  const x = await harness(t);
+  await x.install();
+  const dir = x.p.launchers, unit = await fs.readFile(join(x.unitDir, x.names.browser), 'utf8');
+  assert.match(unit, new RegExp(`^Environment="PATH=${dir}:/usr/local/bin:/usr/bin:/bin"$`, 'm'));
+  assert.match(unit, /^Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=\/dev\/null"$/m);
+  assert.match(unit, /^UnsetEnvironment=WAYLAND_DISPLAY$/m);
+  assert.equal((await fs.stat(dir)).mode & 0o777, 0o700);
+  assert.deepEqual((await fs.readdir(dir)).sort(), [...BROWSER_LAUNCHERS].sort());
+  for (const name of ['xdg-open', 'xdg-email', 'gnome-control-center', 'evince']) assert.ok(BROWSER_LAUNCHERS.includes(name), name);
+  for (const name of BROWSER_LAUNCHERS) {
+    assert.equal((await fs.stat(join(dir, name))).mode & 0o777, 0o500, name);
+    assert.equal(await fs.readFile(join(dir, name), 'utf8'), LAUNCHER_SCRIPT);
+  }
+  await assert.rejects(execute(join(dir, 'xdg-open'), ['/home']), error => error.code === 1 && /the agent's browser may not start xdg-open/.test(error.stderr));
+  assert.deepEqual((await x.plan()).writes, []);
+  // A stand-in replaced by a plain file (as Chrome's Save dialog would write it) is put back, with no browser restart.
+  await fs.rm(join(dir, 'xdg-open'));
+  await fs.writeFile(join(dir, 'xdg-open'), 'saved page', { mode: 0o600 });
+  await fs.writeFile(join(dir, 'extra'), '#!/bin/sh\n', { mode: 0o700 });
+  const plan = await x.plan();
+  assert.deepEqual([plan.writes.map(item => item.path), plan.start, plan.restart], [[dir], [], []]);
+  await applyHost(plan, x.o, x.d, h);
+  assert.equal(await x.plan().then(again => again.writes.length), 0);
+  assert.equal(await fs.readFile(join(dir, 'xdg-open'), 'utf8'), LAUNCHER_SCRIPT);
+  await assert.rejects(fs.access(join(dir, 'extra')));
+});
+
+test('an openbox menu changed outside Clawser is refused by path', async t => {
+  const x = await harness(t);
+  await x.install();
+  await fs.writeFile(x.p.openboxMenu, '<openbox_menu><item label="Terminal"/></openbox_menu>\n');
+  await assert.rejects(x.plan(), error => error.message === changedOutside(x.p.openboxMenu));
 });
 
 test('an openbox config changed outside Clawser is refused by path', async t => {

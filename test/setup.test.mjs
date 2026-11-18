@@ -156,6 +156,19 @@ test('removed Docker flags explain they are gone', async t => {
   assert.equal(h.calls.length, 0);
 });
 
+test('tunnel flags are validated, noVNC-only and setup-only', async t => {
+  const h = await harness(t);
+  for (const [args, message] of [
+    [['--tunnel', 'sometimes'], /--tunnel takes on-demand or always/],
+    [['--tunnel-idle-minutes', '1441'], /from 0 to 1440/],
+    [['--tunnel-idle-minutes', '2.5'], /from 0 to 1440/],
+    [['--tunnel', 'always', '--cdp'], /applies only to the noVNC desktop/],
+    [['--viewer-idle-minutes', '0'], /from 1 to 30/],
+    [['--viewer-idle-minutes', '31'], /from 1 to 30/],
+  ]) await assert.rejects(runClawser([...h.args, ...args], h.deps), message, args.join(' '));
+  await assert.rejects(runClawser(['doctor', '--tunnel', 'always'], h.deps), /--tunnel is a setup option/);
+});
+
 test('--novnc is accepted and --novnc with --cdp is refused', async t => {
   const h = await harness(t);
   h.deps.env.OPENCLAW_STATE_DIR = join(h.root, 'openclaw-state');
@@ -301,7 +314,7 @@ test('different execution captures preserve the trusted stable installation in r
     await fs.mkdir(join(capture, 'src'), { recursive: true });
     await fs.mkdir(join(capture, 'runtime/desktop'), { recursive: true });
     for (const relative of ['src/setup.mjs', 'src/setup-activation.mjs', 'src/host-units.mjs', 'src/browser-activation.mjs', 'src/browser-policy.mjs', 'src/browser-config.mjs', 'src/authorization.mjs', 'openclaw.plugin.json', 'src/desktop-rpc.mjs', 'runtime/desktop/index.mjs',
-      'src/host-setup.mjs', 'src/host-takeover.mjs', 'src/host-browser.mjs', 'src/host-deps.mjs', 'src/host-display.mjs', 'src/host-doctor.mjs']) await fs.copyFile(new URL(`../${relative}`, import.meta.url), join(capture, relative));
+      'src/host-setup.mjs', 'src/host-takeover.mjs', 'src/host-browser.mjs', 'src/host-deps.mjs', 'src/host-display.mjs', 'src/host-doctor.mjs', 'src/window-manager.mjs']) await fs.copyFile(new URL(`../${relative}`, import.meta.url), join(capture, relative));
   }
   const firstModule = await import(pathToFileURL(join(captures[0], 'src/setup.mjs')).href);
   const secondModule = await import(pathToFileURL(join(captures[1], 'src/setup.mjs')).href);
@@ -482,8 +495,8 @@ test('doctor validates an owned installation without downloads or mutations', as
   const result = await runClawser(['doctor', '--state-dir', h.stateDir], h.deps);
   assert.equal(result.ok, true, JSON.stringify(result.checks));
   assert.deepEqual(Object.keys(result).sort(), ['activation', 'backend', 'checks', 'command', 'display', 'ok', 'pending', 'stateDir', 'units']);
-  assert.deepEqual(result.checks.map(row => row.name).slice(-14), ['installation', 'ownership', 'configuration', 'pinned assets', 'host dependencies', 'services', 'display', 'browser window',
-    'CDP origin', 'profile directory', 'linger', 'units current', 'controller health', 'Gateway activation']);
+  assert.deepEqual(result.checks.map(row => row.name).slice(-16), ['installation', 'ownership', 'configuration', 'pinned assets', 'host dependencies', 'services', 'display', 'browser window',
+    'CDP origin', 'profile directory', 'linger', 'units current', 'browser launchers', 'window manager config', 'controller health', 'Gateway activation']);
   assert.deepEqual(h.mutations(), []);
   assert.equal(h.calls.some(call => call.command === 'fetch'), false);
 });

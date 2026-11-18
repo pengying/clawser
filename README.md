@@ -86,12 +86,30 @@ and paste between your clipboard and the agent's browser.
   browser is its own Chrome on a hidden screen, not your everyday browser.
 - **Links are one-use and private.** One device can open a link, and it expires
   after five minutes by default. Don't forward it.
-- **The first link after a restart can take up to a minute** while the secure
-  tunnel comes up. Later links are quick.
+- **Closing the page ends the handoff after ten minutes.** Reloading the page
+  or a short network drop is fine, and so is switching to an authenticator or
+  mail app for a code. Once no viewer has been open for ten minutes, for
+  example after you close the tab or your phone sleeps, the handoff ends and
+  the agent hears about it.
+- **The first link can take up to a minute** while the secure tunnel comes up.
+  The tunnel runs only while you need it: a link starts it, and it stops ten
+  minutes after the last handoff ends, so the viewer isn't reachable from the
+  internet the rest of the time. Links within those ten minutes are quick. See
+  `--tunnel` in [the install guide](docs/install.md#setup-options) to change
+  that.
 - **You do the step yourself.** Clawser never solves CAPTCHAs, types passwords
   you haven't given, or promises a site will accept the result.
 - **Use a machine you don't share.** Other accounts on the same machine can
   reach the agent's browser.
+- **A control link can read and save your files.** Whoever takes control can
+  use the browser's own `file://` pages and Save and upload dialogs, which
+  reach any file your account can. Send control links only to people you
+  would trust with your account; a watch link only shows the screen.
+- **A restart in the middle of a task can pause the agent's browser.** Clawser
+  clears that by itself once it can prove the old handoff or browser call is
+  over. If it still reports recovery required, see [After a restart, crash or
+  reboot](docs/install.md#after-a-restart-crash-or-reboot) and
+  `openclaw clawser recover`.
 
 ## More
 

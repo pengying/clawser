@@ -1,8 +1,26 @@
 import net from 'node:net';
-import { mkdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, rename, stat, writeFile, rm } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 
 const STARTING = { ready: false, phase: 'starting' };
+const startTicks = text => text.slice(text.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
+
+// The operation lock outlives a controller killed mid-operation (SIGKILL, OOM, power loss), and then every later
+// operation failed until an operator removed it. Only a controller holding its singleton lock, or the offline
+// reconcile helper holding the same lock, takes this one, so a lock whose recorded owner process is gone is stale.
+export async function staleOperationLock(lock, { procRoot = '/proc', now = Date.now } = {}) {
+  let owner;
+  try { owner = JSON.parse(await readFile(lock + '/owner.json', 'utf8')); }
+  catch {
+    // Owner details are written right after the lock is made; a lock without them for a minute was abandoned there.
+    try { return now() - (await stat(lock)).mtimeMs > 60_000; } catch { return false; }
+  }
+  if (!Number.isSafeInteger(owner?.pid) || owner.pid < 1) return false;
+  // Without a start time a reused pid can't be told apart, so only a pid nobody holds counts as gone.
+  if (typeof owner.processStartTicks !== 'string') { try { process.kill(owner.pid, 0); return false; } catch (error) { return error.code === 'ESRCH'; } }
+  try { return startTicks(await readFile(procRoot + '/' + owner.pid + '/stat', 'utf8')) !== owner.processStartTicks; }
+  catch (error) { return error.code === 'ENOENT'; }
+}
 const REPLY_LIMIT = 8_000_000;
 
 export function supervisorRequest(socketPath, payload, { timeoutMs = 20_000, connect = options => net.connect(options) } = {}) {
@@ -63,7 +81,17 @@ export class HostDesktopRuntime {
   async locked(fn) {
     await mkdir(this.stateDir, { recursive: true, mode: 0o700 });
     const lock = this.stateDir + '/operation.lock';
-    try { await mkdir(lock, { mode: 0o700 }); } catch (e) { if (e.code === 'EEXIST') throw new Error('desktop operation is locked; reconcile the owning process before retry'); throw e; }
+    for (let attempt = 0; ; attempt++) {
+      try { await mkdir(lock, { mode: 0o700 }); break; }
+      catch (e) {
+        if (e.code !== 'EEXIST') throw e;
+        if (attempt || !await staleOperationLock(lock)) throw new Error('desktop operation is locked; reconcile the owning process before retry');
+        // Moved aside first, so the removal can never take a lock someone else just made.
+        const aside = lock + '.stale-' + process.pid + '-' + Date.now();
+        await rename(lock, aside);
+        await rm(aside, { recursive: true, force: true });
+      }
+    }
     try {
       const processStartTicks = await readFile('/proc/self/stat', 'utf8').then(stat => stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19], () => undefined);
       await writeFile(`${lock}/owner.json`, JSON.stringify({ pid: process.pid, processStartTicks, createdAt: new Date().toISOString() }), { mode: 0o600, flag: 'wx' });
@@ -78,7 +106,8 @@ export class HostDesktopRuntime {
   async tabs() { const response = await fetch(this.cdpUrl + '/json/list', { signal: AbortSignal.timeout(5000) }); if (!response.ok) throw new Error('CDP tabs unavailable'); return response.json(); }
   startViewer({ leaseId, role = 'watch', expiresAt }) { return this.rpc('startViewer', { leaseId, role, expiresAt }); }
   promoteViewer({ leaseId }) { return this.rpc('promoteViewer', { leaseId }); }
-  stopViewerAndSettle({ leaseId, mayBeWritable }) { return this.rpc('stopViewerAndSettle', { leaseId, mayBeWritable }); }
+  // displayGeneration is the lease's own, which lets a restarted supervisor recognise a lease from its earlier boot.
+  stopViewerAndSettle({ leaseId, mayBeWritable, displayGeneration }) { return this.rpc('stopViewerAndSettle', { leaseId, mayBeWritable, ...typeof displayGeneration === 'string' ? { displayGeneration } : {} }); }
   heartbeatViewer({ leaseId, epoch } = {}) {
     if (typeof leaseId !== 'string' || !leaseId || !Number.isSafeInteger(epoch) || epoch < 1) throw new Error('heartbeat requires a lease ID and exact actor epoch');
     // Heartbeats are read/refresh operations, independent of the mutation lock.

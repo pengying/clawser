@@ -171,8 +171,9 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, activ
                 readiness.abort.abort(error);
                 ownedService.setPublicBase(undefined);
                 for (const share of [...ownedService.store.shares.values()]) ownedService.store.end(share, 'tunnel_exit');
-                // Keep the local service/gate until normal stop. A failed tunnel
-                // must never publish new invitations or bypass browser fencing.
+                // The retired generation admits nothing more: getService() requires an active activation,
+                // so a failed tunnel never publishes new invitations or bypasses browser fencing. Retirement
+                // then releases the listener, its timers and the tunnel, as stop() would.
                 void ownedTransport.close().catch(() => api.logger.warn('Browser Handoff could not verify owned public transport shutdown.'));
               };
               ownedTransport.on('failure', failed);
@@ -215,7 +216,9 @@ export function createPlugin({ desktopRpcFactory, bindingMonitorScheduler, activ
         },
       };
       activation = createBrowserActivation({ api, binding, scheduler: activationScheduler, writeDiagnostic: activationWriteDiagnostic,
-        activate: options => lifecycle.activate(options), cleanup: reason => reason === 'retired' ? undefined : lifecycle.stop() });
+        // A retired generation (superseded, drifted, or its tunnel failed) admits nothing, but its HTTP listener,
+        // timers and cloudflared would otherwise outlive it and hold the port a new generation needs.
+        activate: options => lifecycle.activate(options), cleanup: () => lifecycle.stop() });
       api.registerService({ id: 'browser-handoff', start: ctx => activation.start(ctx), stop: () => activation.stop() });
       api.on('before_tool_call', (event, ctx) => {
         if (!browserTool(event.toolName)) return;

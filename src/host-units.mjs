@@ -9,6 +9,20 @@ export const OWNED_ENV = new Set(['DISPLAY', 'XAUTHORITY', 'WAYLAND_DISPLAY', 'D
 
 export const cdpUrlFor = port => 'http://127.0.0.1:' + port;
 
+// Programs Chrome starts by name to leave the browser: xdg-open (Show in folder, opening a download, other protocols'
+// links), xdg-email (mailto), xdg-settings, the desktop's settings panels (proxy settings) and the GTK print preview.
+// On the virtual screen each could put a non-browser window, such as a file manager, in front of a control link.
+// The browser unit puts a folder of refusing stand-ins for them first on its PATH.
+export const BROWSER_LAUNCHERS = Object.freeze(['xdg-open', 'xdg-email', 'xdg-settings', 'gio', 'gnome-open', 'gvfs-open', 'kde-open', 'kde-open5', 'kde-open6', 'exo-open',
+  'gnome-control-center', 'gnome-network-properties', 'kcmshell4', 'kcmshell5', 'kcmshell6', 'systemsettings', 'systemsettings5', 'cinnamon-settings', 'unity-control-center',
+  'evince', 'nautilus', 'x-terminal-emulator', 'gnome-terminal', 'xterm']);
+export const LAUNCHER_SCRIPT = '#!/bin/sh\n# Managed by Clawser. The agent\'s browser may not start other programs: a control link would reach them.\necho "Clawser: the agent\'s browser may not start ${0##*/}" >&2\nexit 1\n';
+// Used when a taken-over browser had no PATH of its own.
+export const BROWSER_PATH = '/usr/local/bin:/usr/bin:/bin';
+// No session bus: over D-Bus, Chrome's Show in folder and GLib's app launching reach the desktop's file manager.
+export const NO_SESSION_BUS = 'unix:path=/dev/null';
+const launcherDir = dir => { if (typeof dir !== 'string' || !isAbsolute(dir) || /[\x00-\x1f\x7f:]/.test(dir)) throw new Error('The launcher folder must be an absolute path without control characters or colons'); return dir; };
+
 export function systemdValue(value, { dollar = true } = {}) {
   value = String(value);
   if (/[\x00-\x1f\x7f]/.test(value)) throw new Error('Service values must contain no control characters');
@@ -53,10 +67,12 @@ export function renderUnits(i) {
   const header = `# Managed by Clawser; ownership is recorded in ${i.marker.replace(/%/g, '%%')}\n`;
   const install = '\n[Install]\nWantedBy=default.target\n';
   const x = `Environment=${systemdValue('DISPLAY=:' + i.display, env)}\nEnvironment=${systemdValue('XAUTHORITY=' + i.xauthority, env)}\n`;
-  const extra = (browser.env ?? []).map(([name, value]) => {
+  // A taken-over browser keeps its own PATH, after the launcher stand-ins.
+  const path = (browser.env ?? []).find(([name]) => name === 'PATH')?.[1] || BROWSER_PATH;
+  const extra = (browser.env ?? []).filter(([name]) => name !== 'PATH').map(([name, value]) => {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || OWNED_ENV.has(name)) throw new Error(`Refusing browser environment variable ${name}; the unit owns its display and session environment`);
     return `Environment=${systemdValue(name + '=' + value, env)}\n`;
-  }).join('');
+  }).join('') + `Environment=${systemdValue('PATH=' + launcherDir(i.launchers) + ':' + path, env)}\nEnvironment=${systemdValue('DBUS_SESSION_BUS_ADDRESS=' + NO_SESSION_BUS, env)}\n`;
   const wm = i.openbox ? n.windowManager : undefined;
   const units = {};
 
@@ -67,13 +83,17 @@ export function renderUnits(i) {
   // systemd expands $VAR in ExecStartPre, so every $ is doubled for the shell.
   const wait = `for i in $(seq 50); do [ -S /tmp/.X11-unix/X${i.display} ] && exit 0; sleep 0.1; done; exit 1`.replace(/\$/g, '$$$$');
   const command = [browser.path, ...browser.args].map((v, k) => k ? systemdValue(v) : systemdArgument(v)).join(' ');
-  units[n.browser] = `${header}[Unit]\nDescription=Clawser agent browser\nRequires=${n.display}\nAfter=${[n.display, wm].filter(Boolean).join(' ')}\n\n[Service]\nType=simple\n${x}${extra}UnsetEnvironment=WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS\nExecStartPre=/bin/sh -c '${wait}'\nExecStart=${command}\nRestart=always\nRestartSec=5\nTimeoutStopSec=15\n${install}`;
+  units[n.browser] = `${header}[Unit]\nDescription=Clawser agent browser\nRequires=${n.display}\nAfter=${[n.display, wm].filter(Boolean).join(' ')}\n\n[Service]\nType=simple\n${x}${extra}UnsetEnvironment=WAYLAND_DISPLAY\nExecStartPre=/bin/sh -c '${wait}'\nExecStart=${command}\nRestart=always\nRestartSec=5\nTimeoutStopSec=15\n${install}`;
 
   const ordered = `${n.display} ${n.browser}`;
   const supervise = [i.python, i.supervisorScript, i.supervisorConfig].map(systemdArgument).join(' ');
   units[n.supervisor] = `${header}[Unit]\nDescription=Clawser browser handoff supervisor\nWants=${ordered}\nAfter=${ordered}\n\n[Service]\nType=simple\nKillMode=control-group\nUnsetEnvironment=WAYLAND_DISPLAY\n`
     + `ExecStart=${supervise}\nUMask=0077\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=3\n${install}`;
 
+  // KillMode=mixed: a stop sends SIGTERM to the controller alone, so it can retire leases in order and then stop
+  // its own cloudflared. If the controller dies first, systemd finds no main process to wait for and SIGKILLs the
+  // rest of the unit's cgroup, cloudflared included, at once. Only a stop the controller hangs in keeps it until
+  // TimeoutStopSec; the transport also reaps a recorded orphan when it next starts.
   units[n.controller] = `${header}[Unit]\nDescription=Clawser private browser handoff controller\nWants=${n.supervisor}\nAfter=network-online.target ${n.supervisor}\n\n[Service]\nType=simple\nKillMode=mixed\nExecStart=${[i.node, i.controllerScript, i.controllerConfig].map(systemdArgument).join(' ')}\nUMask=0077\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=180\n${install}`;
   return units;
 }
