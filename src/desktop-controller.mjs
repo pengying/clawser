@@ -6,6 +6,7 @@ import { NoVncProbeGateway } from './novnc-probe.mjs';
 import { CdpConnection, validateCdpUrl } from './cdp.mjs';
 import { DesktopRpcServer } from './desktop-rpc.mjs';
 import { readFocus as readBrowserFocus } from './focus-state.mjs';
+import { controlRefusal } from './window-manager.mjs';
 
 const receiptFlags=['vncProcessesExited','xClientsAbsent','heldInputCleared','xSyncComplete'];
 const recoveryMessage='Browser input outcome uncertain; operator recovery is required';
@@ -94,7 +95,7 @@ export class DesktopController {
   createGeneration=0;
   writes=Promise.resolve();
   runtimeQueue=Promise.resolve();
-  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,supervisorWaitMs=45_000,processInfo=readProcessInfo,transportRewarmMs=5000,transportMode='on-demand',transportIdleMs=600_000,leaseRetentionMs=7*86_400_000,acknowledgedRetentionMs=3_600_000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
+  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,supervisorWaitMs=45_000,processInfo=readProcessInfo,windowManager,transportRewarmMs=5000,transportMode='on-demand',transportIdleMs=600_000,leaseRetentionMs=7*86_400_000,acknowledgedRetentionMs=3_600_000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
     if(!stateDir||!profile||!runtime||!transport)throw new Error('Desktop controller requires stateDir, profile, runtime and transport');
     if(!Number.isInteger(supervisorHeartbeatMs)||supervisorHeartbeatMs<1||supervisorHeartbeatMs>5000)throw new Error('Invalid supervisor heartbeat interval');
     if(!Number.isInteger(transportRewarmMs)||transportRewarmMs<0||transportRewarmMs>600_000)throw new Error('Invalid tunnel restart delay');
@@ -102,7 +103,7 @@ export class DesktopController {
     if(!Number.isInteger(transportIdleMs)||transportIdleMs<0||transportIdleMs>86_400_000)throw new Error('Invalid tunnel idle period');
     for(const value of [leaseRetentionMs,acknowledgedRetentionMs])if(!Number.isInteger(value)||value<0)throw new Error('Invalid lease retention');
     if(!Number.isInteger(supervisorWaitMs)||supervisorWaitMs<0||supervisorWaitMs>300_000)throw new Error('Invalid supervisor wait');
-    Object.assign(this,{supervisorWaitMs,processInfo,stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs,transportMode,transportIdleMs,leaseRetentionMs,acknowledgedRetentionMs});
+    Object.assign(this,{supervisorWaitMs,processInfo,windowManager,stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs,transportMode,transportIdleMs,leaseRetentionMs,acknowledgedRetentionMs});
     this.socketPath=socketPath||join(this.stateDir,'desktop.sock');
     this.transport.on?.('failure',()=>{void this.transportFailed();this.scheduleTransportWarm();});
     this.supervisor={create:params=>this.createActor(params),read:async id=>({state:this.actors.has(id)?'running':'stopped'}),register:params=>this.registration(params.ownedId),promote:params=>this.promote(params),cancelPromotion:id=>this.cancelPromotion(id),demote:params=>this.demote(params),destroy:(id,options)=>this.retire(id,options),verifyExited:async id=>this.ledger.leases[id]?.state==='ended'&&safeCompletion(this.ledger.leases[id]),clipboardRead:id=>this.clipboard(id),clipboardWrite:(id,text)=>this.clipboard(id,text),focusRead:id=>this.focus(id)};
@@ -452,6 +453,9 @@ export class DesktopController {
       case 'create':{
         ownerParts(params.owner);if(this.revocationWork)throw new Error('Browser invitations are stopped during bulk retirement');if(this.creating||Object.values(this.ledger.leases).some(row=>!terminal(row)))throw new Error('A browser invitation is already active');
         if(!['watch','control'].includes(params.permission)||!Number.isInteger(params.ttlSeconds)||params.ttlSeconds<30||params.ttlSeconds>1800)throw new Error('Invalid invitation permission or lifetime');
+        // Control on an openbox that still has its menus would reach a terminal. Read afresh: setup may just have fixed it.
+        if(params.permission==='control'&&this.windowManager){const refusal=controlRefusal(await this.windowManager().catch(()=>'invalid'));if(refusal)throw new Error(refusal);}
+        if(this.revocationWork)throw new Error('Browser invitations are stopped during bulk retirement');if(this.creating||Object.values(this.ledger.leases).some(row=>!terminal(row)))throw new Error('A browser invitation is already active');
         if(params.targetId!==undefined&&(typeof params.targetId!=='string'||!params.targetId||params.targetId.length>256))throw new Error('Invalid task target');
         if(this.pruneLeases())await this.persist();
         this.creating=params;const generation=this.createGeneration;

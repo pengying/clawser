@@ -77,7 +77,9 @@ the viewer origin.
   own, so openbox can't fall back to the system menu, which opens a terminal.
   Clicks still focus and raise windows, Alt+Tab moves between them, and an
   Alt-drag moves one. Installs set up by 1.0.1 or earlier get this config on the next
-  `setup --yes`; until then doctor fails its `window manager config` row.
+  `setup --yes`. Until then the controller refuses control links (watch links
+  still work), the Gateway log warns when the plugin starts, and doctor fails
+  its `window manager config` row.
 - **Cookies are protected by file permissions only.** Clawser's browser uses
   Chrome's basic password store, so it starts signed in after a reboot with
   nobody at the machine. Cookies are stored unencrypted on disk. The profile

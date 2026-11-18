@@ -330,7 +330,7 @@ Doctor is read-only. On a noVNC install it prints one row per check:
 | `profile directory` | The profile folder exists and only you can read it |
 | `linger` | Lingering is on |
 | `units current` | The unit files match what setup would write now |
-| `window manager config` | openbox's config comes from this version's generator, with no menus or commands. An older one fails until `setup --yes` reruns |
+| `window manager config` | openbox's config comes from this version's generator, with no menus or commands, and openbox has restarted on it. An older one fails until `setup --yes` reruns, and until then the controller refuses control links |
 | `controller health` | The controller is ready |
 | `Gateway activation` | OpenClaw is running this setup |
 | `cookie store` | Option B only: a warning when keyring cookies remain |

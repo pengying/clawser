@@ -5,7 +5,7 @@ import { registerDesktopPlugin } from '../src/desktop-plugin.mjs';
 const ownerContext = () => ({ senderIsOwner: true, sessionKey: 'agent:main:telegram:direct:1', sessionId: 'incarnation', assertInvocationCurrent() {} });
 const browserEvent = { toolName: 'browser', params: { action: 'snapshot', profile: 'handoff' } };
 const invocation = () => ({ ...ownerContext(), runId: 'run', toolCallId: 'call' });
-function setup({ request, runtime = {}, registrationMode, configure, connect, register = registerDesktopPlugin, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic = async () => {} } = {}) {
+function setup({ request, runtime = {}, registrationMode, configure, connect, register = registerDesktopPlugin, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic = async () => {}, readWindowManager = async () => 'missing' } = {}) {
   const hooks = new Map(), tools = [], services = [], requests = [], clients = [], policies = [];
   const api = {
     pluginConfig: { desktop: { enabled: true, profile: 'handoff', socketPath: '/tmp/browser-handoff/controller.sock' } },
@@ -32,7 +32,7 @@ function setup({ request, runtime = {}, registrationMode, configure, connect, re
   api.config.plugins = { entries: { 'browser-handoff': { enabled: true, config: api.pluginConfig } } };
   api.runtime.config ||= { current: () => api.config };
   configure?.(api);
-  register(api, { desktopRpcFactory: rpcFactory, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic });
+  register(api, { desktopRpcFactory: rpcFactory, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic, readWindowManager });
   return { api, hooks, tools, services, requests, clients, policies, tool: () => tools[0].create(ownerContext()) };
 }
 
@@ -113,6 +113,27 @@ test('production tools enforce owner-private identity and explicit whole-profile
   const tabs = await f.tool().execute('tabs', { action: 'tabs' });
   assert.equal(tabs.details.profile, 'handoff');
   assert.equal(tabs.details.tabs[0].targetId, 'tab');
+});
+
+// Review V2: an upgrade that skipped setup keeps openbox's menus, and the controller started before it keeps its old code.
+test('a stale window manager config warns at activation and refuses control links; watch still works', async t => {
+  const warnings = [], reads = [];
+  let state = 'stale';
+  const created = { id: 'lease', url: 'https://handoff.example/s/lease/#invite=secret', scope: 'browser-profile', profile: 'handoff', mode: 'unclaimed', resumeAllowed: false };
+  const f = setup({ readWindowManager: async path => { reads.push(path); return state; }, configure: api => { api.logger.warn = message => warnings.push(message); },
+    request: async (method, params, options, defaults) => method === 'create' ? created : defaults(method) });
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  await new Promise(setImmediate);
+  assert.equal(reads[0], '/tmp/setup.json', 'the receipt beside the state folder that holds the socket');
+  assert.ok(warnings.some(text => /^Browser Handoff: Control links are unavailable: .*Run openclaw clawser setup --yes/.test(text)), warnings.join('\n'));
+  await assert.rejects(f.tool().execute('create', { action: 'create' }), /Control links are unavailable: .*Run openclaw clawser setup --yes.*Watch links still work/);
+  await assert.rejects(f.tool().execute('create', { action: 'create', permission: 'control' }), /Control links are unavailable/);
+  assert.equal(f.requests.some(r => r.method === 'create'), false);
+  await f.tool().execute('create', { action: 'create', permission: 'watch' });
+  assert.deepEqual(f.requests.filter(r => r.method === 'create').map(r => r.params.permission), ['watch']);
+  // Unknown receipts are left to the controller, which knows exactly where setup put its receipt.
+  for (state of ['current', 'none', 'missing', 'invalid']) await f.tool().execute('create', { action: 'create' });
+  assert.deepEqual(f.requests.filter(r => r.method === 'create').map(r => r.params.permission), ['watch', 'control', 'control', 'control', 'control']);
 });
 
 test('production create checks stale invocation after ensure and retires a raced invitation', async t => {

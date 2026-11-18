@@ -1,6 +1,7 @@
 import { authorizedSession, ownerAuthorized, ownerGuard } from './authorization.mjs';
 import { isAbsolute } from 'node:path';
 import { readFileSync } from 'node:fs';
+import { STALE_WINDOW_MANAGER, receiptForSocket, windowManagerState } from './window-manager.mjs';
 import { activationStatusForTarget, createBrowserActivation } from './browser-activation.mjs';
 import { cdpOrigin } from './browser-config.mjs';
 import { createBrowserBindingGuard, monitorBrowserBinding, registerBrowserAccessPolicy } from './browser-policy.mjs';
@@ -90,7 +91,7 @@ function liveInstanceKey(api, origin = cdpOrigin(api.config?.browser?.profiles?.
 
 // Only private control-plane RPC runs in the Gateway. VNC, HTTP viewers, browser
 // supervision and the authoritative automation gate live in the controller.
-export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFactory, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic } = {}) {
+export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFactory, bindingMonitorScheduler, activationScheduler, activationWriteDiagnostic, readWindowManager = windowManagerState } = {}) {
   let config = api.pluginConfig.desktop;
   const allowed = ctx => ownerAuthorized(ctx, api.pluginConfig);
   if (api.registrationMode === 'tool-discovery') {
@@ -263,6 +264,8 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
         assertCurrent();
         if (serviceEpoch !== epoch || client !== rpc) throw new Error('Browser Handoff service changed during controller startup');
         validateIdentity(identity); assertCurrent();
+        // An upgrade that skipped setup keeps openbox's old menus, and the running controller keeps its old code too.
+        void readWindowManager(receiptForSocket(config.socketPath)).then(state => { if (state === 'stale') api.logger?.warn?.('Browser Handoff: ' + STALE_WINDOW_MANAGER); }, () => {});
         // The controller knows whether its tunnel runs on demand (the default) or always.
         setPublicTransport?.(identity.publicTransport === 'always-on' ? 'always-on' : 'on-demand');
         running = true;
@@ -399,6 +402,9 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
               const permission = params.permission ?? 'control';
               if (!['watch', 'control'].includes(permission)) throw new Error('Invalid handoff permission');
               if (params.reason !== undefined && (typeof params.reason !== 'string' || params.reason.length > 500)) throw new Error('Invalid handoff reason');
+              // The controller refuses this too, but one started before the upgrade still runs the older code.
+              if (permission === 'control' && await readWindowManager(receiptForSocket(config.socketPath)).catch(() => undefined) === 'stale') throw new Error(STALE_WINDOW_MANAGER);
+              current();
               // Request cancellation closes only this short-lived connection;
               // the controller retires an unpublished canceled invitation.
               result = await rpc.request('create', { owner, profile: config.profile, ...(params.targetId !== undefined ? { targetId: params.targetId } : {}), permission, ttlSeconds, ...(params.reason !== undefined ? { reason: params.reason } : {}) }, { signal, timeoutMs: 120_000 });

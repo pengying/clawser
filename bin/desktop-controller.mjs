@@ -4,6 +4,7 @@ import { isAbsolute, resolve, dirname } from 'node:path';
 import { DesktopController } from '../src/desktop-controller.mjs';
 import { HostDesktopRuntime } from '../runtime/desktop/index.mjs';
 import { CloudflareTransport } from '../src/cloudflare-transport.mjs';
+import { receiptBesideConfig, windowManagerState } from '../src/window-manager.mjs';
 
 // This file is local operator configuration, never an invitation or browser API.
 const configPath=process.argv[2];
@@ -24,7 +25,9 @@ const transport=new CloudflareTransport(transportOptions);
 const tunnel={...(transportConfig.mode!==undefined?{transportMode:transportConfig.mode}:{}),...(transportConfig.idleMs!==undefined?{transportIdleMs:transportConfig.idleMs}:{})};
 // viewer.idleMs: how long a claimed handoff may have no viewer attached before it ends (default 3 minutes).
 const viewer=config.viewer?.idleMs!==undefined?{abandonMs:config.viewer.idleMs}:{};
-const controller=new DesktopController({stateDir,profile:config.profile,runtime,transport,...tunnel,...viewer,port:config.port??19420,...(config.socketPath?{socketPath:fromConfig(config.socketPath)}:{}),...(config.noVncAssetsDir?{noVncAssetsDir:fromConfig(config.noVncAssetsDir)}:{})});
+// Control links need the locked-down window manager config that setup records in its receipt beside this file.
+const windowManager=()=>windowManagerState(receiptBesideConfig(configPath));
+const controller=new DesktopController({stateDir,profile:config.profile,runtime,transport,windowManager,...tunnel,...viewer,port:config.port??19420,...(config.socketPath?{socketPath:fromConfig(config.socketPath)}:{}),...(config.noVncAssetsDir?{noVncAssetsDir:fromConfig(config.noVncAssetsDir)}:{})});
 await controller.start();
 process.stdout.write('Browser Handoff desktop controller ready\n');
 let stopping=false;

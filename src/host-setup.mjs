@@ -17,8 +17,9 @@ const json = value => JSON.stringify(value, null, 2) + '\n';
 const fieldsMatch = (current, wanted) => object(current) && Object.entries(wanted).every(([key, value]) => current[key] === value) && Object.keys(current).every(key => own(wanted, key));
 const profileConfig = cdpPort => ({ cdpUrl: cdpUrlFor(cdpPort), driver: 'openclaw', engine: 'chromium', attachOnly: true });
 export const ROLES = ['display', 'windowManager', 'browser', 'supervisor', 'controller'];
-// Bumped whenever openbox_config.py changes what a control link can reach, so setup regenerates an rc.xml an older one wrote.
-export const OPENBOX_GENERATOR = 2;
+// The controller and the plugin read the generator too, to refuse control links on an older config.
+export { OPENBOX_GENERATOR } from './window-manager.mjs';
+import { OPENBOX_GENERATOR } from './window-manager.mjs';
 // openbox falls back to the system menu.xml, which opens a terminal, when its menu file is missing or invalid.
 export const EMPTY_OPENBOX_MENU = '<?xml version="1.0" encoding="UTF-8"?>\n<openbox_menu xmlns="http://openbox.org/3.4/menu"/>\n';
 // Host settings a setup flag changes. The receipt and controller.json hold only those that differ from these.

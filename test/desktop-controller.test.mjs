@@ -820,3 +820,28 @@ test('a latched poison stays after its calls are cleared',async t=>{
   assert.deepEqual(c.ledger.calls,{});
   assert.equal(c.health().recoveryRequired,true,'a lost lock or failed write is not explained by the ledger');
 });
+
+// Review V2: control links on an openbox that still has its menus reach a terminal, so they wait for setup.
+test('control links are refused until the receipt says the window manager is locked down; watch links are not',async t=>{
+  let state='stale',reads=0;
+  const{controller:c}=await setup(t,{controller:{windowManager:async()=>{reads++;return state;}}});
+  for(state of ['stale','missing','invalid']){
+    await assert.rejects(c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30}),/^Error: Control links are unavailable: .*Run openclaw clawser setup --yes, then create the link again\. Watch links still work\.$/,state);
+  }
+  state='stale';
+  await assert.rejects(c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30}),/still runs a config from before Clawser's lockdown/);
+  assert.equal(Object.keys(c.ledger.leases).length,0,'nothing was created');
+  const watch=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  assert.equal(watch.permission,'watch');
+  await c.request('revoke',{owner,id:watch.id});
+  const before=reads;
+  state='current';
+  const control=await c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30});
+  assert.equal(control.permission,'control');
+  assert.equal(reads,before+1,'read afresh for every control link');
+  await c.request('revoke',{owner,id:control.id});
+  state='none';
+  await c.request('revoke',{owner,id:(await c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30})).id});
+  const{controller:failing}=await setup(t,{controller:{windowManager:async()=>{throw new Error('EACCES');}}});
+  await assert.rejects(failing.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30}),/can't read its setup receipt/);
+});
