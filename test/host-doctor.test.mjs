@@ -169,7 +169,9 @@ test('an rc.xml from before the window manager lockdown fails doctor until setup
 // Review V1: setup recorded the new config, then failed before it restarted openbox.
 test('doctor fails while openbox still runs a config from before rc.xml was last written', async t => {
   const w = await installed(t);
-  w.entered.set(w.names.windowManager, Number(process.hrtime.bigint() / 1000n) - 120_000_000);
+  // Two minutes ago on systemd's monotonic clock, but no earlier than boot: a CI runner may be younger than that,
+  // and a start stamp of 0 or below means "unknown" to the check.
+  w.entered.set(w.names.windowManager, Math.max(1, Number(process.hrtime.bigint() / 1000n) - 120_000_000));
   const result = await doctor(w);
   assert.equal(result.ok, false);
   assert.match(row(result, 'window manager config').message, /^openbox is still running the config it had before .*rc\.xml was last written.*rerun openclaw clawser setup --yes$/);
