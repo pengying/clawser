@@ -101,8 +101,10 @@ secret the owner hasn't given you for this task, and never invent values.
    `target=host`, the same profile and task target. Check the actual outcome;
    Done does not prove a CAPTCHA passed or a submission succeeded. Never replay
    a final click or text because the stream closed. Continue only the original
-   pending, authorized task. Expiry, disconnect or revocation is not success;
-   do not regenerate links automatically. Revoke invitations no longer needed.
+   pending, authorized task. Expiry, disconnect, revocation or `abandoned`
+   (the owner closed the page or let the phone sleep for longer than the idle
+   limit) is not success; do not regenerate links automatically. Ask the owner
+   whether they still need to act. Revoke invitations no longer needed.
 
 ## Continuation and limits
 

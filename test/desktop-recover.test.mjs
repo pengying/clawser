@@ -17,11 +17,11 @@ const calls = () => ({
 });
 const lease = { id: 'f'.repeat(32), state: 'recovery_required', mayBeWritable: true, displayGeneration: 'boot:1' };
 
-async function fixture(t, ledgerCalls = calls()) {
+async function fixture(t, ledgerCalls = calls(), leases = { [lease.id]: lease }) {
   const stateDir = await mkdtemp(join(tmpdir(), 'clawser-recover-'));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   await writeFile(join(stateDir, 'controller.json'), JSON.stringify({ stateDir: '.', profile: 'clawser', runtime: { cdpUrl: 'http://127.0.0.1:18820' } }), { mode: 0o600 });
-  const ledger = { version: 1, calls: ledgerCalls, leases: { [lease.id]: lease } };
+  const ledger = { version: 1, calls: ledgerCalls, leases };
   await writeFile(join(stateDir, 'ledger.json'), JSON.stringify(ledger), { mode: 0o600 });
   const saved = async () => JSON.parse(await readFile(join(stateDir, 'ledger.json'), 'utf8'));
   return { stateDir, saved };
@@ -57,7 +57,7 @@ test('--abandon-calls also clears calls that name no Gateway, but never one whos
   assert.equal(result.cleared, 3);
   assert.equal(result.ok, false);
   assert.deepEqual(Object.keys((await saved()).calls), ['running']);
-  const clean = await fixture(t, { legacy: calls().legacy, exited: calls().exited });
+  const clean = await fixture(t, { legacy: calls().legacy, exited: calls().exited }, {});
   assert.equal((await recoverDesktopCalls({ stateDir: clean.stateDir, abandonCalls: true }, { processInfo })).ok, true);
   assert.deepEqual((await clean.saved()).calls, {});
 });
@@ -79,4 +79,32 @@ test('recover needs the private controller configuration setup wrote', async t =
   const missing = await mkdtemp(join(tmpdir(), 'clawser-recover-none-'));
   t.after(() => rm(missing, { recursive: true, force: true }));
   await assert.rejects(recoverDesktopCalls({ stateDir: missing }, { processInfo }), /No private controller configuration/);
+});
+
+// Review V7: recover exited 0 with a recovery_required lease left, and printed a raw ENOENT with no ledger.
+test('recover exits non-zero while a lease still needs recovery, even with no calls left', async t => {
+  const { stateDir, saved } = await fixture(t, { exited: calls().exited });
+  const result = await recoverDesktopCalls({ stateDir }, { processInfo });
+  assert.deepEqual(result, { ok: false, dryRun: false, cleared: 1, running: 0, unknown: 0, recoveryRequired: [lease.id] });
+  assert.deepEqual((await saved()).calls, {});
+  assert.match(describeRecovery(result, 'u').join('\n'), /Leases needing recovery: f{32}\./);
+});
+
+test('recover on an install whose controller never wrote a ledger says there is nothing to recover', async t => {
+  const { stateDir } = await fixture(t);
+  await rm(join(stateDir, 'ledger.json'));
+  const result = await recoverDesktopCalls({ stateDir }, { processInfo });
+  assert.equal(result.ok, true);
+  assert.equal(result.cleared, 0);
+  const lines = describeRecovery(result, 'clawser-desktop-x.service');
+  assert.match(lines[0], /^No controller ledger at .*ledger\.json: the controller has not recorded anything here, so there is nothing to recover\.$/);
+  assert.equal(lines.at(-1), 'Start the controller again: systemctl --user start clawser-desktop-x.service');
+  await writeFile(join(stateDir, 'ledger.json'), '{not json', { mode: 0o600 });
+  await assert.rejects(recoverDesktopCalls({ stateDir }, { processInfo }), /could not be read .*left unchanged/);
+});
+
+test('calls that name no Gateway are explained without assuming their version', async t => {
+  const { stateDir } = await fixture(t, { legacy: calls().legacy });
+  const text = describeRecovery(await recoverDesktopCalls({ stateDir, dryRun: true }, { processInfo }), 'u').join('\n');
+  assert.match(text, /1 call\(s\) name no Gateway: Clawser 1\.0\.1 or earlier recorded none, and a Gateway whose process Clawser couldn't check \(one in another PID namespace, for example\) records none either\./);
 });

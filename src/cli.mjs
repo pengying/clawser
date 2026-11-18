@@ -59,7 +59,7 @@ export function registerClawserCli(api, dependencies = {}) {
     root.command('recover').description('With the noVNC controller stopped, clear browser-call admissions it can prove are over')
       .option('--state-dir <path>', 'Private Clawser state directory')
       .option('--dry-run', 'Show what would be cleared without changing anything')
-      .option('--abandon-calls', 'Also clear calls that name no Gateway (recorded by Clawser 1.0.1 or earlier), after openclaw gateway restart')
+      .option('--abandon-calls', 'Also clear calls that name no Gateway (from Clawser 1.0.1 or earlier, or a Gateway it could not identify), after openclaw gateway restart')
       .action(async options => {
         const argv = ['recover'];
         if (options.stateDir !== undefined) argv.push('--state-dir', String(options.stateDir));

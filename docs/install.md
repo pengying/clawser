@@ -708,8 +708,10 @@ a person might still hold control. It settles the common cases by itself:
 
 Three cases still need the operator:
 
-- Calls recorded by Clawser 1.0.1 or earlier name no Gateway. Run
-  `openclaw gateway restart`, then `recover --abandon-calls` as shown below.
+- Calls that name no Gateway: Clawser 1.0.1 or earlier recorded none, and a
+  Gateway whose process Clawser couldn't check (one in another PID namespace,
+  for example) records none either. Run `openclaw gateway restart`, then
+  `recover --abandon-calls` as shown below.
 - A control handback that failed on the current supervisor boot. Use
   [Operator reconciliation](#operator-reconciliation-after-a-failed-control-handback).
 - A lost controller lock or a failed journal write. Fix the cause (for example a
@@ -733,11 +735,13 @@ systemctl --user start clawser-desktop-<hash>.service
 | --- | --- |
 | `--state-dir <path>` | The state directory setup used, if not the default. |
 | `--dry-run` | Report what would be cleared without changing anything. |
-| `--abandon-calls` | Also clear calls that name no Gateway (recorded by Clawser 1.0.1 or earlier). Use it only after `openclaw gateway restart`, when no such call can still be running. |
+| `--abandon-calls` | Also clear calls that name no Gateway (from Clawser 1.0.1 or earlier, or from a Gateway it could not identify). Use it only after `openclaw gateway restart`, when no such call can still be running. |
 
 If the controller is running, `recover` refuses and prints the command that
-stops it. It reports any call whose Gateway is still running, and any lease that
-still needs recovery, and exits non-zero while either remains.
+stops it. It reports any call whose Gateway is still running or that names no
+Gateway, and any lease that still needs recovery, and exits non-zero while any
+of them remains. On an install whose controller has not recorded anything yet,
+it says so and exits zero.
 
 ## Operator reconciliation after a failed control handback
 

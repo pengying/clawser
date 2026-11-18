@@ -198,7 +198,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
           const text = 'Browser Handoff ' + JSON.stringify(completion.id) + ' ended (' + reason + ') for profile ' + JSON.stringify(config.profile) + '. ' +
             (safe ? 'Input authority returned safely (resumeAllowed=true). Continue only if the original task remains pending. Take a fresh normal browser snapshot and check the actual outcome before continuing. '
               : 'resumeAllowed=false: browser automation must remain paused; operator recovery is required. ') +
-            'This event does not prove a CAPTCHA or form succeeded. After expiry, disconnect, or revoke, do not recreate handoff links automatically; ask the owner if further human action is needed. Do not resume a canceled task.';
+            'This event does not prove a CAPTCHA or form succeeded. After expiry, disconnect, revoke, or abandoned (nobody had the link open for a while), do not recreate handoff links automatically; ask the owner if further human action is needed. Do not resume a canceled task.';
           // This synchronous enqueue+wake pair follows the latest incarnation
           // read. Published SDK wake APIs do not accept an expected sessionId.
           if (system.enqueueSystemEvent(text, { sessionKey, agentId, contextKey: 'browser-handoff:' + completion.id + ':' + sessionId, fromConversationTurn: true }) !== true) continue;

@@ -193,7 +193,8 @@ export class DesktopController {
   }
   // The whole ledger is rewritten and fsynced on every change, and completions must fit one RPC frame, so ended
   // leases do not stay forever. A lease goes once it has ended with a proven fence and its viewer session is gone:
-  // an hour after the plugin acknowledged its completion, or after a week if nothing ever did. A
+  // an hour after the plugin acknowledged its completion (however late that was), or a week after it ended if
+  // nothing ever did. A
   // recovery_required lease is the durable record of a poisoned gate and is never pruned.
   pruneLeases(now=Date.now()){
     let pruned=0;
@@ -202,7 +203,9 @@ export class DesktopController {
       const session=this.gateway.sessions.get(id);
       if(session&&session.mode!=='ended')continue;
       const age=now-(row.completedAt??row.createdAt??0);
-      if((row.acknowledged===true&&age>=this.acknowledgedRetentionMs)||age>=this.leaseRetentionMs){delete this.ledger.leases[id];pruned++;}
+      // A row acknowledged before acknowledgedAt existed counts from its completion.
+      const sinceAcknowledged=row.acknowledged===true?now-(row.acknowledgedAt??row.completedAt??row.createdAt??0):-1;
+      if(sinceAcknowledged>=this.acknowledgedRetentionMs||age>=this.leaseRetentionMs){delete this.ledger.leases[id];pruned++;}
     }
     return pruned;
   }
@@ -507,7 +510,7 @@ export class DesktopController {
         const pending=Object.values(this.ledger.leases).filter(row=>terminal(row)&&!row.acknowledged).sort((a,b)=>(a.completedAt??0)-(b.completedAt??0));
         return{completions:pending.slice(0,limit).map(row=>({...this.status(row),owner:row.owner,completedAt:row.completedAt})),...(pending.length>limit?{more:true}:{})};
       }
-      case 'acknowledgeCompletion':{const row=this.ledger.leases[params.id];if(!row||!terminal(row))throw new Error('Completion is unavailable');row.acknowledged=true;this.pruneLeases();await this.persist();return{acknowledged:true};}
+      case 'acknowledgeCompletion':{const row=this.ledger.leases[params.id];if(!row||!terminal(row))throw new Error('Completion is unavailable');if(row.acknowledged!==true){row.acknowledged=true;row.acknowledgedAt=Date.now();}this.pruneLeases();await this.persist();return{acknowledged:true};}
       default:throw new Error('Unsupported controller RPC method');
     }
   }

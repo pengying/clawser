@@ -858,3 +858,23 @@ test('control links are refused until the receipt says the window manager is loc
   const{controller:failing}=await setup(t,{controller:{windowManager:async()=>{throw new Error('EACCES');}}});
   await assert.rejects(failing.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30}),/can't read its setup receipt/);
 });
+
+// Review V7: the hour used to run from completedAt, so a completion acknowledged late was pruned at once and the
+// agent's next status read failed with "Unknown browser handoff".
+test('a completion acknowledged long after it ended is kept for an hour after the acknowledgement',async t=>{
+  const{controller:c}=await setup(t,{controller:{acknowledgedRetentionMs:3_600_000,leaseRetentionMs:7*86_400_000}});
+  const lease=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  await c.request('revoke',{owner,id:lease.id});
+  c.ledger.leases[lease.id].completedAt=Date.now()-5*3_600_000;
+  await c.request('acknowledgeCompletion',{id:lease.id});
+  assert.equal((await c.request('status',{owner,id:lease.id})).mode,'ended','still readable right after a late acknowledgement');
+  const acknowledgedAt=c.ledger.leases[lease.id].acknowledgedAt;
+  assert.ok(Math.abs(acknowledgedAt-Date.now())<5000);
+  await c.request('acknowledgeCompletion',{id:lease.id});
+  assert.equal(c.ledger.leases[lease.id].acknowledgedAt,acknowledgedAt,'a repeated acknowledgement does not restart the hour');
+  assert.equal(c.pruneLeases(acknowledgedAt+3_599_000),0);
+  assert.equal(c.pruneLeases(acknowledgedAt+3_600_000),1);
+  // A row acknowledged before acknowledgedAt existed still counts from its completion.
+  c.ledger.leases.legacy={id:'legacy',owner,profile:'human',permission:'watch',state:'ended',mayBeWritable:false,acknowledged:true,completedAt:Date.now()-2*3_600_000,receipt:{leaseId:'legacy',vncProcessesExited:true,xClientsAbsent:true,readOnly:true,inputResetRequired:false}};
+  assert.equal(c.pruneLeases(),1);
+});
