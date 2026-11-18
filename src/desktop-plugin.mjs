@@ -133,12 +133,21 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
   // Each admitted browser call is tied to the connection that admitted it: the controller accepts its release
   // only there, and treats a closed connection's admissions as uncertain. A connection this instance no longer
   // uses (a later activate(), or a retired generation) therefore closes only once its own calls are released.
-  const callClients = new Map(), draining = new Set();
-  const admittedOn = rpc => [...callClients.values()].includes(rpc);
+  // busy counts work still in flight on a connection: an automationEnter not yet answered (its call may already be
+  // recorded) and a drift revocation. A connection in use is drained at once, so a finishing call's release still
+  // goes out on it, and it closes only when nothing is left.
+  const callClients = new Map(), draining = new Set(), busy = new Map();
+  const inUse = rpc => busy.has(rpc) || [...callClients.values()].includes(rpc);
+  const hold = rpc => { busy.set(rpc, (busy.get(rpc) || 0) + 1); };
+  const unhold = rpc => {
+    const count = (busy.get(rpc) || 1) - 1;
+    if (count) busy.set(rpc, count); else busy.delete(rpc);
+    if (draining.has(rpc)) releaseClient(rpc);
+  };
   function releaseClient(rpc, pending) {
     if (!rpc) return;
-    if (pending) { void pending.finally(() => releaseClient(rpc)); return; }
-    if (admittedOn(rpc)) { draining.add(rpc); return; }
+    if (pending) { hold(rpc); void Promise.resolve(pending).catch(() => {}).finally(() => unhold(rpc)); }
+    if (inUse(rpc)) { draining.add(rpc); return; }
     draining.delete(rpc);
     rpc.close();
   }
@@ -305,7 +314,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
       const rpc = client;
       client = undefined; calls.clear(); canceledOwners.clear(); canceledSessions.clear();
       // Stopping makes every admission uncertain, as it always did for the current connection.
-      callClients.clear(); revocation = undefined;
+      callClients.clear(); busy.clear(); revocation = undefined;
       for (const old of [...draining]) { draining.delete(old); old.close(); }
       if (!rpc) return;
       // The dedicated controller survives Gateway restarts. Its ledger,
@@ -337,12 +346,18 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
       const rpc = getClient();
       if (fault) throw new Error(fault);
       const gateway = readGatewayIdentity();
-      const receipt = await rpc.request('automationEnter', { callKey: key, ...gateway ? { gateway } : {} }, { timeoutMs: 15_000 });
+      // Counted before it is sent: a generation replaced during the round trip drains this connection instead of
+      // closing it under an admission the controller may already have recorded.
+      let receipt;
+      hold(rpc);
+      try {
+        receipt = await rpc.request('automationEnter', { callKey: key, ...gateway ? { gateway } : {} }, { timeoutMs: 15_000 });
+        if (receipt?.admitted === true) { calls.set(key, (calls.get(key) || 0) + 1); callClients.set(key, rpc); }
+      } finally { unhold(rpc); }
       if (receipt?.admitted !== true) {
         fault = 'Browser Handoff controller returned uncertain automation admission; operator recovery is required';
         throw new Error(fault);
       }
-      calls.set(key, (calls.get(key) || 0) + 1); callClients.set(key, rpc);
       try {
         if (!running || rpc !== client) throw new Error('Browser Handoff controller stopped during admission');
         await ensure(rpc, undefined, key);
@@ -357,9 +372,10 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     if (!browserTool(event.toolName)) return;
     const key = callKey(event, ctx), count = calls.get(key) || 0;
     if (!count) return;
-    // The call finished, so its release is reported on the connection that admitted it, even one being drained.
+    // The call finished, so its release is reported on the connection that admitted it: the controller accepts it only
+    // there. That holds for a connection being drained, and after a configuration drift unpublished this generation.
     const admitting = callClients.get(key);
-    try { await releaseAdmission(admitting && admitting !== client && draining.has(admitting) ? admitting : getClient(true), key); }
+    try { await releaseAdmission(admitting ?? getClient(true), key); }
     catch { completionFault(); }
   });
   api.on('session_end', async (event, ctx) => {

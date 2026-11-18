@@ -882,3 +882,66 @@ test('a drifted generation closes its connection only after the drift revocation
   release({ revoked: 0, allRetired: true, recoveryRequired: false });
   await eventually(() => assert.equal(f.clients[0].closed, true));
 });
+
+// Review V4: the admission round trip includes the controller's fsync, so a reload can land in the middle of it.
+test('a generation superseded while an admission is in flight drains that connection and releases the call on it', async t => {
+  let admit;
+  const old = setup({ request: async (method, params, options, defaults, client) => {
+    if (method === 'automationEnter') return new Promise(resolve => { admit = () => resolve({ admitted: true }); });
+    if (client.closed) throw Object.assign(new Error('closed'), { code: 'CONTROLLER_DISCONNECTED' });
+    return defaults(method);
+  } });
+  await old.services[0].start({ stateDir: supersedeScope });
+  const pending = old.hooks.get('before_tool_call')(browserEvent, invocation());
+  await eventually(() => assert.equal(typeof admit, 'function'));
+  const replacement = setup();
+  await replacement.services[0].start({ stateDir: supersedeScope }); t.after(() => replacement.services[0].stop());
+  await new Promise(resolve => setTimeout(resolve, 30));
+  const oldClient = old.clients[0];
+  assert.equal(oldClient.closed, false, 'the controller may already have recorded this admission');
+  admit();
+  const result = await pending;
+  assert.equal(result.block, true, 'the call no longer belongs to a current generation');
+  const leave = old.requests.find(r => r.method === 'automationLeave');
+  assert.equal(leave?.client, oldClient, 'released on the admitting connection');
+  await eventually(() => assert.equal(oldClient.closed, true));
+  assert.equal(replacement.clients[0].closed, false);
+});
+
+test('a superseded admission that the controller refused or lost closes the drained connection', async t => {
+  for (const answer of [async () => ({ admitted: false }), async () => { throw new Error('RPC connection lost'); }]) {
+    let admit;
+    const old = setup({ request: async (method, params, options, defaults) => method === 'automationEnter' ? new Promise(resolve => { admit = () => resolve(answer()); }) : defaults(method) });
+    const scope = supersedeScope + '-' + String(answer).length;
+    await old.services[0].start({ stateDir: scope });
+    const pending = old.hooks.get('before_tool_call')(browserEvent, invocation());
+    await eventually(() => assert.equal(typeof admit, 'function'));
+    const replacement = setup();
+    await replacement.services[0].start({ stateDir: scope });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(old.clients[0].closed, false);
+    admit();
+    assert.equal((await pending).block, true);
+    await eventually(() => assert.equal(old.clients[0].closed, true));
+    assert.equal(old.requests.some(r => r.method === 'automationLeave'), false, 'nothing was admitted to release');
+    await replacement.services[0].stop();
+  }
+});
+
+// Review V5: during a drift revocation the connection was not yet draining, so a finishing call's release never went out.
+test('a call that finishes during a drift revocation is released on its connection, which closes after the revocation', async t => {
+  let tick, release;
+  const scheduler = { setInterval(fn) { tick = fn; return { unref() {} }; }, clearInterval() {} };
+  const f = setup({ bindingMonitorScheduler: scheduler, request: async (method, params, options, defaults) => method === 'revokeAll' && !release ? new Promise(resolve => { release = resolve; }) : defaults(method) });
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  assert.equal(await f.hooks.get('before_tool_call')(browserEvent, invocation()), undefined);
+  f.api.config.browser.profiles.handoff.attachOnly = false; tick();
+  await eventually(() => assert.equal(typeof release, 'function'));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  await f.hooks.get('after_tool_call')(browserEvent, invocation());
+  const leave = f.requests.find(r => r.method === 'automationLeave');
+  assert.equal(leave?.client, f.clients[0], 'sent during the revocation, on the admitting connection');
+  assert.equal(f.clients[0].closed, false, 'the revocation is still running on it');
+  release({ revoked: 0, allRetired: true, recoveryRequired: false });
+  await eventually(() => assert.equal(f.clients[0].closed, true));
+});
