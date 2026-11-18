@@ -457,7 +457,7 @@ test('tunnel flags reach controller.json and the receipt, survive a plain rerun 
   delete x.o.tunnel; delete x.o.tunnelIdleMinutes; delete x.o.viewerIdleMinutes;
   plan = await x.plan();
   assert.deepEqual([plan.writes, plan.restart], [[], []], 'a rerun without the flags keeps them');
-  Object.assign(x.o, { tunnel: 'on-demand', tunnelIdleMinutes: 10, viewerIdleMinutes: 3 });
+  Object.assign(x.o, { tunnel: 'on-demand', tunnelIdleMinutes: 10, viewerIdleMinutes: 10 });
   plan = await x.plan();
   await applyHost(plan, x.o, x.d, h);
   assert.deepEqual(JSON.parse(await fs.readFile(x.p.config, 'utf8')).transport, { binaryPath: x.p.binary, startupTimeoutMs: 90_000 });

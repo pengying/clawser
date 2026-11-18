@@ -1172,8 +1172,9 @@ test('a drop after the handoff ended stops reconnecting and confirms cleanup', {
 });
 
 test('a claimed handoff with no viewer attached ends as abandoned, while a reload inside the window keeps it', async (t) => {
-  let time = Date.now();
-  const ctx = await setup(t, { now: () => time, ttlSeconds: 1800, abandonMs: 180_000 });
+  // Wall time (expiry) and the monotonic clock (the unattended window) are driven separately.
+  let time = Date.now(), tick = 0;
+  const ctx = await setup(t, { now: () => time, monotonicNow: () => tick, ttlSeconds: 1800, abandonMs: 180_000 });
   const mode = () => ctx.gateway.status(ctx.invite.id).mode;
   time += 600_000; await ctx.gateway.sweep();
   assert.equal(mode(), 'unclaimed', 'a link nobody has opened yet waits for its expiry');
@@ -1185,13 +1186,13 @@ test('a claimed handoff with no viewer attached ends as abandoned, while a reloa
   const closed = once(first, 'close'); first.close(); await closed;
   await settledToWatch(ctx);
   await ctx.gateway.sweep();
-  time += 179_000; await ctx.gateway.sweep();
+  tick += 179_000; await ctx.gateway.sweep();
   assert.equal(mode(), 'watch');
   // A reload: the same cookie fetches fresh credentials and attaches again, which resets the window.
   const reloaded = openSocket(ctx, cookie, (await credentials(ctx, cookie)).body.generation);
   assert.equal((await socketOutcome(reloaded)).status, 101);
   await ctx.gateway.sweep();
-  time += 120_000; await ctx.gateway.sweep();
+  tick += 120_000; await ctx.gateway.sweep();
   assert.equal(mode(), 'watch');
   // A phone that sleeps drops the socket without a close handshake.
   reloaded.terminate();
@@ -1199,10 +1200,32 @@ test('a claimed handoff with no viewer attached ends as abandoned, while a reloa
   for (let n = 0; n < 100 && (session.socket || mode() !== 'watch'); n++) await pause(5);
   await settledToWatch(ctx);
   await ctx.gateway.sweep();
-  time += 180_000; await ctx.gateway.sweep();
+  tick += 180_000; await ctx.gateway.sweep();
   assert.equal(mode(), 'ended');
   assert.equal(ctx.gateway.status(ctx.invite.id).reason, 'abandoned');
   assert.ok(ctx.supervisor.calls.some(([name]) => name === 'destroy'), 'its x11vnc is retired');
+});
+
+// Review V8: switching to an authenticator app drops the phone's socket for minutes, and a wall-clock step must
+// not count toward the window.
+test('the unattended window defaults to ten minutes on the monotonic clock, unmoved by a wall-clock step', async (t) => {
+  assert.equal(new NoVncProbeGateway({ supervisor: new FakeSupervisor() }).abandonMs, 600_000);
+  let time = Date.now(), tick = 0;
+  const ctx = await setup(t, { now: () => time, monotonicNow: () => tick, ttlSeconds: 1800 });
+  const mode = () => ctx.gateway.status(ctx.invite.id).mode;
+  const cookie = await claim(ctx);
+  const viewer = openSocket(ctx, cookie, (await credentials(ctx, cookie)).body.generation);
+  assert.equal((await socketOutcome(viewer)).status, 101);
+  const closed = once(viewer, 'close'); viewer.close(); await closed;
+  await settledToWatch(ctx);
+  await ctx.gateway.sweep();
+  time += 900_000; await ctx.gateway.sweep();
+  assert.equal(mode(), 'watch', 'the host clock jumped 15 minutes; no time passed for the handoff');
+  tick += 599_000; await ctx.gateway.sweep();
+  assert.equal(mode(), 'watch', 'nine minutes and 59 seconds away, as when fetching a code from another app');
+  tick += 1_000; await ctx.gateway.sweep();
+  assert.equal(mode(), 'ended');
+  assert.equal(ctx.gateway.status(ctx.invite.id).reason, 'abandoned');
 });
 
 test('the abandoned viewer timeout is validated', () => {

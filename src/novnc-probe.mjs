@@ -140,7 +140,7 @@ export class NoVncProbeGateway {
   sessions = new Map();
   creations = new Set();
   upgradeSockets = new Set();
-  constructor({ supervisor, publicBaseUrl, allowLanHttp = false, noVncAssetsDir, upstreamConnect = defaultUpstreamConnect, now = Date.now, monotonicNow = () => performance.now(), promotionMs = 10_000, heartbeatMs = 10_000, upstreamConnectMs = 5_000, maxProbes = 8, prefix = PREFIX, completionDisposition, capabilities = {}, onEnded, closeGraceMs = 2000, abandonMs = 180_000, endedRetentionMs = 600_000 } = {}) {
+  constructor({ supervisor, publicBaseUrl, allowLanHttp = false, noVncAssetsDir, upstreamConnect = defaultUpstreamConnect, now = Date.now, monotonicNow = () => performance.now(), promotionMs = 10_000, heartbeatMs = 10_000, upstreamConnectMs = 5_000, maxProbes = 8, prefix = PREFIX, completionDisposition, capabilities = {}, onEnded, closeGraceMs = 2000, abandonMs = 600_000, endedRetentionMs = 600_000 } = {}) {
     for (const method of ['create', 'read', 'register', 'destroy', 'verifyExited']) {
       if (typeof supervisor?.[method] !== 'function') throw new Error(`Probe supervisor requires ${method}()`);
     }
@@ -725,8 +725,10 @@ export class NoVncProbeGateway {
   }
 
   // A closed tab or a phone gone to sleep leaves a claimed handoff with no viewer, holding its x11vnc until the
-  // link expires (up to 30 minutes). It ends once no viewer has been attached for abandonMs. That is longer
-  // than a reload or a short network drop takes, both of which come back with the same cookie.
+  // link expires (up to 30 minutes). It ends once no viewer has been attached for abandonMs, ten minutes by
+  // default: long enough to switch to an authenticator or mail app on the phone and come back, and far longer than
+  // a reload or a short network drop, both of which come back with the same cookie. The window is measured on the
+  // monotonic clock, so a wall-clock step can neither end a handoff early nor keep it.
   unattended(session) {
     return session.mode === 'watch' && Boolean(session.sessionHash) && !session.socket && !session.connecting;
   }
@@ -739,8 +741,9 @@ export class NoVncProbeGateway {
       if (['ending', 'ended', 'cleanup_failed'].includes(session.mode)) continue;
       if (session.expiresAt <= now) { work.push(this.end(session, 'expired')); continue; }
       if (!this.unattended(session)) { delete session.unattendedSince; continue; }
-      session.unattendedSince ??= now;
-      if (now - session.unattendedSince >= this.abandonMs) work.push(this.end(session, 'abandoned'));
+      const elapsed = this.monotonicNow();
+      session.unattendedSince ??= elapsed;
+      if (elapsed - session.unattendedSince >= this.abandonMs) work.push(this.end(session, 'abandoned'));
     }
     await Promise.allSettled(work);
   }

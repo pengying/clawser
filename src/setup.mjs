@@ -399,7 +399,7 @@ export async function runClawser(argv, deps = {}) {
   }
   const o = options(argv, d);
   if (o.command === 'help') {
-    d.log('Usage: clawser <setup|doctor|recover> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--novnc | --cdp] [--migrate-cookies | --no-migrate-cookies] [--tunnel on-demand|always] [--tunnel-idle-minutes <n>] [--viewer-idle-minutes <n>]\nDefault setup gives the agent its own browser on a private virtual screen that you view over noVNC. --cdp keeps the one-tab CDP viewer.\nThe noVNC tunnel starts with a link and stops --tunnel-idle-minutes (default 10) after the last one ends; --tunnel always keeps it up. A handoff with no viewer attached for --viewer-idle-minutes (default 3) ends.\nWith the controller stopped, recover [--abandon-calls] clears browser-call admissions it can prove are over.');
+    d.log('Usage: clawser <setup|doctor|recover> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--novnc | --cdp] [--migrate-cookies | --no-migrate-cookies] [--tunnel on-demand|always] [--tunnel-idle-minutes <n>] [--viewer-idle-minutes <n>]\nDefault setup gives the agent its own browser on a private virtual screen that you view over noVNC. --cdp keeps the one-tab CDP viewer.\nThe noVNC tunnel starts with a link and stops --tunnel-idle-minutes (default 10) after the last one ends; --tunnel always keeps it up. A handoff with no viewer attached for --viewer-idle-minutes (default 10) ends.\nWith the controller stopped, recover [--abandon-calls] clears browser-call admissions it can prove are over.');
     return { ok: true, command: 'help' };
   }
   if (o.command === 'recover') return hostRecover(o, d);

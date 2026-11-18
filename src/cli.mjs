@@ -27,7 +27,7 @@ export function registerClawserCli(api, dependencies = {}) {
         .option('--no-migrate-cookies', 'Do not copy logins into the agent browser')
         .option('--tunnel <mode>', 'noVNC public tunnel: on-demand (default) or always')
         .option('--tunnel-idle-minutes <minutes>', 'Minutes an on-demand tunnel stays up after the last handoff (default 10)')
-        .option('--viewer-idle-minutes <minutes>', 'Minutes a handoff may have no viewer open before it ends (default 3)');
+        .option('--viewer-idle-minutes <minutes>', 'Minutes a handoff may have no viewer open before it ends (default 10)');
       command.action(async options => {
         const argv = [name];
         for (const [key, flag] of [['stateDir', '--state-dir'], ['browserProfile', '--browser-profile'], ['port', '--port'], ['tunnel', '--tunnel'], ['tunnelIdleMinutes', '--tunnel-idle-minutes'], ['viewerIdleMinutes', '--viewer-idle-minutes']]) {

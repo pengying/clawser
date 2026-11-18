@@ -23,7 +23,7 @@ const runtime=new HostDesktopRuntime(runtimeOptions);
 const transport=new CloudflareTransport(transportOptions);
 // Setup writes transport.mode and transport.idleMs only when they differ from the defaults (on demand, 10 minutes).
 const tunnel={...(transportConfig.mode!==undefined?{transportMode:transportConfig.mode}:{}),...(transportConfig.idleMs!==undefined?{transportIdleMs:transportConfig.idleMs}:{})};
-// viewer.idleMs: how long a claimed handoff may have no viewer attached before it ends (default 3 minutes).
+// viewer.idleMs: how long a claimed handoff may have no viewer attached before it ends (default 10 minutes).
 const viewer=config.viewer?.idleMs!==undefined?{abandonMs:config.viewer.idleMs}:{};
 // Control links need the locked-down window manager config that setup records in its receipt beside this file.
 const windowManager=()=>windowManagerState(receiptBesideConfig(configPath));

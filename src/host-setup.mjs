@@ -23,7 +23,7 @@ import { OPENBOX_GENERATOR } from './window-manager.mjs';
 // openbox falls back to the system menu.xml, which opens a terminal, when its menu file is missing or invalid.
 export const EMPTY_OPENBOX_MENU = '<?xml version="1.0" encoding="UTF-8"?>\n<openbox_menu xmlns="http://openbox.org/3.4/menu"/>\n';
 // Host settings a setup flag changes. The receipt and controller.json hold only those that differ from these.
-export const HOST_SETTING_DEFAULTS = Object.freeze({ tunnel: 'on-demand', tunnelIdleMinutes: 10, viewerIdleMinutes: 3 });
+export const HOST_SETTING_DEFAULTS = Object.freeze({ tunnel: 'on-demand', tunnelIdleMinutes: 10, viewerIdleMinutes: 10 });
 /** The flags given now, else the receipt's, else the defaults; `saved` lists only the non-default ones. */
 export function hostSettings(o, receiptSettings = {}) {
   const effective = {}, saved = {};
