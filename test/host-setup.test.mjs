@@ -51,7 +51,7 @@ async function harness(t, { config = {}, openbox = true, stateName = 'state' } =
   const rc = join(root, 'rc.xml');
   await fs.writeFile(rc, '<openbox_config/>\n');
   const binaries = { Xvfb: entry('/usr/bin/Xvfb'), x11vnc: entry('/home/linuxbrew/.linuxbrew/bin/x11vnc'), python3: entry('/usr/bin/python3'), ...(openbox ? { openbox: entry('/usr/bin/openbox') } : {}) };
-  const calls = [], units = new Map(), holders = {};
+  const calls = [], units = new Map(), holders = {}, entered = new Map();
   let busy = [];
   const track = (name, real, writes = () => true) => async (...args) => { if (writes(...args)) calls.push({ command: 'fs', args: [name, args.at(name === 'rename' ? 1 : 0)] }); return real(...args); };
   const trackedFs = { ...fs, writeFile: track('writeFile', fs.writeFile), open: track('open', fs.open, (path, flags = 'r') => /[wa]/.test(flags)),
@@ -79,9 +79,9 @@ async function harness(t, { config = {}, openbox = true, stateName = 'state' } =
         const verb = args[1], name = args.at(-1);
         if (verb === 'show') {
           const state = units.get(args[2]);
-          return `LoadState=${state ? 'loaded' : 'not-found'}\nFragmentPath=${state ? join(unitDir, args[2]) : ''}\nActiveState=${state ?? 'inactive'}\n`;
+          return `LoadState=${state ? 'loaded' : 'not-found'}\nFragmentPath=${state ? join(unitDir, args[2]) : ''}\nActiveState=${state ?? 'inactive'}\nActiveEnterTimestampMonotonic=${entered.get(args[2]) ?? 0}\n`;
         }
-        if (verb === 'enable' || verb === 'restart') units.set(name, 'active');
+        if (verb === 'enable' || verb === 'restart') { units.set(name, 'active'); entered.set(name, Number(process.hrtime.bigint() / 1000n)); }
         if (verb === 'stop') units.set(name, 'inactive');
         return '';
       }
@@ -102,7 +102,7 @@ async function harness(t, { config = {}, openbox = true, stateName = 'state' } =
   const activation = activationFixture(config, d);
   const o = { command: 'setup', stateDir, port: 19420, option: 'new', profile: 'clawser', yes: false, dryRun: false, migrateCookies: true, specified: [] };
   return {
-    root, stateDir, unitDir, config, d, o, calls, units, holders, binaries, artifacts, pkg,
+    root, stateDir, unitDir, config, d, o, calls, units, holders, binaries, artifacts, pkg, entered,
     names: unitNames(stateDir), p: hostLocations(o, d),
     busy: ports => { busy = ports; },
     plan: () => planHost(o, d, h),
@@ -484,6 +484,44 @@ test('a rerun over an rc.xml an older generator wrote regenerates it, writes the
   assert.equal(await fs.readFile(x.p.openboxMenu, 'utf8'), EMPTY_OPENBOX_MENU);
   const again = await x.plan();
   assert.deepEqual([again.writes, again.restart], [[], []]);
+});
+
+// Review V1: the receipt used to say the new generator as soon as rc.xml was written, before openbox restarted on it.
+test('a run that fails before the window manager restarts leaves the generator unrecorded, and the rerun restarts it', async t => {
+  const x = await harness(t);
+  await x.install();
+  await fs.rm(x.p.openboxMenu);
+  await rewriteReceipt(x, saved => { delete saved.openboxGenerator; delete saved.openboxMenuDigest; });
+  const plan = await x.plan();
+  assert.deepEqual(plan.restart, [x.names.windowManager]);
+  const run = x.d.run;
+  x.d.run = async (command, args, ...rest) => { if (command === 'systemctl' && args[1] === 'restart') throw new Error('interrupted before the restart'); return run(command, args, ...rest); };
+  await assert.rejects(applyHost(plan, x.o, x.d, h), /interrupted before the restart/);
+  x.d.run = run;
+  const failed = await x.receipt();
+  assert.equal(failed.openboxGenerator, undefined, 'openbox still runs the old config');
+  assert.equal(failed.openboxDigest, digest(await fs.readFile(x.p.openboxConfig)), 'the new file itself is recorded as owned');
+  const again = await x.plan();
+  assert.deepEqual(again.restart, [x.names.windowManager], 'the rerun plans the restart it missed');
+  x.calls.length = 0;
+  await applyHost(again, x.o, x.d, h);
+  assert.deepEqual(systemctl(x.calls, 'restart'), [x.names.windowManager]);
+  assert.equal((await x.receipt()).openboxGenerator, OPENBOX_GENERATOR);
+  assert.deepEqual((await x.plan()).restart, []);
+});
+
+// An older setup recorded the generator before the restart; the unit's start time still shows it missed the new file.
+test('a window manager that started before rc.xml was last written is restarted', async t => {
+  const x = await harness(t);
+  await x.install();
+  assert.deepEqual((await x.plan()).restart, []);
+  x.entered.set(x.names.windowManager, Number(process.hrtime.bigint() / 1000n) - 120_000_000);
+  const plan = await x.plan();
+  assert.deepEqual([plan.writes, plan.restart, plan.disruptive], [[], [x.names.windowManager], true]);
+  x.calls.length = 0;
+  await applyHost(plan, x.o, x.d, h);
+  assert.deepEqual(systemctl(x.calls, 'restart'), [x.names.windowManager]);
+  assert.deepEqual((await x.plan()).restart, []);
 });
 
 test('an openbox menu changed outside Clawser is refused by path', async t => {

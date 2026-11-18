@@ -64,7 +64,7 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
   const rc = join(root, 'rc.xml');
   await fs.writeFile(rc, '<openbox_config/>\n');
   const binaries = { Xvfb: entry('/usr/bin/Xvfb'), x11vnc: entry('/home/linuxbrew/.linuxbrew/bin/x11vnc'), python3: entry('/usr/bin/python3'), openbox: entry('/usr/bin/openbox') };
-  const logs = [], units = new Map(), pids = new Map(), sockets = new Map();
+  const logs = [], units = new Map(), pids = new Map(), sockets = new Map(), entered = new Map();
   let nextPid = 5000;
   // A docker call inside a doctor check or a caught probe would otherwise vanish.
   t.after(() => assert.deepEqual(calls.filter(call => call.command === 'docker'), [], 'setup must never run docker'));
@@ -77,6 +77,8 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
     names: unitNames(stateDir), args: ['setup', '--state-dir', stateDir], linger: 'yes\n', corrupt: false, fragments: {},
     // Each start of a unit gives it a new main PID. The fake X server's socket lives under the world root.
     pids, x11SocketDir: join(root, 'x11'),
+    // systemd's ActiveEnterTimestampMonotonic (µs) for each unit's last start.
+    entered,
     // What xproof clients lists: by default Clawser's browser is the one X client.
     xproof: () => [{ clientId: 1, pid: pids.get(world.names.browser) ?? 0 }],
     // Hand-written user units that option B discovery reads with one systemctl show: unit name to its properties.
@@ -132,11 +134,12 @@ export async function hostWorld(t, { root, config = {}, stateName = 'state', pac
         if (verb === 'show') {
           const state = units.get(args[2]);
           const sub = state === 'active' ? 'running' : state === 'failed' ? 'failed' : 'dead';
-          return `LoadState=${state ? 'loaded' : 'not-found'}\nFragmentPath=${state ? world.fragments[args[2]] ?? join(unitDir, args[2]) : ''}\nActiveState=${state ?? 'inactive'}\nSubState=${sub}\nMainPID=${pids.get(args[2]) ?? 0}\n`;
+          return `LoadState=${state ? 'loaded' : 'not-found'}\nFragmentPath=${state ? world.fragments[args[2]] ?? join(unitDir, args[2]) : ''}\nActiveState=${state ?? 'inactive'}\nSubState=${sub}\nMainPID=${pids.get(args[2]) ?? 0}\nActiveEnterTimestampMonotonic=${entered.get(args[2]) ?? 0}\n`;
         }
         if (verb === 'enable' || verb === 'restart') {
           units.set(name, 'active');
           pids.set(name, ++nextPid);
+          entered.set(name, Number(process.hrtime.bigint() / 1000n));
           if (name === world.names.display) await startDisplay(name);
         }
         if (verb === 'stop') { units.set(name, 'inactive'); pids.delete(name); }

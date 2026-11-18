@@ -129,9 +129,22 @@ async function classify(path, desired, recorded, d, h) {
 }
 
 async function unitStatus(name, p, d) {
-  const status = showProperties(await d.run('systemctl', ['--user', 'show', name, '--property=LoadState,FragmentPath,ActiveState', '--no-pager']));
+  const status = showProperties(await d.run('systemctl', ['--user', 'show', name, '--property=LoadState,FragmentPath,ActiveState,ActiveEnterTimestampMonotonic', '--no-pager']));
   if (status.LoadState !== 'not-found' && status.FragmentPath !== unitPath(p, name)) throw new Error('Refusing unmanaged conflicting user service: ' + name);
   return status;
+}
+
+// openbox reads rc.xml when it starts. One that became active before the file was last written still runs an older
+// config, as after a setup run that failed between the write and the restart. ActiveEnterTimestampMonotonic is in
+// microseconds of CLOCK_MONOTONIC, which every systemd reports; the file's mtime is wall time, so a second of slack.
+export async function wmPredatesConfig(status, path, d) {
+  const entered = Number(status?.ActiveEnterTimestampMonotonic);
+  if (status?.ActiveState !== 'active' || !Number.isFinite(entered) || entered <= 0) return false;
+  const info = await d.fs.stat(path).catch(() => undefined);
+  if (!info?.isFile()) return false;
+  // Both clocks are the host's own: systemd's monotonic stamp is only meaningful against the real clocks.
+  const enteredAt = Date.now() - (Number(process.hrtime.bigint() / 1000n) - entered) / 1000;
+  return info.mtimeMs > enteredAt + 1000;
 }
 
 async function openboxSource(openbox, d, h) {
@@ -250,7 +263,7 @@ export async function planHost(o, d, h) {
   const start = [], restart = [];
   for (const name of names) {
     const unit = files.find(file => file.unit === name);
-    const touched = files.some(file => file.consumer === name && file.state !== 'current');
+    const touched = files.some(file => file.consumer === name && file.state !== 'current') || (name === p.names.windowManager && await wmPredatesConfig(status[name], p.openboxConfig, d));
     const active = status[name].ActiveState === 'active' && !stop.some(item => item.unit === name);
     if (unit.state === 'write' || !active) start.push(name);
     else if (touched) restart.push(name);
@@ -295,7 +308,8 @@ export function assertHealth(health, cdpPort, profile) {
   if (health?.ready !== true || health.recoveryRequired === true || health.profile !== profile || health.cdpUrl !== cdpUrlFor(cdpPort)) throw new Error('Controller health or profile identity is not ready; inspect its user-service journal before retrying');
 }
 
-const record = (saved, file, digest) => { if (file.unit) saved.units[file.unit] = digest; else if (file.key) saved[file.key] = digest; if (file.generator) saved.openboxGenerator = file.generator; };
+// openboxGenerator is recorded only once the window manager has restarted on the new rc.xml (see applyHost).
+const record = (saved, file, digest) => { if (file.unit) saved.units[file.unit] = digest; else if (file.key) saved[file.key] = digest; };
 const save = (saved, p, d, h) => h.atomicPrivate(p.marker, json(saved), d);
 
 const browserRecord = plan => ({ path: plan.browser.path, existingArgs: plan.browser.existingArgs, env: plan.browser.env });
@@ -383,6 +397,9 @@ export async function applyHost(plan, o, d, h) {
     for (const name of ROLES.map(role => p.names[role])) {
       if (plan.start.includes(name)) await d.run('systemctl', ['--user', 'enable', '--now', name]);
       else if (plan.restart.includes(name)) await d.run('systemctl', ['--user', 'restart', name]);
+      else continue;
+      // Until this restart succeeds the running openbox still has the old config, so a rerun must plan it again.
+      if (name === p.names.windowManager && saved.openboxGenerator !== OPENBOX_GENERATOR) { saved.openboxGenerator = OPENBOX_GENERATOR; await save(saved, p, d, h); }
     }
     let healthError;
     for (let attempt = 0; attempt < 120; attempt++) {

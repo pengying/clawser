@@ -3,7 +3,7 @@ import { isAbsolute, join } from 'node:path';
 import { resolveHandoffBrowser } from './browser-config.mjs';
 import { cookieEncryption, showProperties } from './host-browser.mjs';
 import { verifyHostDeps } from './host-deps.mjs';
-import { LINGER_OFF, OPENBOX_GENERATOR, ROLES, assertHealth, assertProfilePort, hostConfigPatch, hostLocations, lingerOn, readHostReceipt, renderHost, unitDirMoved } from './host-setup.mjs';
+import { LINGER_OFF, OPENBOX_GENERATOR, ROLES, assertHealth, assertProfilePort, hostConfigPatch, hostLocations, lingerOn, readHostReceipt, renderHost, unitDirMoved, wmPredatesConfig } from './host-setup.mjs';
 import { chromeArgs } from './host-units.mjs';
 import { inspectSetupActivation, requireActiveActivation } from './setup-activation.mjs';
 
@@ -131,6 +131,9 @@ export async function diagnoseHost(o, d, h, checks) {
   // An rc.xml from before the lockdown still offers openbox's menu, which opens a terminal, to anyone in control.
   if (saved.units?.[p.names.windowManager]) await check('window manager config', async () => {
     if (saved.openboxGenerator !== OPENBOX_GENERATOR) throw new Error("openbox still has the menus and commands an older Clawser left in its config, and a control link can reach them; rerun openclaw clawser setup --yes");
+    // An earlier setup run could record the new config and then fail before restarting openbox.
+    const wm = showProperties(await d.run('systemctl', ['--user', 'show', p.names.windowManager, '--property=ActiveState,ActiveEnterTimestampMonotonic', '--no-pager']));
+    if (await wmPredatesConfig(wm, p.openboxConfig, d)) throw new Error(`openbox is still running the config it had before ${p.openboxConfig} was last written, which may offer its menus and commands to a control link; rerun openclaw clawser setup --yes`);
   });
   await check('controller health', async () => assertHealth(await d.controllerHealth(p.socket), saved.cdpPort, saved.profile));
   await check('Gateway activation', async () => {

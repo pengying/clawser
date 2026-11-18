@@ -166,6 +166,18 @@ test('an rc.xml from before the window manager lockdown fails doctor until setup
   assert.deepEqual(failed(result), ['window manager config']);
 });
 
+// Review V1: setup recorded the new config, then failed before it restarted openbox.
+test('doctor fails while openbox still runs a config from before rc.xml was last written', async t => {
+  const w = await installed(t);
+  w.entered.set(w.names.windowManager, Number(process.hrtime.bigint() / 1000n) - 120_000_000);
+  const result = await doctor(w);
+  assert.equal(result.ok, false);
+  assert.match(row(result, 'window manager config').message, /^openbox is still running the config it had before .*rc\.xml was last written.*rerun openclaw clawser setup --yes$/);
+  assert.deepEqual(failed(result), ['window manager config']);
+  w.entered.set(w.names.windowManager, Number(process.hrtime.bigint() / 1000n));
+  assert.equal(row(await doctor(w), 'window manager config').ok, true);
+});
+
 test('a moved plugin directory says to rerun setup', async t => {
   const w = await installed(t);
   await movePackage(w);
