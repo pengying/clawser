@@ -6,6 +6,7 @@ import { LeaseStore } from './leases.mjs';
 import { validateInput } from './cdp.mjs';
 import { DisplayStream } from './display-stream.mjs';
 import { ComparisonProxy } from './comparison-proxy.mjs';
+import { closeServer, refuseSocket } from './sockets.mjs';
 
 const MAX_BODY = 16_384;
 const PUBLIC = new URL('../public/', import.meta.url);
@@ -48,15 +49,21 @@ const cookie = (req) => (req.headers.cookie || '').split(';').map((s) => s.trim(
 export class HandoffServer {
   streams = new Map();
   closing = new Set();
-  constructor({ backend, store = new LeaseStore(), publicBaseUrl, comparisonProxyUrl, isBindingCurrent = () => true } = {}) {
-    this.backend = backend; this.store = store; this.isBindingCurrent = isBindingCurrent;
+  upgradeSockets = new Set();
+  constructor({ backend, store = new LeaseStore(), publicBaseUrl, comparisonProxyUrl, isBindingCurrent = () => true, closeGraceMs = 2000 } = {}) {
+    this.backend = backend; this.store = store; this.isBindingCurrent = isBindingCurrent; this.closeGraceMs = closeGraceMs;
     this.comparisonProxy = comparisonProxyUrl ? new ComparisonProxy(comparisonProxyUrl) : null;
     this.setPublicBase(publicBaseUrl);
     this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_BODY, perMessageDeflate: false });
     this.server = createServer((req, res) => { void this.handle(req, res); });
     this.server.headersTimeout = 10_000; this.server.requestTimeout = 15_000;
     this.server.maxConnections = 128;
-    this.server.on('upgrade', (req, socket, head) => this.upgrade(req, socket, head));
+    this.server.on('upgrade', (req, socket, head) => {
+      // An upgraded socket leaves the HTTP server's own connection list, so close() tracks it here.
+      this.upgradeSockets.add(socket);
+      socket.once('close', () => this.upgradeSockets.delete(socket));
+      this.upgrade(req, socket, head);
+    });
     this.store.on('release', (share) => { const entry = this.streams.get(share.id); if (entry) this.cancelEntry(entry); });
     this.store.on('ended', ({ id }) => this.stopStream(id));
   }
@@ -177,7 +184,7 @@ export class HandoffServer {
       const route = new URL(req.url, 'http://localhost').pathname.match(/^\/s\/([a-f0-9]{32})\/stream$/);
       if (!route || !this.originAllowed(req) || this.streams.has(route[1])) throw new Error('Denied');
       share = this.store.authorize(route[1], cookie(req));
-    } catch { socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); return; }
+    } catch { refuseSocket(socket, 'HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); return; }
     this.wss.handleUpgrade(req, socket, head, (ws) => {
       ws.alive = true; ws.on('pong', () => { ws.alive = true; }); ws.on('error', () => {});
       const entry = { ws, share, connectionId: randomBytes(16).toString('hex'), lastInput: 0, ready: false, accepting: false, failed: false, executing: false, queue: Promise.resolve(), pending: 0, gestureHeld: false };
@@ -384,6 +391,6 @@ export class HandoffServer {
     await Promise.allSettled(entries.map((entry) => entry.opening));
     await Promise.allSettled([...this.closing]);
     this.wss.close();
-    if (this.server.listening) await new Promise((resolve) => this.server.close(resolve));
+    await closeServer(this.server, this.upgradeSockets, this.closeGraceMs);
   }
 }

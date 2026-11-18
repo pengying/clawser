@@ -4,6 +4,7 @@ import { connect as connectSocket, isIPv4 } from 'node:net';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, resolve, sep } from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
+import { closeServer, refuseSocket } from './sockets.mjs';
 
 const PREFIX = '/probe/novnc/';
 const PUBLIC = new URL('../public/', import.meta.url);
@@ -58,9 +59,8 @@ function sendJson(res, status, value, headers = {}) {
 }
 
 function rejectUpgrade(socket, status, label) {
-  if (socket.destroyed) return;
   const text = `${status} ${label}`;
-  socket.end(`HTTP/1.1 ${text}\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: ${Buffer.byteLength(label)}\r\n\r\n${label}`);
+  refuseSocket(socket, `HTTP/1.1 ${text}\r\nConnection: close\r\nContent-Type: text/plain\r\nContent-Length: ${Buffer.byteLength(label)}\r\n\r\n${label}`);
 }
 
 async function jsonBody(req, maximum = MAX_BODY) {
@@ -139,7 +139,8 @@ function validRegistration(registration) {
 export class NoVncProbeGateway {
   sessions = new Map();
   creations = new Set();
-  constructor({ supervisor, publicBaseUrl, allowLanHttp = false, noVncAssetsDir, upstreamConnect = defaultUpstreamConnect, now = Date.now, monotonicNow = () => performance.now(), promotionMs = 10_000, heartbeatMs = 10_000, upstreamConnectMs = 5_000, maxProbes = 8, prefix = PREFIX, completionDisposition, capabilities = {}, onEnded } = {}) {
+  upgradeSockets = new Set();
+  constructor({ supervisor, publicBaseUrl, allowLanHttp = false, noVncAssetsDir, upstreamConnect = defaultUpstreamConnect, now = Date.now, monotonicNow = () => performance.now(), promotionMs = 10_000, heartbeatMs = 10_000, upstreamConnectMs = 5_000, maxProbes = 8, prefix = PREFIX, completionDisposition, capabilities = {}, onEnded, closeGraceMs = 2000 } = {}) {
     for (const method of ['create', 'read', 'register', 'destroy', 'verifyExited']) {
       if (typeof supervisor?.[method] !== 'function') throw new Error(`Probe supervisor requires ${method}()`);
     }
@@ -165,12 +166,18 @@ export class NoVncProbeGateway {
     this.heartbeatMs = heartbeatMs ?? 10_000;
     this.upstreamConnectMs = upstreamConnectMs;
     this.maxProbes = maxProbes;
+    this.closeGraceMs = closeGraceMs;
     this.wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: MAX_BUFFERED });
     this.server = createServer((req, res) => { void this.handle(req, res); });
     this.server.headersTimeout = 10_000;
     this.server.requestTimeout = 15_000;
     this.server.maxConnections = 64;
-    this.server.on('upgrade', (req, socket, head) => { void this.upgrade(req, socket, head); });
+    this.server.on('upgrade', (req, socket, head) => {
+      // An upgraded socket leaves the HTTP server's own connection list, so close() tracks it here.
+      this.upgradeSockets.add(socket);
+      socket.once('close', () => this.upgradeSockets.delete(socket));
+      void this.upgrade(req, socket, head);
+    });
   }
 
   async start({ port = 19400, host = '127.0.0.1' } = {}) {
@@ -734,7 +741,7 @@ export class NoVncProbeGateway {
       await Promise.allSettled([...this.creations]);
       for (const ws of this.wss.clients) ws.terminate();
       this.wss.close();
-      if (this.server.listening) await new Promise((resolvePromise) => this.server.close(resolvePromise));
+      await closeServer(this.server, this.upgradeSockets, this.closeGraceMs);
     })();
     return this.closePromise;
   }
