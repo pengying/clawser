@@ -19,6 +19,13 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 // A fence a restarted supervisor proved for a lease of its earlier boot. Generations and epochs restart with
 // the boot, so only this receipt may differ from the lease in them, and only when it names the lease's own.
 const supervisorRestarted=(row,receipt)=>receipt?.retirementReason==='supervisor_restarted'&&typeof row.displayGeneration==='string'&&receipt.previousGeneration===row.displayGeneration&&!!bootOf(receipt.displayGeneration)&&bootOf(receipt.displayGeneration)!==bootOf(row.displayGeneration);
+// The pid and start time of a process of this user, or null when there is no such pid.
+export async function readProcessInfo(pid){
+  let stat,status;
+  try{[stat,status]=await Promise.all([readFile('/proc/'+pid+'/stat','utf8'),readFile('/proc/'+pid+'/status','utf8')]);}
+  catch(error){if(error.code==='ENOENT'||error.code==='ESRCH')return null;throw error;}
+  return{startTicks:stat.slice(stat.lastIndexOf(')')+2).trim().split(/\s+/)[19],uid:Number(/^Uid:\s+(\d+)/m.exec(status)?.[1])};
+}
 const ownerParts=value=>{let parts;try{parts=JSON.parse(value);}catch{}if(!Array.isArray(parts)||parts.length!==2||parts.some(x=>typeof x!=='string'||!x||x.length>1000))throw new Error('Invalid owner session');return parts;};
 const checkedKey=value=>{if(typeof value!=='string'||!value||value.length>4096)throw new Error('Invalid browser call key');return value;};
 const targetIdentity=tab=>typeof (tab.id||tab.targetId)==='string'&&/^[A-Za-z0-9_-]{1,256}$/.test(tab.id||tab.targetId)?tab.id||tab.targetId:undefined;
@@ -87,7 +94,7 @@ export class DesktopController {
   createGeneration=0;
   writes=Promise.resolve();
   runtimeQueue=Promise.resolve();
-  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,supervisorWaitMs=45_000,transportRewarmMs=5000,transportMode='on-demand',transportIdleMs=600_000,leaseRetentionMs=7*86_400_000,acknowledgedRetentionMs=3_600_000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
+  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,supervisorWaitMs=45_000,processInfo=readProcessInfo,transportRewarmMs=5000,transportMode='on-demand',transportIdleMs=600_000,leaseRetentionMs=7*86_400_000,acknowledgedRetentionMs=3_600_000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
     if(!stateDir||!profile||!runtime||!transport)throw new Error('Desktop controller requires stateDir, profile, runtime and transport');
     if(!Number.isInteger(supervisorHeartbeatMs)||supervisorHeartbeatMs<1||supervisorHeartbeatMs>5000)throw new Error('Invalid supervisor heartbeat interval');
     if(!Number.isInteger(transportRewarmMs)||transportRewarmMs<0||transportRewarmMs>600_000)throw new Error('Invalid tunnel restart delay');
@@ -95,14 +102,49 @@ export class DesktopController {
     if(!Number.isInteger(transportIdleMs)||transportIdleMs<0||transportIdleMs>86_400_000)throw new Error('Invalid tunnel idle period');
     for(const value of [leaseRetentionMs,acknowledgedRetentionMs])if(!Number.isInteger(value)||value<0)throw new Error('Invalid lease retention');
     if(!Number.isInteger(supervisorWaitMs)||supervisorWaitMs<0||supervisorWaitMs>300_000)throw new Error('Invalid supervisor wait');
-    Object.assign(this,{supervisorWaitMs,stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs,transportMode,transportIdleMs,leaseRetentionMs,acknowledgedRetentionMs});
+    Object.assign(this,{supervisorWaitMs,processInfo,stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs,transportMode,transportIdleMs,leaseRetentionMs,acknowledgedRetentionMs});
     this.socketPath=socketPath||join(this.stateDir,'desktop.sock');
     this.transport.on?.('failure',()=>{void this.transportFailed();this.scheduleTransportWarm();});
     this.supervisor={create:params=>this.createActor(params),read:async id=>({state:this.actors.has(id)?'running':'stopped'}),register:params=>this.registration(params.ownedId),promote:params=>this.promote(params),cancelPromotion:id=>this.cancelPromotion(id),demote:params=>this.demote(params),destroy:(id,options)=>this.retire(id,options),verifyExited:async id=>this.ledger.leases[id]?.state==='ended'&&safeCompletion(this.ledger.leases[id]),clipboardRead:id=>this.clipboard(id),clipboardWrite:(id,text)=>this.clipboard(id,text),focusRead:id=>this.focus(id)};
     this.gateway=gatewayFactory({...gatewayOptions,supervisor:this.supervisor,noVncAssetsDir,prefix:'/browser/',completionDisposition:'retained',capabilities:{clipboard:'utf8'},maxProbes:1,promotionMs:120_000,onEnded:(session,status)=>this.ended(session,status)});
-    this.rpc=new DesktopRpcServer({socketPath:this.socketPath,handler:(method,params,context)=>this.request(method,params,context),onDisconnect:keys=>this.disconnected(keys),onLockLost:()=>{this.poison();this.ready=false;void this.gateway.close();}});
+    this.rpc=new DesktopRpcServer({socketPath:this.socketPath,handler:(method,params,context)=>this.request(method,params,context),onDisconnect:keys=>this.disconnected(keys),onLockLost:()=>{this.poison(true);this.ready=false;void this.gateway.close();}});
   }
-  poison(){this.gate.poison();this.gate.poisonReason=recoveryMessage;}
+  // A poison that the ledger explains (an uncertain call, a recovery_required lease) lifts once that state is
+  // provably gone. One from a lost lock or a failed write is latched until the controller restarts.
+  poison(latched=false){this.gate.poison();this.gate.poisonReason=recoveryMessage;if(latched)this.poisonLatched=true;}
+  reconsiderPoison(){
+    if(!this.gate.poisonReason||this.poisonLatched)return false;
+    if(Object.keys(this.ledger.calls).length||Object.values(this.ledger.leases).some(row=>row.state==='recovery_required'))return false;
+    this.gate.poisonReason=null;return true;
+  }
+  // A browser call carries the identity of the Gateway process that admitted it, recorded only after it was
+  // checked against a live process of this user. That process exiting proves the call can no longer act, so
+  // its admission, uncertain or not, is cleared. Calls with no verified identity are never cleared here.
+  async callOwner(identity){
+    if(!Number.isSafeInteger(identity?.pid)||identity.pid<1||typeof identity.startTicks!=='string'||!/^\d{1,20}$/.test(identity.startTicks))return{};
+    const key=identity.pid+':'+identity.startTicks;
+    if(!this.verifiedOwners?.has(key)){
+      const info=await this.processInfo(identity.pid).catch(()=>undefined);
+      if(!info||info.startTicks!==identity.startTicks||info.uid!==process.getuid())return{};
+      if((this.verifiedOwners??=new Set()).size>=16)this.verifiedOwners.clear();
+      this.verifiedOwners.add(key);
+    }
+    return{ownerPid:identity.pid,ownerStartTicks:identity.startTicks};
+  }
+  async resolveStaleCalls({persist=true}={}){
+    const stale=[];
+    for(const [key,call] of Object.entries(this.ledger.calls)){
+      if(!Number.isSafeInteger(call?.ownerPid)||typeof call.ownerStartTicks!=='string')continue;
+      let info;try{info=await this.processInfo(call.ownerPid);}catch{continue;}
+      if(!info||info.startTicks!==call.ownerStartTicks)stale.push(key);
+    }
+    if(!stale.length)return 0;
+    for(const key of stale){delete this.ledger.calls[key];this.gate.leave(key);}
+    process.stderr.write('Browser Handoff controller: cleared '+stale.length+' browser call admission(s) whose Gateway process has exited\n');
+    this.reconsiderPoison();
+    if(persist)await this.persist();
+    return stale.length;
+  }
   // A restarting supervisor is unreachable for a few seconds (its unit restarts after 3 s; at boot it first waits
   // for the display), so the fence is retried for supervisorWaitMs before the lease counts as unproven.
   async settleViewer(leaseId,mayBeWritable,displayGeneration){
@@ -163,7 +205,7 @@ export class DesktopController {
   }
   runtimeOperation(operation){const next=this.runtimeQueue.then(operation);this.runtimeQueue=next.catch(()=>{});return next;}
   async persist(){
-    if(!this.rpc?.lockHolder||this.rpc.lockHolder.lost){this.poison();throw new Error('Controller authority lock is unavailable; persistence denied');}
+    if(!this.rpc?.lockHolder||this.rpc.lockHolder.lost){this.poison(true);throw new Error('Controller authority lock is unavailable; persistence denied');}
     const contents=JSON.stringify(this.ledger)+'\n';
     const next=this.writes.then(async()=>{
       const temporary=join(this.stateDir,'ledger.' + process.pid + '.' + randomBytes(8).toString('hex') + '.tmp');
@@ -172,8 +214,8 @@ export class DesktopController {
       await rename(temporary,join(this.stateDir,'ledger.json'));
       const directory=await open(this.stateDir,'r');try{await directory.sync();}finally{await directory.close();}
     });
-    this.writes=next.catch(()=>{this.poison();});
-    try{await next;}catch{this.poison();throw new Error('Could not persist browser authority; operator recovery is required');}
+    this.writes=next.catch(()=>{this.poison(true);});
+    try{await next;}catch{this.poison(true);throw new Error('Could not persist browser authority; operator recovery is required');}
   }
   async start(){
     await mkdir(this.stateDir,{recursive:true,mode:0o700});
@@ -181,6 +223,7 @@ export class DesktopController {
     try{
       try{const saved=JSON.parse(await readFile(join(this.stateDir,'ledger.json'),'utf8'));if(saved.version!==1||!saved.calls||!saved.leases)throw new Error('Invalid authority ledger');this.ledger=saved;}catch(error){if(error.code!=='ENOENT')throw error;}
       this.gate.holder='startup_reconciliation';
+      await this.resolveStaleCalls({persist:false});
       const uncertain=Object.keys(this.ledger.calls).length>0;
       for(const row of Object.values(this.ledger.leases))if(!terminal(row)){
         row.reason='controller_restart';
@@ -207,7 +250,7 @@ export class DesktopController {
       this.supervisorHeartbeatTimer=setInterval(()=>{void this.heartbeatViewers();},this.supervisorHeartbeatMs);
       this.supervisorHeartbeatTimer.unref();
       return this;
-    }catch(error){this.poison();await this.rpc.close();throw error;}
+    }catch(error){this.poison(true);await this.rpc.close();throw error;}
   }
   async ensure(params={},context={}){
     const callKey=params.callKey===undefined?undefined:checkedKey(params.callKey);
@@ -345,7 +388,7 @@ export class DesktopController {
   async ended(session,status){
     const row=this.ledger.leases[session.id];if(!row)return;row.reason=session.reason||row.reason||'ended';
     if(status?.mode==='cleanup_failed'){row.state='recovery_required';row.recoveryStage ||= 'gateway_cleanup';this.poison();}
-    try{await this.persist();}catch(error){row.state='recovery_required';row.recoveryStage='completion_persistence';row.recoveryCode='journal_persistence';this.poison();await this.persist().catch(()=>{});throw error;}
+    try{await this.persist();}catch(error){row.state='recovery_required';row.recoveryStage='completion_persistence';row.recoveryCode='journal_persistence';this.poison(true);await this.persist().catch(()=>{});throw error;}
     finally{this.scheduleTransportIdle();}
   }
   // Read-only, so it skips the runtime queue: a tap's focus check must not wait behind input retirement.
@@ -383,7 +426,8 @@ export class DesktopController {
     if(!this.ready&&!['health','automationLeave'].includes(method))throw new Error('Production controller is reconciling or stopping');
     if(params.profile!==undefined&&params.profile!==this.profile)throw new Error('Only the dedicated browser profile is managed');
     switch(method){
-      case 'health':return this.health();
+      // The plugin asks for health when it activates, as after a Gateway restart: calls the old Gateway left are cleared first.
+      case 'health':if(this.ready&&Object.keys(this.ledger.calls).length)await this.resolveStaleCalls();return this.health();
       case 'ensure':return this.ensure(params,context);
       case 'tabs':{
         await this.ensure();const tabs=await this.runtimeOperation(()=>this.runtime.tabs());
@@ -393,7 +437,9 @@ export class DesktopController {
       case 'automationEnter':{
         const key=checkedKey(params.callKey),connectionId=context.connectionId||'direct',existing=this.ledger.calls[key];
         if(existing&&(existing.connectionId!==connectionId||existing.state!=='active'))throw new Error('Browser call already admitted on another connection or uncertain');
-        this.gate.enter(key);this.ledger.calls[key]=existing?{...existing,count:existing.count+1}:{state:'active',count:1,connectionId,admittedAt:Date.now()};await this.persist();
+        const callOwner=existing?{}:await this.callOwner(params.gateway);
+        if(this.ledger.calls[key]!==existing)throw new Error('Browser call already admitted on another connection or uncertain');
+        this.gate.enter(key);this.ledger.calls[key]=existing?{...existing,count:existing.count+1}:{state:'active',count:1,connectionId,admittedAt:Date.now(),...callOwner};await this.persist();
         if(context.signal?.aborted){await this.disconnected([key]);throw new Error(recoveryMessage);}return{admitted:true};
       }
       case 'automationLeave':{

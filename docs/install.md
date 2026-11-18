@@ -670,14 +670,71 @@ own setup receipt and is not an adoption tool for manual installations.
   seconds; with `--tunnel always` it starts with the controller. Never expose CDP/VNC or the Gateway as a replacement endpoint.
 - **Recovery required or uncertain input:** keep automation paused. Inspect the
   original browser/controller and follow the reported recovery guidance. Do not
-  retry/replay input, clear ledgers, bypass the gate or treat another link as
-  recovery. Take a fresh gated observation only after safe handback.
+  retry/replay input, edit or delete ledgers, bypass the gate or treat another
+  link as recovery. See [After a restart, crash or
+  reboot](#after-a-restart-crash-or-reboot) for what clears by itself and for
+  `clawser recover`. Take a fresh gated observation only after safe handback.
 - **After maintenance:** reload `browser-handoff --wait`, run doctor and repeat
   the owner-session tabs check. Old invitations are not recovery mechanisms.
 
 Issue reports should contain versions, redacted doctor output and error text,
 not private state, browser data, signed-in screenshots or invitation credentials.
 See [SECURITY.md](../SECURITY.md) for vulnerability reporting.
+
+## After a restart, crash or reboot
+
+The noVNC controller keeps a journal of open handoffs and of agent browser
+calls in progress, so a restart can never let the agent act on the browser while
+a person might still hold control. It settles the common cases by itself:
+
+- **Supervisor restart or host reboot during a handoff.** The new supervisor
+  proves that the handoff's viewer is gone and releases any key or button it
+  held. For a control handoff the controller also takes a fresh look at the
+  browser. The handoff then ends with reason `supervisor_restarted` and the
+  agent can continue. A controller that starts while its supervisor is still
+  coming up waits up to 45 seconds for it. If the supervisor was down longer and
+  the handoff ended in `recovery_required`, the controller checks it again the
+  next time it starts:
+  `systemctl --user restart clawser-desktop-<hash>.service`. `recover` prints
+  the exact unit name, and `systemctl --user list-units 'clawser-*'` lists them
+  all.
+- **Gateway restart or crash during a browser call.** Each call records the
+  Gateway process that started it. Once that process has exited, the controller
+  clears the call, both when it starts and when the restarted Gateway's plugin
+  connects. It never clears a call whose Gateway is still running.
+
+Three cases still need the operator:
+
+- Calls recorded by Clawser 1.0.1 or earlier name no Gateway. Run
+  `openclaw gateway restart`, then `recover --abandon-calls` as shown below.
+- A control handback that failed on the current supervisor boot. Use
+  [Operator reconciliation](#operator-reconciliation-after-a-failed-control-handback).
+- A lost controller lock or a failed journal write. Fix the cause (for example a
+  full disk), then restart the controller.
+
+### `clawser recover`
+
+`recover` works offline and only with the controller stopped. It clears the
+browser-call admissions it can prove are over, which are those whose Gateway
+process has exited. It never clears a call whose Gateway is still running and
+never changes a handoff.
+
+```sh
+systemctl --user stop clawser-desktop-<hash>.service
+openclaw clawser recover --dry-run
+openclaw clawser recover
+systemctl --user start clawser-desktop-<hash>.service
+```
+
+| Option | Purpose |
+| --- | --- |
+| `--state-dir <path>` | The state directory setup used, if not the default. |
+| `--dry-run` | Report what would be cleared without changing anything. |
+| `--abandon-calls` | Also clear calls that name no Gateway (recorded by Clawser 1.0.1 or earlier). Use it only after `openclaw gateway restart`, when no such call can still be running. |
+
+If the controller is running, `recover` refuses and prints the command that
+stops it. It reports any call whose Gateway is still running, and any lease that
+still needs recovery, and exits non-zero while either remains.
 
 ## Operator reconciliation after a failed control handback
 
@@ -703,9 +760,11 @@ an invitation.
    and the owner-session `tabs` check described above. Take a fresh browser
    observation before continuing the task.
 
-The helper requires exclusive controller ownership, no outstanding browser calls,
-no active viewer, unchanged browser/display generations, and a complete same-lease
+The helper requires exclusive controller ownership, no outstanding browser calls
+(clear those first with [`clawser recover`](#clawser-recover)), no active viewer, unchanged browser/display generations, and a complete same-lease
 retirement receipt newer than the failed actor. It keeps the original failed
 journal until fresh observation and the final runtime checks pass. Any refusal
 requires further operator investigation; do not delete the journal, force the
-gate open, or treat an ordinary service restart as recovery.
+gate open, or treat an ordinary service restart as recovery for a lease of the
+current supervisor boot. A restart is recovery only for a lease from an earlier
+supervisor boot, which the controller checks again when it starts.

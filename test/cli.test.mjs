@@ -54,8 +54,42 @@ test('help text says noVNC is the default and --cdp keeps the one-tab viewer', a
   const result = await runClawser(['help'], { log: message => logs.push(message), run: async () => assert.fail('help runs nothing') });
   assert.deepEqual(result, { ok: true, command: 'help' });
   const text = logs.join('\n');
-  assert.ok(text.includes('Usage: clawser <setup|doctor> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--novnc | --cdp] [--migrate-cookies | --no-migrate-cookies]'), text);
+  assert.ok(text.includes('Usage: clawser <setup|doctor|recover> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--novnc | --cdp] [--migrate-cookies | --no-migrate-cookies]'), text);
   assert.ok(text.includes('Default setup gives the agent its own browser on a private virtual screen that you view over noVNC. --cdp keeps the one-tab CDP viewer.'), text);
+  assert.ok(text.includes('With the controller stopped, recover [--abandon-calls] clears browser-call admissions it can prove are over.'), text);
+});
+
+test('recover registers its own options and forwards them', async () => {
+  let registrar, received;
+  class Recording extends Command {
+    options = [];
+    command(name) { const child = new Recording(); this.children.set(name, child); return child; }
+    option(flags) { this.options.push(flags.split(' ')[0]); return this; }
+  }
+  registerClawserCli({ rootDir: '/installed/clawser', registerCli(fn) { registrar = fn; } }, { runClawser: async args => { received = args; return { ok: true }; } });
+  const program = new Recording();
+  await registrar({ program });
+  const recover = program.children.get('clawser').children.get('recover');
+  assert.deepEqual(recover.options.sort(), ['--abandon-calls', '--dry-run', '--state-dir']);
+  await recover.callback({ stateDir: '/tmp/a dir', dryRun: true, abandonCalls: true });
+  assert.deepEqual(received, ['recover', '--state-dir', '/tmp/a dir', '--dry-run', '--abandon-calls']);
+  await recover.callback({});
+  assert.deepEqual(received, ['recover']);
+});
+
+test('recover runs offline with only its own flags and reports what it did', async () => {
+  const logs = [];
+  let options;
+  const deps = { log: message => logs.push(message), homeDir: '/home/fixture', env: {}, run: async () => assert.fail('recover runs no command'),
+    recoverDesktopCalls: async value => { options = value; return { ok: true, dryRun: false, cleared: 1, running: 0, unknown: 0, recoveryRequired: [] }; } };
+  const result = await runClawser(['recover', '--state-dir', '/srv/clawser', '--abandon-calls'], deps);
+  assert.deepEqual(options, { stateDir: '/srv/clawser', abandonCalls: true, dryRun: false });
+  assert.equal(result.ok, true);
+  assert.equal(result.command, 'recover');
+  assert.match(logs.join('\n'), /^Cleared 1 browser call admission/);
+  assert.match(logs.at(-1), /^Start the controller again: systemctl --user start clawser-desktop-[0-9a-f]{12}\.service$/);
+  for (const flag of ['--yes', '--cdp', '--port']) await assert.rejects(runClawser(['recover', flag, ...flag === '--port' ? ['19420'] : []], deps), /recover takes only --state-dir, --dry-run and --abandon-calls/);
+  await assert.rejects(runClawser(['setup', '--abandon-calls'], deps), /--abandon-calls is a recover option/);
 });
 
 test('CLI metadata and setup-only discovery never access runtime or register services', () => {

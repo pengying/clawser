@@ -55,6 +55,29 @@ export function registerClawserCli(api, dependencies = {}) {
         }
       });
     }
+    // Offline operator maintenance for the noVNC controller; it never runs while the controller does.
+    root.command('recover').description('With the noVNC controller stopped, clear browser-call admissions it can prove are over')
+      .option('--state-dir <path>', 'Private Clawser state directory')
+      .option('--dry-run', 'Show what would be cleared without changing anything')
+      .option('--abandon-calls', 'Also clear calls that name no Gateway (recorded by Clawser 1.0.1 or earlier), after openclaw gateway restart')
+      .action(async options => {
+        const argv = ['recover'];
+        if (options.stateDir !== undefined) argv.push('--state-dir', String(options.stateDir));
+        if (options.dryRun) argv.push('--dry-run');
+        if (options.abandonCalls) argv.push('--abandon-calls');
+        try {
+          if (typeof api.rootDir !== 'string' || !api.rootDir) throw new Error('OpenClaw did not provide the stable installed plugin directory; reinstall Clawser or use its standalone CLI');
+          const run = dependencies.runClawser ?? (await import('./setup.mjs')).runClawser;
+          const result = await run(argv, { openclawInvocation: { command: process.execPath, prefixArgs: [process.argv[1]] }, packageDir: api.rootDir });
+          if (result?.ok === false) process.exitCode = 1;
+          return result;
+        } catch (error) {
+          const report = dependencies.reportError ?? (message => process.stderr.write(`${message}\n`));
+          report(`Clawser: ${error instanceof Error ? error.message : 'Recovery failed'}`);
+          process.exitCode = 1;
+          return { ok: false };
+        }
+      });
   }, { descriptors: [clawserCliDescriptor] });
   return true;
 }

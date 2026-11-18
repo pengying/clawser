@@ -775,3 +775,48 @@ test('recovery_required leases from an earlier supervisor boot are checked again
   assert.deepEqual(none,[],'left to the offline reconcile helper');
   assert.equal(kept.health().recoveryRequired,true);
 });
+
+test('uncertain calls of a Gateway process that has exited are cleared at start; a live or unidentified one stays',async t=>{
+  const uid=process.getuid();
+  const processes=new Map([[200,{startTicks:'50',uid}]]);
+  const processInfo=async pid=>processes.get(pid)??null;
+  const calls={gone:{state:'uncertain',count:1,connectionId:'old',ownerPid:100,ownerStartTicks:'40'},reused:{state:'active',count:1,connectionId:'old',ownerPid:200,ownerStartTicks:'49'}};
+  const{controller:c}=await restartedController(t,{},{calls,controller:{processInfo}});
+  assert.deepEqual(Object.keys(c.ledger.calls),[],'an exited pid and a reused pid both prove the old Gateway is gone');
+  assert.equal(c.health().ready,true);
+  const live={state:'uncertain',count:1,connectionId:'old',ownerPid:200,ownerStartTicks:'50'},legacy={state:'uncertain',count:1,connectionId:'old'};
+  const{controller:kept}=await restartedController(t,{},{calls:{live,legacy},controller:{processInfo}});
+  assert.deepEqual(Object.keys(kept.ledger.calls).sort(),['legacy','live']);
+  assert.equal(kept.health().recoveryRequired,true);
+});
+
+test('a Gateway restart clears the uncertain call its predecessor left, on the next health check',async t=>{
+  const uid=process.getuid(),processes=new Map([[300,{startTicks:'77',uid}],[301,{startTicks:'78',uid:uid+1}]]);
+  const{controller:c}=await setup(t,{controller:{processInfo:async pid=>processes.get(pid)??null}});
+  const {DesktopRpcClient}=await import('../src/desktop-rpc.mjs');
+  const gateway=new DesktopRpcClient(c.socketPath);
+  await gateway.request('automationEnter',{callKey:'in-flight',gateway:{pid:300,startTicks:'77'}});
+  assert.equal(c.ledger.calls['in-flight'].ownerPid,300);
+  // Another user's process is never trusted as an owner.
+  await c.request('automationEnter',{callKey:'foreign',gateway:{pid:301,startTicks:'78'}},{connectionId:'foreign'});
+  assert.equal(c.ledger.calls.foreign.ownerPid,undefined);
+  await c.request('automationLeave',{callKey:'foreign'},{connectionId:'foreign'});
+  gateway.close();
+  for(let count=0;count<100&&!c.gate.poisonReason;count++)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.equal((await c.request('health')).recoveryRequired,true,'the Gateway is still running, so the call may still act');
+  processes.delete(300);
+  const health=await c.request('health');
+  assert.equal(health.ready,true);assert.equal(health.recoveryRequired,false);
+  assert.deepEqual(c.ledger.calls,{});
+  await c.request('automationEnter',{callKey:'next'});await c.request('automationLeave',{callKey:'next'});
+  assert.deepEqual(JSON.parse(await readFile(join(c.stateDir,'ledger.json'),'utf8')).calls,{});
+});
+
+test('a latched poison stays after its calls are cleared',async t=>{
+  const{controller:c}=await setup(t,{controller:{processInfo:async()=>null}});
+  c.ledger.calls.gone={state:'uncertain',count:1,connectionId:'old',ownerPid:400,ownerStartTicks:'1'};
+  c.poison(true);
+  await c.request('health');
+  assert.deepEqual(c.ledger.calls,{});
+  assert.equal(c.health().recoveryRequired,true,'a lost lock or failed write is not explained by the ledger');
+});

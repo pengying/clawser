@@ -9,6 +9,7 @@ import { DesktopRpcClient } from './desktop-rpc.mjs';
 import { diagnoseHost } from './host-doctor.mjs';
 import { applyHost, describeHost, hostLocations, planHost, readHostReceipt } from './host-setup.mjs';
 import { activationSummary, logSetupActivation } from './setup-activation.mjs';
+import { unitNames } from './host-units.mjs';
 import { resolveHandoffBrowser } from './browser-config.mjs';
 
 export const ARTIFACTS = Object.freeze({
@@ -75,10 +76,10 @@ async function controllerHealth(socketPath) {
 function options(argv, d) {
   const command = argv[0] ?? 'help';
   if (['help', '--help', '-h'].includes(command)) return { command: 'help' };
-  if (!['setup', 'doctor'].includes(command)) throw new Error('Unknown Clawser command: ' + `${command}`);
+  if (!['setup', 'doctor', 'recover'].includes(command)) throw new Error('Unknown Clawser command: ' + `${command}`);
   const result = { command, stateDir: undefined, profile: undefined, port: undefined, dryRun: false, yes: false, cdp: false, migrateCookies: undefined };
   const values = { '--state-dir': 'stateDir', '--browser-profile': 'profile', '--port': 'port', '--tunnel': 'tunnel', '--tunnel-idle-minutes': 'tunnelIdleMinutes', '--viewer-idle-minutes': 'viewerIdleMinutes' };
-  const switches = { '--dry-run': ['dryRun', true], '--yes': ['yes', true], '--cdp': ['cdp', true], '--novnc': [], '--migrate-cookies': ['migrateCookies', true], '--no-migrate-cookies': ['migrateCookies', false] };
+  const switches = { '--dry-run': ['dryRun', true], '--yes': ['yes', true], '--cdp': ['cdp', true], '--novnc': [], '--migrate-cookies': ['migrateCookies', true], '--no-migrate-cookies': ['migrateCookies', false], '--abandon-calls': ['abandonCalls', true] };
   const seen = new Set();
   for (let i = 1; i < argv.length; i++) {
     const flag = argv[i];
@@ -108,6 +109,8 @@ function options(argv, d) {
   if (seen.has('--novnc') && result.cdp) throw new Error('--novnc and --cdp cannot be used together');
   if (seen.has('--migrate-cookies') && seen.has('--no-migrate-cookies')) throw new Error('--migrate-cookies and --no-migrate-cookies cannot be used together');
   for (const flag of HOST_SETTING_FLAGS) if (command !== 'setup' && seen.has(flag)) throw new Error(''.concat(flag) + ' is a setup option');
+  if (seen.has('--abandon-calls') && command !== 'recover') throw new Error('--abandon-calls is a recover option');
+  if (command === 'recover') for (const flag of seen) if (!['--state-dir', '--dry-run', '--abandon-calls'].includes(flag)) throw new Error('recover takes only --state-dir, --dry-run and --abandon-calls');
   for (const flag of HOST_SETTING_FLAGS) if (result.cdp && seen.has(flag)) throw new Error(''.concat(flag) + ' applies only to the noVNC desktop');
   result.stateDir ??= join(stateRoot(d), result.cdp ? 'clawser-cdp' : 'clawser');
   result.profile ??= result.cdp ? 'handoff' : 'clawser';
@@ -396,9 +399,10 @@ export async function runClawser(argv, deps = {}) {
   }
   const o = options(argv, d);
   if (o.command === 'help') {
-    d.log('Usage: clawser <setup|doctor> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--novnc | --cdp] [--migrate-cookies | --no-migrate-cookies] [--tunnel on-demand|always] [--tunnel-idle-minutes <n>] [--viewer-idle-minutes <n>]\nDefault setup gives the agent its own browser on a private virtual screen that you view over noVNC. --cdp keeps the one-tab CDP viewer.\nThe noVNC tunnel starts with a link and stops --tunnel-idle-minutes (default 10) after the last one ends; --tunnel always keeps it up. A handoff with no viewer attached for --viewer-idle-minutes (default 3) ends.');
+    d.log('Usage: clawser <setup|doctor|recover> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--novnc | --cdp] [--migrate-cookies | --no-migrate-cookies] [--tunnel on-demand|always] [--tunnel-idle-minutes <n>] [--viewer-idle-minutes <n>]\nDefault setup gives the agent its own browser on a private virtual screen that you view over noVNC. --cdp keeps the one-tab CDP viewer.\nThe noVNC tunnel starts with a link and stops --tunnel-idle-minutes (default 10) after the last one ends; --tunnel always keeps it up. A handoff with no viewer attached for --viewer-idle-minutes (default 3) ends.\nWith the controller stopped, recover [--abandon-calls] clears browser-call admissions it can prove are over.');
     return { ok: true, command: 'help' };
   }
+  if (o.command === 'recover') return hostRecover(o, d);
   let cdp = o.cdp;
   if (o.command === 'doctor' && !cdp && !o.specified.includes('--novnc')) {
     try { cdp = (await configSection('plugins', d)).entries?.['browser-handoff']?.config?.desktop?.enabled !== true; }
@@ -418,4 +422,13 @@ export async function runClawser(argv, deps = {}) {
   }
   if (o.command === 'doctor') return hostDoctor(o, d, await prerequisites(d));
   return hostSetup(o, d);
+}
+
+// Offline: the controller must be stopped. See recoverDesktopCalls for what it may clear.
+async function hostRecover(o, d) {
+  const recover = d.recoverDesktopCalls ?? (await import('./desktop-recover.mjs')).recoverDesktopCalls;
+  const { describeRecovery } = await import('./desktop-recover.mjs');
+  const result = await recover({ stateDir: o.stateDir, abandonCalls: o.abandonCalls === true, dryRun: o.dryRun });
+  for (const line of describeRecovery(result, unitNames(o.stateDir).controller)) d.log(line);
+  return { command: 'recover', stateDir: o.stateDir, ...result };
 }

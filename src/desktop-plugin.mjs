@@ -1,5 +1,6 @@
 import { authorizedSession, ownerAuthorized, ownerGuard } from './authorization.mjs';
 import { isAbsolute } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { activationStatusForTarget, createBrowserActivation } from './browser-activation.mjs';
 import { cdpOrigin } from './browser-config.mjs';
 import { createBrowserBindingGuard, monitorBrowserBinding, registerBrowserAccessPolicy } from './browser-policy.mjs';
@@ -31,6 +32,19 @@ function duration(value, fallback, min, max, label) {
   const result = value ?? fallback;
   if (!Number.isInteger(result) || result < min || result > max) throw new Error('Invalid ' + `${label}`);
   return result;
+}
+// Each admission names this Gateway process. Once it exits, the controller knows none of its browser calls can
+// still act, so a Gateway restart clears the uncertain calls a crash or a reload in mid-call left behind.
+let gatewayIdentity;
+function readGatewayIdentity() {
+  if (gatewayIdentity === undefined) {
+    gatewayIdentity = null;
+    try {
+      const stat = readFileSync('/proc/self/stat', 'utf8'), startTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
+      if (/^\d+$/.test(startTicks || '')) gatewayIdentity = { pid: process.pid, startTicks };
+    } catch { /* Without /proc the controller simply never clears this Gateway's calls on its own. */ }
+  }
+  return gatewayIdentity;
 }
 // With desktop.enabled the controller unit serves the viewer and runs its own tunnel, so these CDP viewer
 // settings do nothing. Each set of them is reported once per process, not on every reload.
@@ -319,7 +333,8 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     try {
       const rpc = getClient();
       if (fault) throw new Error(fault);
-      const receipt = await rpc.request('automationEnter', { callKey: key }, { timeoutMs: 15_000 });
+      const gateway = readGatewayIdentity();
+      const receipt = await rpc.request('automationEnter', { callKey: key, ...gateway ? { gateway } : {} }, { timeoutMs: 15_000 });
       if (receipt?.admitted !== true) {
         fault = 'Browser Handoff controller returned uncertain automation admission; operator recovery is required';
         throw new Error(fault);

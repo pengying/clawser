@@ -100,6 +100,11 @@ and paste between your clipboard and the agent's browser.
   you haven't given, or promises a site will accept the result.
 - **Use a machine you don't share.** Other accounts on the same machine can
   reach the agent's browser.
+- **A restart in the middle of a task can pause the agent's browser.** Clawser
+  clears that by itself once it can prove the old handoff or browser call is
+  over. If it still reports recovery required, see [After a restart, crash or
+  reboot](docs/install.md#after-a-restart-crash-or-reboot) and
+  `openclaw clawser recover`.
 
 ## More
 
