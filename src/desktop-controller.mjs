@@ -134,6 +134,8 @@ export class DesktopController {
       if(uncertain||Object.values(this.ledger.leases).some(row=>row.state==='recovery_required'))this.poison();
       await this.persist();
       await this.gateway.start({port:this.port});
+      // A cloudflared that a killed controller left running still forwards an old public address here.
+      void this.transport.reapOrphans?.().catch(()=>{});
       this.ready=true;
       this.warmTransport();
       this.supervisorHeartbeatTimer=setInterval(()=>{void this.heartbeatViewers();},this.supervisorHeartbeatMs);

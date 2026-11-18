@@ -74,6 +74,10 @@ export function renderUnits(i) {
   units[n.supervisor] = `${header}[Unit]\nDescription=Clawser browser handoff supervisor\nWants=${ordered}\nAfter=${ordered}\n\n[Service]\nType=simple\nKillMode=control-group\nUnsetEnvironment=WAYLAND_DISPLAY\n`
     + `ExecStart=${supervise}\nUMask=0077\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=3\n${install}`;
 
+  // KillMode=mixed: a stop sends SIGTERM to the controller alone, so it can retire leases in order and then stop
+  // its own cloudflared. If the controller dies first, systemd finds no main process to wait for and SIGKILLs the
+  // rest of the unit's cgroup, cloudflared included, at once. Only a stop the controller hangs in keeps it until
+  // TimeoutStopSec; the transport also reaps a recorded orphan when it next starts.
   units[n.controller] = `${header}[Unit]\nDescription=Clawser private browser handoff controller\nWants=${n.supervisor}\nAfter=network-online.target ${n.supervisor}\n\n[Service]\nType=simple\nKillMode=mixed\nExecStart=${[i.node, i.controllerScript, i.controllerConfig].map(systemdArgument).join(' ')}\nUMask=0077\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=3\nTimeoutStopSec=180\n${install}`;
   return units;
 }

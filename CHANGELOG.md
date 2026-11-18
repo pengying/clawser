@@ -3,6 +3,8 @@
 ## Unreleased
 
 - Fix a way out of the browser for whoever holds a control link. The window manager on Clawser's virtual screen kept openbox's default menus and shortcuts. A right-click on the bare screen opened openbox's menu, which falls back to the system menu with a terminal in it, and keys such as Super+D (show desktop), Super+E (run a program) and Alt+F4 (close) still worked, so a person in control could open a terminal as the owner. Clawser's openbox config now keeps only focus and raise on click, Alt+Tab between windows, and moving or resizing a window with the mouse. It has no menu, command, desktop-switching, show-desktop, close or minimize action, and its menu is an empty file of Clawser's own. Run `openclaw clawser setup --yes` once after upgrading: setup writes the new config and restarts the window manager, which leaves the browser and its tabs open. Until then `doctor` fails its new `window manager config` row.
+- A cloudflared left running by a crashed or killed Gateway or controller no longer keeps an old public address pointed at the viewer. The tunnel now records its process as soon as it starts, and the next start stops that process first, but only when its command line shows it is Clawser's own cloudflared for the same state folder. The controller also checks for one when it starts.
+- A refused viewer connection is now closed rather than left half open, and stopping the viewer cuts any connection still open after two seconds, so a stuck client can no longer hold a connection slot or stall the shutdown and the tunnel teardown after it.
 
 ## 1.0.1
 
