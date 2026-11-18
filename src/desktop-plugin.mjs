@@ -53,6 +53,23 @@ function warnIgnoredDesktopSettings(api) {
   seen.add(key);
   api.logger?.warn?.('Browser Handoff desktop mode ignores plugin settings ' + names.join(', ') + ': the noVNC controller serves the viewer on its own port with its own on-demand tunnel. Remove them, or set desktop.enabled=false for the CDP viewer.');
 }
+// Sessions that ended suppress the completions of handoffs they owned. A handoff lives at most 30 minutes plus
+// its retirement, so an hour covers it; entries then expire, and at most CANCELED_LIMIT are kept.
+const CANCELED_TTL_MS = 3_600_000, CANCELED_LIMIT = 512;
+export function canceledSet({ ttlMs = CANCELED_TTL_MS, limit = CANCELED_LIMIT, now = Date.now } = {}) {
+  const entries = new Map();
+  const prune = () => { const at = now(); for (const [key, expires] of entries) if (expires <= at) entries.delete(key); };
+  return {
+    add(key) {
+      entries.delete(key); entries.set(key, now() + ttlMs);
+      prune();
+      while (entries.size > limit) entries.delete(entries.keys().next().value);
+    },
+    has(key) { const expires = entries.get(key); if (expires === undefined) return false; if (expires > now()) return true; entries.delete(key); return false; },
+    clear() { entries.clear(); },
+    get size() { prune(); return entries.size; },
+  };
+}
 function liveInstanceKey(api, origin = cdpOrigin(api.config?.browser?.profiles?.[api.pluginConfig.desktop.profile]?.cdpUrl)) {
   return JSON.stringify([api.pluginConfig || {}, origin]);
 }
@@ -98,7 +115,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     if (client) void client.request('revokeAll', { reason: 'plugin_stop' }, { timeoutMs: 180_000 }).catch(() => api.logger.warn('Browser Handoff configuration-change retirement was not confirmed; controller fencing remains authoritative.'));
   } });
   const calls = new Map(), notifications = new Map();
-  const canceledOwners = new Set(), canceledSessions = new Set();
+  const canceledOwners = canceledSet(), canceledSessions = canceledSet();
   const sessionRuntime = api.runtime?.agent?.session, system = api.runtime?.system;
   const requestWake = typeof system?.requestHeartbeat === 'function'
     ? (options) => system.requestHeartbeat(options)
@@ -240,7 +257,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
       stopBindingMonitor?.(); stopBindingMonitor = undefined;
       clearInterval(pollTimer); pollTimer = undefined;
       const rpc = client;
-      client = undefined; calls.clear();
+      client = undefined; calls.clear(); canceledOwners.clear(); canceledSessions.clear();
       if (!rpc) return;
       // The dedicated controller survives Gateway restarts. Its ledger,
       // rather than this plugin's memory, identifies every profile lease.

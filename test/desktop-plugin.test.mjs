@@ -797,3 +797,23 @@ test('desktop mode warns once about plugin settings only the CDP viewer reads', 
   assert.equal(warnings.length, 1, 'one warning for the same settings across reloads');
   assert.match(warnings[0], /desktop mode ignores plugin settings port, comparisonProxyUrl: the noVNC controller serves the viewer/);
 });
+
+test('ended-session suppression entries expire, stay bounded and clear', async () => {
+  const { canceledSet } = await import('../src/desktop-plugin.mjs');
+  let time = 0;
+  const set = canceledSet({ ttlMs: 1000, limit: 3, now: () => time });
+  set.add('a'); time = 500; set.add('b');
+  assert.equal(set.has('a'), true);
+  time = 1000;
+  assert.equal(set.has('a'), false, 'expired after its TTL');
+  assert.equal(set.has('b'), true);
+  for (const key of ['c', 'd', 'e']) set.add(key);
+  assert.equal(set.size, 3);
+  assert.equal(set.has('b'), false, 'the oldest goes once the limit is reached');
+  set.add('c');
+  set.add('f');
+  assert.equal(set.has('c'), true, 'adding again refreshes an entry');
+  assert.equal(set.has('d'), false);
+  set.clear();
+  assert.equal(set.size, 0);
+});
