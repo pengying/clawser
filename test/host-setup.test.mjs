@@ -433,6 +433,35 @@ test('a file already matching the plan with no receipt digest is current and the
   assert.equal((await x.receipt()).units[x.names.browser], digest(await fs.readFile(join(x.unitDir, x.names.browser))));
 });
 
+test('the tunnel defaults to on demand and writes no tunnel settings', async t => {
+  const x = await harness(t);
+  const plan = await x.plan();
+  assert.ok(describeHost(plan).includes('Public tunnel: on demand, stops 10 minutes after the last handoff'));
+  await applyHost(plan, x.o, x.d, h);
+  assert.deepEqual(JSON.parse(await fs.readFile(x.p.config, 'utf8')).transport, { binaryPath: x.p.binary, startupTimeoutMs: 90_000 });
+  assert.equal((await x.receipt()).settings, undefined);
+});
+
+test('tunnel flags reach controller.json and the receipt, survive a plain rerun and go back to the defaults', async t => {
+  const x = await harness(t);
+  await x.install();
+  Object.assign(x.o, { tunnel: 'always', tunnelIdleMinutes: 30 });
+  let plan = await x.plan();
+  assert.ok(describeHost(plan).includes('Public tunnel: always on'));
+  assert.deepEqual([plan.writes.map(item => item.path), plan.restart], [[x.p.config], [x.names.controller]]);
+  await applyHost(plan, x.o, x.d, h);
+  assert.deepEqual(JSON.parse(await fs.readFile(x.p.config, 'utf8')).transport, { binaryPath: x.p.binary, startupTimeoutMs: 90_000, mode: 'always', idleMs: 1_800_000 });
+  assert.deepEqual((await x.receipt()).settings, { tunnel: 'always', tunnelIdleMinutes: 30 });
+  delete x.o.tunnel; delete x.o.tunnelIdleMinutes;
+  plan = await x.plan();
+  assert.deepEqual([plan.writes, plan.restart], [[], []], 'a rerun without the flags keeps them');
+  Object.assign(x.o, { tunnel: 'on-demand', tunnelIdleMinutes: 10 });
+  plan = await x.plan();
+  await applyHost(plan, x.o, x.d, h);
+  assert.deepEqual(JSON.parse(await fs.readFile(x.p.config, 'utf8')).transport, { binaryPath: x.p.binary, startupTimeoutMs: 90_000 });
+  assert.equal((await x.receipt()).settings, undefined);
+});
+
 // Before the lockdown, rc.xml kept openbox's menus and commands, and no menu.xml of Clawser's own existed.
 test('a rerun over an rc.xml an older generator wrote regenerates it, writes the empty menu and restarts only the window manager', async t => {
   const x = await harness(t);

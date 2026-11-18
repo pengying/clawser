@@ -24,7 +24,7 @@ export class CloudflareTransport extends EventEmitter {
     super();
     if (!isAbsolute(binaryPath || '') || !isAbsolute(stateDir || '')) throw new Error('Cloudflare transport requires absolute binary/state paths');
     if (!['/browser/assets/probe.css', '/assets/style.css'].includes(probePath)) throw new Error('Invalid public transport readiness asset');
-    Object.assign(this, { binaryPath, stateDir, startupTimeoutMs, spawnImpl, procRoot, killImpl });
+    Object.assign(this, { binaryPath, stateDir, startupTimeoutMs, spawnImpl, procRoot, killImpl, stops: 0 });
     this.probe = probeImpl || (async (origin, signal) => {
       const response = await fetch(origin + probePath, { signal, redirect: 'error' });
       await response.body?.cancel();
@@ -89,13 +89,18 @@ export class CloudflareTransport extends EventEmitter {
     try { return await work; } finally { if (this.opening === work) this.opening = undefined; }
   }
   async open() {
+    // A stop() during these awaits must also prevent the spawn.
+    const stops = this.stops, halted = () => {
+      if (this.closed) throw new Error('Cloudflare transport is closed');
+      if (this.stops !== stops) throw startupError('closed', 'ABORTED');
+    };
     await mkdir(this.stateDir, { recursive: true, mode: 0o700 });
-    if (this.closed) throw new Error('Cloudflare transport is closed');
+    halted();
     await this.reapOrphans();
-    if (this.closed) throw new Error('Cloudflare transport is closed');
+    halted();
     const config = join(this.stateDir, CONFIG_NAME);
     await writeFile(config, '{}\n', { mode: 0o600 });
-    if (this.closed) throw new Error('Cloudflare transport is closed');
+    halted();
     const child = this.child = this.spawnImpl(this.binaryPath, ['tunnel', '--config', config, '--no-autoupdate', '--metrics', '127.0.0.1:0', '--url', 'http://127.0.0.1:' + this.port], { stdio: ['ignore', 'pipe', 'pipe'] });
     // Recorded at once, so a parent that dies during the minute-long startup still leaves a pid to reap.
     const recorded = Number.isSafeInteger(child.pid) ? writeFile(join(this.stateDir, PID_NAME), JSON.stringify({ pid: child.pid, startedAt: Date.now() }) + '\n', { mode: 0o600 }).catch(() => {}) : Promise.resolve();
@@ -141,9 +146,10 @@ export class CloudflareTransport extends EventEmitter {
       child.stdout?.on('data', consume); child.stderr?.on('data', consume);
       child.once('error', fail);
       child.once('exit', () => {
+        // A child that stop() let go is no failure, but its pending startup still settles now.
+        fail();
         if (this.child !== child) return;
         const hadOrigin = Boolean(this.origin); this.origin = undefined;
-        fail();
         if (!this.closed && hadOrigin) this.emit('failure', new Error('Cloudflare tunnel stopped'));
       });
       timer = setTimeout(() => fail({ name: 'TimeoutError' }), this.startupTimeoutMs);
@@ -166,6 +172,16 @@ export class CloudflareTransport extends EventEmitter {
       }, 3000);
     });
   }
+  // Stops the tunnel while idle. Unlike close(), a later ensure() starts a new one, at a new address.
+  // The exit is intended, so it emits no failure, and a startup in progress fails at once.
+  async stop() {
+    if (this.closed) return this.closePromise;
+    const child = this.child;
+    this.stops++; this.child = undefined; this.origin = undefined; this.opening = undefined;
+    this.startupAbort?.abort();
+    await this.stopChild(child);
+  }
+  get running() { return Boolean(this.child && this.child.exitCode === null && this.child.signalCode === null); }
   async close() {
     if (this.closePromise) return this.closePromise;
     this.closed = true; this.origin = undefined;

@@ -248,12 +248,45 @@ openclaw clawser doctor --help
 | `--port PORT` | `19420` | Loopback controller and viewer port |
 | `--cdp` | Off | Use the one-tab CDP viewer on an existing browser |
 | `--novnc` | Default | Use the private virtual screen |
+| `--tunnel on-demand\|always` | `on-demand` | noVNC only. `on-demand` starts the public tunnel with a link and stops it after the idle period. `always` keeps it up while the controller runs, so every link is quick, but the viewer is reachable from the internet all the time |
+| `--tunnel-idle-minutes N` | `10` | noVNC only. How long an on-demand tunnel stays up after the last handoff ends, from 0 to 1440 |
 
 Use the same state directory for setup and doctor. Setup refuses a state
 directory whose socket paths would be longer than 107 bytes. For a new profile,
 the first setup picks the first free CDP port from 18820 to 18829 and records
 it. Option B keeps the profile's own port. Setup refuses to start when another program
 holds the CDP port or the controller port, and it names that program.
+
+Setup remembers `--tunnel` and `--tunnel-idle-minutes` in its receipt, so a
+rerun without them keeps the last choice. Pass the default value to go back to
+it. A change rewrites the controller's configuration and restarts the
+controller.
+
+### The public tunnel
+
+On a noVNC install the controller runs its own Cloudflare quick tunnel, the
+only way the phone reaches the viewer. By default it is on demand: creating a
+link starts it and waits until it answers, which can take up to a minute on a
+cold start. Once the last handoff ends, the tunnel stays up for the idle period
+(10 minutes by default), so a second link soon after is quick, and then
+cloudflared stops. If the tunnel drops, the controller starts it again only
+while a handoff is open or during that idle period. Each start gets a new
+address, and each link carries the current one. `--tunnel always` restores the
+1.0.0 behaviour of starting the tunnel with the controller and restarting it
+whenever it drops. Doctor and setup report the mode as public transport
+`on-demand` or `always-on`.
+
+### Plugin settings the noVNC desktop ignores
+
+With `desktop.enabled=true`, which setup configures, the plugin only talks to
+the controller over its private socket. The controller serves the viewer on
+the setup `--port` (19420 by default) and runs the tunnel above. These plugin
+settings belong to the CDP viewer and have no effect in desktop mode: `port`,
+`publicBaseUrl`, `comparisonProxyUrl`, `funnel` and `cloudflare.enabled`.
+Setup itself writes `cloudflare.enabled=false`. When any of the others is set
+in desktop mode, or `cloudflare.enabled` is true, the Gateway log shows one
+warning naming them. Remove them, or switch to the CDP viewer with
+`setup --cdp`.
 
 The `--container-name`, `--cdp-port`, `--vnc-port` and `--no-default-profile`
 flags were removed in 0.7.0.
@@ -266,7 +299,9 @@ configuration; browser tools remain unavailable during that transition. A succes
 reload command alone does not prove activation. `doctor` reports the activation
 phase, selected browser identity and public transport state. `active` with public
 transport `warming` means the local service is ready while Cloudflare finishes
-starting; creating a link waits for public readiness. A terminal activation failure
+starting; creating a link waits for public readiness. On a noVNC install the
+public transport reads `on-demand` (the default) or `always-on`; see [The
+public tunnel](#the-public-tunnel). A terminal activation failure
 requires correcting the reported problem and reloading the plugin.
 
 Follow setup's printed activation/reload instructions, then run:
@@ -629,8 +664,9 @@ own setup receipt and is not an adoption tool for manual installations.
   setup as root.
 - **Port, configuration or ownership conflict:** compare options and receipts.
   Preserve resources and choose a separate state directory for a new installation.
-- **Tunnel not ready:** check DNS/outbound HTTPS. The controller starts the
-  tunnel when it starts, and a cold start allows up to 90 seconds. Never expose CDP/VNC or the Gateway as a replacement endpoint.
+- **Tunnel not ready:** check DNS/outbound HTTPS. On demand, the controller
+  starts the tunnel when a link is created, and a cold start allows up to 90
+  seconds; with `--tunnel always` it starts with the controller. Never expose CDP/VNC or the Gateway as a replacement endpoint.
 - **Recovery required or uncertain input:** keep automation paused. Inspect the
   original browser/controller and follow the reported recovery guidance. Do not
   retry/replay input, clear ledgers, bypass the gate or treat another link as

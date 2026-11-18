@@ -24,10 +24,12 @@ export function registerClawserCli(api, dependencies = {}) {
         .option('--dry-run', 'Show the setup plan without making changes')
         .option('--yes', "Go ahead when setup has to close the agent's browser")
         .option('--migrate-cookies', "Copy logins into the agent's browser")
-        .option('--no-migrate-cookies', 'Do not copy logins into the agent browser');
+        .option('--no-migrate-cookies', 'Do not copy logins into the agent browser')
+        .option('--tunnel <mode>', 'noVNC public tunnel: on-demand (default) or always')
+        .option('--tunnel-idle-minutes <minutes>', 'Minutes an on-demand tunnel stays up after the last handoff (default 10)');
       command.action(async options => {
         const argv = [name];
-        for (const [key, flag] of [['stateDir', '--state-dir'], ['browserProfile', '--browser-profile'], ['port', '--port']]) {
+        for (const [key, flag] of [['stateDir', '--state-dir'], ['browserProfile', '--browser-profile'], ['port', '--port'], ['tunnel', '--tunnel'], ['tunnelIdleMinutes', '--tunnel-idle-minutes']]) {
           if (options[key] !== undefined) argv.push(flag, String(options[key]));
         }
         for (const [key, flag] of [['cdp', '--cdp'], ['novnc', '--novnc'], ['dryRun', '--dry-run'], ['yes', '--yes']]) if (options[key]) argv.push(flag);

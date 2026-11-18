@@ -21,6 +21,17 @@ export const ROLES = ['display', 'windowManager', 'browser', 'supervisor', 'cont
 export const OPENBOX_GENERATOR = 2;
 // openbox falls back to the system menu.xml, which opens a terminal, when its menu file is missing or invalid.
 export const EMPTY_OPENBOX_MENU = '<?xml version="1.0" encoding="UTF-8"?>\n<openbox_menu xmlns="http://openbox.org/3.4/menu"/>\n';
+// Host settings a setup flag changes. The receipt and controller.json hold only those that differ from these.
+export const HOST_SETTING_DEFAULTS = Object.freeze({ tunnel: 'on-demand', tunnelIdleMinutes: 10 });
+/** The flags given now, else the receipt's, else the defaults; `saved` lists only the non-default ones. */
+export function hostSettings(o, receiptSettings = {}) {
+  const effective = {}, saved = {};
+  for (const [key, fallback] of Object.entries(HOST_SETTING_DEFAULTS)) {
+    effective[key] = o[key] ?? receiptSettings[key] ?? fallback;
+    if (effective[key] !== fallback) saved[key] = effective[key];
+  }
+  return { effective, saved };
+}
 const CDP_PORTS = Array.from({ length: 10 }, (_, i) => 18820 + i);
 const resolver = d => d.hostResolver ?? { plan: planHostDeps, install: installHostDeps, verify: verifyHostDeps, describe: describeHostPlan };
 
@@ -161,7 +172,7 @@ const dockerEraFromCdp = name => `This state folder holds a Docker-era install, 
 const noWm = 'Chrome popups and dialogs open at 0,0 without stacking';
 
 /** Pure: the unit texts and the two configs they read. `browser` is `{ path, args, env }`; the args already carry the profile folder. */
-export function renderHost({ p, display, cdpPort, port, profile, browser, bins, wm, execPath }) {
+export function renderHost({ p, display, cdpPort, port, profile, browser, bins, wm, execPath, settings = HOST_SETTING_DEFAULTS }) {
   const cdpUrl = cdpUrlFor(cdpPort);
   const units = renderUnits({
     names: p.names, marker: p.marker, display, xauthority: p.xauthority, xvfb: bins.Xvfb.path, openbox: wm, openboxConfig: p.openboxConfig,
@@ -169,7 +180,9 @@ export function renderHost({ p, display, cdpPort, port, profile, browser, bins, 
     node: execPath, controllerScript: p.controllerScript, controllerConfig: p.config, browser,
   });
   const controller = { stateDir: p.state, profile, port, socketPath: p.socket, noVncAssetsDir: p.assets,
-    runtime: { stateDir: p.runtime, controlSocket: p.control, cdpUrl }, transport: { binaryPath: p.binary, startupTimeoutMs: 90_000 } };
+    runtime: { stateDir: p.runtime, controlSocket: p.control, cdpUrl }, transport: { binaryPath: p.binary, startupTimeoutMs: 90_000,
+      ...settings.tunnel !== HOST_SETTING_DEFAULTS.tunnel ? { mode: settings.tunnel } : {},
+      ...settings.tunnelIdleMinutes !== HOST_SETTING_DEFAULTS.tunnelIdleMinutes ? { idleMs: settings.tunnelIdleMinutes * 60_000 } : {} } };
   // The supervisor restarts an idle browser that a package upgrade replaced underneath it, found by this port.
   const supervisor = { display, xauthority: p.xauthority, controlSocket: p.control, vncDir: p.vncDir, cdpUrl, browserPort: Number(new URL(cdpUrl).port), x11vnc: bins.x11vnc.path };
   return { units, controller, supervisor };
@@ -207,7 +220,8 @@ export async function planHost(o, d, h) {
   for (const n of found?.sourceCdpUrl ? [port] : [cdpPort, port]) await checkPort(n, p, d);
   const wm = source ? bins.openbox.path : undefined;
   const profile = found ? found.profile : 'clawser', userDataDir = found ? found.userDataDir : p.profileDir;
-  const { units, controller, supervisor } = renderHost({ p, display, cdpPort, port, profile, bins, wm, execPath: d.execPath,
+  const settings = hostSettings(o, v2?.settings);
+  const { units, controller, supervisor } = renderHost({ p, display, cdpPort, port, profile, bins, wm, execPath: d.execPath, settings: settings.effective,
     browser: { path: browser.path, args: found ? found.args : chromeArgs({ existing: [], userDataDir, cdpPort }), env: browser.env } });
   const names = ROLES.map(role => p.names[role]).filter(name => units[name]);
   const files = [
@@ -247,7 +261,7 @@ export async function planHost(o, d, h) {
   // The Docker-era controller stop, re-stopping a replaced unit and resuming cookies into a stopped browser are not disruptive; closing or taking over a browser is.
   const takesOver = Boolean(found && (found.takeover.length || found.stop.some(item => !item.replaced) || (found.cookies?.migrate && (!found.cookies.resumeFrom || found.cookies.closesBrowser))));
   return {
-    option, profile, display, cdpPort, port, userDataDir, ...found?.profileDirectory !== undefined ? { profileDirectory: found.profileDirectory } : {}, ...found?.sourceCdpUrl ? { sourceCdpUrl: found.sourceCdpUrl } : {}, browser, units,
+    option, profile, display, cdpPort, port, userDataDir, settings, ...found?.profileDirectory !== undefined ? { profileDirectory: found.profileDirectory } : {}, ...found?.sourceCdpUrl ? { sourceCdpUrl: found.sourceCdpUrl } : {}, browser, units,
     writes: files.filter(file => file.state !== 'current').map(file => ({ path: file.path, digest: file.text === undefined ? null : sha256(file.text), ...file.unit ? { unit: file.unit } : {}, consumer: file.consumer })),
     start, restart, stop, takeover: found?.takeover ?? [], ...found?.cookies ? { cookies: found.cookies } : {}, staleCookies: found?.staleCookies ?? [],
     disruptive: takesOver || restart.some(name => [p.names.display, p.names.windowManager, p.names.browser].includes(name)),
@@ -262,6 +276,7 @@ export const describeHost = plan => [
     : 'Browser profile: clawser (new and empty, at ' + plan.userDataDir + ')',
   'Display: :' + plan.display,
   'Browser: ' + plan.browser.path,
+  'Public tunnel: ' + (plan.settings.effective.tunnel === 'always' ? 'always on' : `on demand, stops ${plan.settings.effective.tunnelIdleMinutes} minute${plan.settings.effective.tunnelIdleMinutes === 1 ? '' : 's'} after the last handoff`),
   ...plan.takeover.map(item => 'Take over ' + item.unit + ' (its unit file is backed up first)'),
   ...plan.stop.filter(item => item.replaced).map(item => 'Stop ' + item.unit + ' again (Clawser replaced it)'),
   ...plan.stop.filter(item => item.kind === 'close-browser').map(item => 'Close the browser running in your desktop session (pid ' + item.pid + ')'),
@@ -283,13 +298,14 @@ const record = (saved, file, digest) => { if (file.unit) saved.units[file.unit] 
 const save = (saved, p, d, h) => h.atomicPrivate(p.marker, json(saved), d);
 
 const browserRecord = plan => ({ path: plan.browser.path, existingArgs: plan.browser.existingArgs, env: plan.browser.env });
+const settingsRecord = plan => Object.keys(plan.settings.saved).length ? { settings: plan.settings.saved } : {};
 
 function receiptFor(plan, o, d, extra) {
   const p = plan.locations;
   return { identity, uid: d.uid, option: plan.option, profile: plan.profile, cdpPort: plan.cdpPort, port: plan.port, display: plan.display,
     stateDir: o.stateDir, packageDir: d.packageDir, execPath: d.execPath, unitDir: p.unitDir, userDataDir: plan.userDataDir,
     ...plan.profileDirectory !== undefined ? { profileDirectory: plan.profileDirectory } : {},
-    browser: browserRecord(plan), previousDefaultProfile: plan.previousDefaultProfile, units: {}, replaced: [], ...extra,
+    browser: browserRecord(plan), previousDefaultProfile: plan.previousDefaultProfile, units: {}, replaced: [], ...settingsRecord(plan), ...extra,
     ...o.pendingInertDesktop ? { pendingInertDesktop: true } : {} };
 }
 
@@ -327,6 +343,7 @@ export async function applyHost(plan, o, d, h) {
       await save(saved, p, d, h);
     } else if (plan.receipt === 'v2') {
       Object.assign(saved, { packageDir: d.packageDir, execPath: d.execPath, browser: browserRecord(plan) });
+      delete saved.settings; Object.assign(saved, settingsRecord(plan));
       if (!same(saved, plan.saved)) await save(saved, p, d, h);
     }
     // Saved cookies nobody will import are plaintext; they go before anything stops.

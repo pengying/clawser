@@ -156,6 +156,17 @@ test('removed Docker flags explain they are gone', async t => {
   assert.equal(h.calls.length, 0);
 });
 
+test('tunnel flags are validated, noVNC-only and setup-only', async t => {
+  const h = await harness(t);
+  for (const [args, message] of [
+    [['--tunnel', 'sometimes'], /--tunnel takes on-demand or always/],
+    [['--tunnel-idle-minutes', '1441'], /from 0 to 1440/],
+    [['--tunnel-idle-minutes', '2.5'], /from 0 to 1440/],
+    [['--tunnel', 'always', '--cdp'], /applies only to the noVNC desktop/],
+  ]) await assert.rejects(runClawser([...h.args, ...args], h.deps), message, args.join(' '));
+  await assert.rejects(runClawser(['doctor', '--tunnel', 'always'], h.deps), /--tunnel is a setup option/);
+});
+
 test('--novnc is accepted and --novnc with --cdp is refused', async t => {
   const h = await harness(t);
   h.deps.env.OPENCLAW_STATE_DIR = join(h.root, 'openclaw-state');

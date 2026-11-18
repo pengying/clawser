@@ -32,6 +32,27 @@ function duration(value, fallback, min, max, label) {
   if (!Number.isInteger(result) || result < min || result > max) throw new Error('Invalid ' + `${label}`);
   return result;
 }
+// With desktop.enabled the controller unit serves the viewer and runs its own tunnel, so these CDP viewer
+// settings do nothing. Each set of them is reported once per process, not on every reload.
+const ignoredSymbol = Symbol.for('openclaw.browser-handoff.ignored-desktop-settings.v1');
+export function ignoredDesktopSettings(pluginConfig = {}) {
+  return [
+    ...pluginConfig.port !== undefined ? ['port'] : [],
+    ...pluginConfig.publicBaseUrl !== undefined ? ['publicBaseUrl'] : [],
+    ...pluginConfig.comparisonProxyUrl !== undefined ? ['comparisonProxyUrl'] : [],
+    ...pluginConfig.funnel?.enabled === true ? ['funnel'] : [],
+    // Setup itself writes cloudflare.enabled=false next to the desktop settings.
+    ...pluginConfig.cloudflare?.enabled === true ? ['cloudflare'] : [],
+  ];
+}
+function warnIgnoredDesktopSettings(api) {
+  const names = ignoredDesktopSettings(api.pluginConfig);
+  if (!names.length) return;
+  const seen = globalThis[ignoredSymbol] ??= new Set(), key = names.join(',');
+  if (seen.has(key)) return;
+  seen.add(key);
+  api.logger?.warn?.('Browser Handoff desktop mode ignores plugin settings ' + names.join(', ') + ': the noVNC controller serves the viewer on its own port with its own on-demand tunnel. Remove them, or set desktop.enabled=false for the CDP viewer.');
+}
 function liveInstanceKey(api, origin = cdpOrigin(api.config?.browser?.profiles?.[api.pluginConfig.desktop.profile]?.cdpUrl)) {
   return JSON.stringify([api.pluginConfig || {}, origin]);
 }
@@ -62,6 +83,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
     return;
   }
   if (api.registrationMode !== undefined && api.registrationMode !== 'full') return;
+  warnIgnoredDesktopSettings(api);
   let client, running = false, fault, pollTimer, serviceEpoch, publication, stopBindingMonitor, activation;
   const unpublish = () => {
     if (publication && liveInstances().get(publication.key) === publication) liveInstances().delete(publication.key);
@@ -173,7 +195,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
   };
   registerBrowserAccessPolicy(api, { binding, assertAvailable: () => getClient() });
   const lifecycle = {
-    async activate({ prepared, assertCurrent }) {
+    async activate({ prepared, assertCurrent, setPublicTransport }) {
       assertCurrent(); config = prepared.pluginConfig.desktop;
       unpublish();
       stopBindingMonitor?.(); stopBindingMonitor = undefined;
@@ -191,6 +213,8 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
         assertCurrent();
         if (serviceEpoch !== epoch || client !== rpc) throw new Error('Browser Handoff service changed during controller startup');
         validateIdentity(identity); assertCurrent();
+        // The controller knows whether its tunnel runs on demand (the default) or always.
+        setPublicTransport?.(identity.publicTransport === 'always-on' ? 'always-on' : 'on-demand');
         running = true;
         publication = { key: liveInstanceKey(api, binding.current().binding.cdpUrl), factory: toolFactory };
         liveInstances().set(publication.key, publication);

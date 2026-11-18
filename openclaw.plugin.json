@@ -24,15 +24,16 @@
         "type": "integer",
         "minimum": 1024,
         "maximum": 65535,
-        "default": 18796
+        "default": 18796,
+        "description": "CDP viewer only: loopback port of the plugin's viewer. Ignored when desktop.enabled is true; the noVNC controller uses the port setup chose (--port, 19420 by default)."
       },
       "publicBaseUrl": {
         "type": "string",
-        "description": "HTTPS origin reverse-proxied to this plugin sidecar; no path suffix"
+        "description": "CDP viewer only: HTTPS origin reverse-proxied to this plugin sidecar; no path suffix. Ignored when desktop.enabled is true."
       },
       "comparisonProxyUrl": {
         "type": "string",
-        "description": "Optional fixed loopback HTTP origin for the authenticated disposable noVNC comparison service; disabled when absent"
+        "description": "CDP viewer only: optional fixed loopback HTTP origin for the authenticated disposable noVNC comparison service; disabled when absent. Ignored when desktop.enabled is true."
       },
       "profiles": {
         "type": "object",
@@ -44,6 +45,7 @@
       "funnel": {
         "type": "object",
         "additionalProperties": false,
+        "description": "CDP viewer only: publish the viewer through Tailscale Funnel. Ignored when desktop.enabled is true.",
         "properties": {
           "enabled": {
             "type": "boolean",
@@ -92,7 +94,7 @@
       "cloudflare": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Optional operator-managed Cloudflare Quick Tunnel for the CDP viewer. Exposes the authenticated viewer only, never CDP. Mutually exclusive with Funnel. The noVNC handoff uses its controller's own tunnel.",
+        "description": "CDP viewer only: optional operator-managed Cloudflare Quick Tunnel. Exposes the authenticated viewer only, never CDP. Mutually exclusive with Funnel. Ignored when desktop.enabled is true: the noVNC controller runs its own on-demand tunnel (setup --tunnel).",
         "properties": {
           "enabled": {
             "type": "boolean",

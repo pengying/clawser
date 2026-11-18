@@ -20,7 +20,9 @@ const runtimeOptions={stateDir:runtimeConfig.stateDir?fromConfig(runtimeConfig.s
 const transportOptions={binaryPath:transportConfig.binaryPath,startupTimeoutMs:transportConfig.startupTimeoutMs,stateDir:resolve(stateDir,'tunnel')};
 const runtime=new HostDesktopRuntime(runtimeOptions);
 const transport=new CloudflareTransport(transportOptions);
-const controller=new DesktopController({stateDir,profile:config.profile,runtime,transport,port:config.port??19420,...(config.socketPath?{socketPath:fromConfig(config.socketPath)}:{}),...(config.noVncAssetsDir?{noVncAssetsDir:fromConfig(config.noVncAssetsDir)}:{})});
+// Setup writes transport.mode and transport.idleMs only when they differ from the defaults (on demand, 10 minutes).
+const tunnel={...(transportConfig.mode!==undefined?{transportMode:transportConfig.mode}:{}),...(transportConfig.idleMs!==undefined?{transportIdleMs:transportConfig.idleMs}:{})};
+const controller=new DesktopController({stateDir,profile:config.profile,runtime,transport,...tunnel,port:config.port??19420,...(config.socketPath?{socketPath:fromConfig(config.socketPath)}:{}),...(config.noVncAssetsDir?{noVncAssetsDir:fromConfig(config.noVncAssetsDir)}:{})});
 await controller.start();
 process.stdout.write('Browser Handoff desktop controller ready\n');
 let stopping=false;

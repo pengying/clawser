@@ -118,37 +118,99 @@ test('tunnel failure retires the viewer while keeping the persistent browser',as
 });
 
 function countingTransport(ensure=async()=>'https://example.test') {
-  const ports=[];
-  return {ports,on(){},ensure:async port=>{ports.push(port);return ensure(port);},close:async()=>{}};
+  const ports=[],stops=[];
+  return {ports,stops,on(){},ensure:async port=>{ports.push(port);return ensure(port);},stop:async()=>{stops.push(ports.length);},close:async()=>{}};
 }
-const settle=()=>new Promise(resolve=>setTimeout(resolve,50));
+const settle=(ms=50)=>new Promise(resolve=>setTimeout(resolve,ms));
 
-test('the controller starts the public tunnel when it starts, so the first link does not wait for it',async t=>{
+test('on demand, the default, the controller starts no tunnel until a link is created',async t=>{
   const transport=countingTransport();
   const{controller:c}=await setup(t,{controller:{transport}});
   await settle();
+  assert.deepEqual(transport.ports,[]);
+  assert.equal(c.health().publicTransport,'on-demand');
+  await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
   assert.deepEqual(transport.ports,[new URL(c.gateway.localUrl).port*1]);
 });
 
-test('a dropped tunnel is started again in the background',async t=>{
+test('on demand, the tunnel stops an idle period after the last handoff ends, and a link inside it cancels the stop',async t=>{
+  const transport=countingTransport();
+  const{controller:c}=await setup(t,{controller:{transport,transportIdleMs:150}});
+  const first=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  await settle(200);
+  assert.deepEqual(transport.stops,[],'never while a handoff is open');
+  await c.request('revoke',{owner,id:first.id});
+  await settle(50);
+  // A second link inside the grace reuses the warm tunnel and keeps it running.
+  const second=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  await settle(200);
+  assert.deepEqual(transport.stops,[]);
+  await c.request('revoke',{owner,id:second.id});
+  await settle(250);
+  assert.deepEqual(transport.stops,[2],'stopped once, after the grace');
+});
+
+test('a link that fails to start still lets an on-demand tunnel stop when idle',async t=>{
+  const transport=countingTransport();
+  const{controller:c}=await setup(t,{controller:{transport,transportIdleMs:50},runtime:{startViewer:async()=>{throw new Error('no viewer');}}});
+  await assert.rejects(c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30}));
+  await settle(150);
+  assert.deepEqual(transport.stops,[1]);
+});
+
+test('on demand, a dropped tunnel comes back during a handoff or its idle grace, never afterwards',async t=>{
   const {EventEmitter}=await import('node:events');const transport=Object.assign(new EventEmitter(),countingTransport());
   delete transport.on;
-  await setup(t,{controller:{transport,transportRewarmMs:0}});
+  const{controller:c}=await setup(t,{controller:{transport,transportRewarmMs:0,transportIdleMs:200}});
+  await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  transport.emit('failure',new Error('owned tunnel exited'));
+  await settle();
+  assert.equal(transport.ports.length,2,'restarted: the outage ended the handoff, and the idle grace is running');
+  await settle(250);
+  assert.deepEqual(transport.stops,[2]);
+  transport.emit('failure',new Error('owned tunnel exited'));
+  await settle();
+  assert.equal(transport.ports.length,2,'not restarted once idle');
+});
+
+test('with transportMode always, the controller starts the public tunnel when it starts and never stops it',async t=>{
+  const transport=countingTransport();
+  const{controller:c}=await setup(t,{controller:{transport,transportMode:'always',transportIdleMs:0}});
+  await settle();
+  assert.deepEqual(transport.ports,[new URL(c.gateway.localUrl).port*1]);
+  assert.equal(c.health().publicTransport,'always-on');
+  const lease=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  await c.request('revoke',{owner,id:lease.id});
+  await settle();
+  assert.deepEqual(transport.stops,[]);
+});
+
+test('with transportMode always, a dropped tunnel is started again in the background',async t=>{
+  const {EventEmitter}=await import('node:events');const transport=Object.assign(new EventEmitter(),countingTransport());
+  delete transport.on;
+  await setup(t,{controller:{transport,transportMode:'always',transportRewarmMs:0}});
   await settle();
   transport.emit('failure',new Error('owned tunnel exited'));
   await settle();
   assert.equal(transport.ports.length,2);
 });
 
-test('a failed tunnel warm-up is not retried in the background, and the next link starts it',async t=>{
+test('with transportMode always, a failed tunnel warm-up is not retried in the background, and the next link starts it',async t=>{
   let fail=true;
   const transport=countingTransport(async()=>{if(fail)throw new Error('offline');return 'https://example.test';});
-  const{controller:c}=await setup(t,{controller:{transport,transportRewarmMs:0}});
+  const{controller:c}=await setup(t,{controller:{transport,transportMode:'always',transportRewarmMs:0}});
   await settle();
   assert.equal(transport.ports.length,1);
   fail=false;
   await c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30});
   assert.equal(transport.ports.length,2);
+});
+
+test('tunnel mode and idle period are validated',async t=>{
+  const stateDir=await mkdtemp(join(tmpdir(),'desktop-controller-'));t.after(()=>rm(stateDir,{recursive:true,force:true}));
+  const base={stateDir,profile:'human',runtime:{cdpUrl:'http://127.0.0.1:18810'},transport:countingTransport()};
+  assert.throws(()=>new DesktopController({...base,transportMode:'sometimes'}),/tunnel mode/);
+  for(const transportIdleMs of [-1,1.5,86_400_001])assert.throws(()=>new DesktopController({...base,transportIdleMs}),/idle period/);
 });
 
 async function viewerClient(t,controller,lease) {

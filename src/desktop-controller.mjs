@@ -82,11 +82,13 @@ export class DesktopController {
   createGeneration=0;
   writes=Promise.resolve();
   runtimeQueue=Promise.resolve();
-  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,transportRewarmMs=5000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
+  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,transportRewarmMs=5000,transportMode='on-demand',transportIdleMs=600_000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
     if(!stateDir||!profile||!runtime||!transport)throw new Error('Desktop controller requires stateDir, profile, runtime and transport');
     if(!Number.isInteger(supervisorHeartbeatMs)||supervisorHeartbeatMs<1||supervisorHeartbeatMs>5000)throw new Error('Invalid supervisor heartbeat interval');
     if(!Number.isInteger(transportRewarmMs)||transportRewarmMs<0||transportRewarmMs>600_000)throw new Error('Invalid tunnel restart delay');
-    Object.assign(this,{stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs});
+    if(!['on-demand','always'].includes(transportMode))throw new Error('Invalid tunnel mode');
+    if(!Number.isInteger(transportIdleMs)||transportIdleMs<0||transportIdleMs>86_400_000)throw new Error('Invalid tunnel idle period');
+    Object.assign(this,{stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs,transportMode,transportIdleMs});
     this.socketPath=socketPath||join(this.stateDir,'desktop.sock');
     this.transport.on?.('failure',()=>{void this.transportFailed();this.scheduleTransportWarm();});
     this.supervisor={create:params=>this.createActor(params),read:async id=>({state:this.actors.has(id)?'running':'stopped'}),register:params=>this.registration(params.ownedId),promote:params=>this.promote(params),cancelPromotion:id=>this.cancelPromotion(id),demote:params=>this.demote(params),destroy:(id,options)=>this.retire(id,options),verifyExited:async id=>this.ledger.leases[id]?.state==='ended'&&safeCompletion(this.ledger.leases[id]),clipboardRead:id=>this.clipboard(id),clipboardWrite:(id,text)=>this.clipboard(id,text),focusRead:id=>this.focus(id)};
@@ -94,11 +96,27 @@ export class DesktopController {
     this.rpc=new DesktopRpcServer({socketPath:this.socketPath,handler:(method,params,context)=>this.request(method,params,context),onDisconnect:keys=>this.disconnected(keys),onLockLost:()=>{this.poison();this.ready=false;void this.gateway.close();}});
   }
   poison(){this.gate.poison();this.gate.poisonReason=recoveryMessage;}
-  // A cold tunnel takes up to a minute, so start it before the first link and again after a drop.
-  // A failed start is not retried here: the next create starts it and reports the error.
+  // The tunnel makes the viewer reachable from the internet, so by default it runs only on demand: a link starts
+  // it, and it stops transportIdleMs after the last handoff ends, which keeps back-to-back links quick. A cold
+  // tunnel takes up to a minute. transportMode 'always' starts it with the controller instead (the 1.0.0
+  // behaviour). After a drop it is started again only while it is wanted: always, during a handoff, or in the
+  // idle grace. A failed start is not retried here: the next create starts it and reports the error.
+  transportWanted(){return !!this.creating||Object.values(this.ledger.leases).some(row=>!terminal(row));}
   warmTransport(){
     if(!this.ready||this.closePromise||typeof this.transport.ensure!=='function')return;
+    if(this.transportMode!=='always'&&!this.transportWanted()&&!this.transportIdleTimer)return;
     void this.transport.ensure(new URL(this.gateway.localUrl).port*1).catch(()=>{});
+  }
+  scheduleTransportIdle(){
+    if(this.transportMode==='always'||this.closePromise||typeof this.transport.stop!=='function'||this.transportWanted())return;
+    clearTimeout(this.transportIdleTimer);
+    this.transportIdleTimer=setTimeout(()=>{
+      this.transportIdleTimer=undefined;
+      if(this.transportWanted()||this.closePromise)return;
+      clearTimeout(this.transportWarmTimer);
+      void this.transport.stop().catch(()=>{});
+    },this.transportIdleMs);
+    this.transportIdleTimer.unref?.();
   }
   scheduleTransportWarm(){
     clearTimeout(this.transportWarmTimer);
@@ -137,7 +155,7 @@ export class DesktopController {
       // A cloudflared that a killed controller left running still forwards an old public address here.
       void this.transport.reapOrphans?.().catch(()=>{});
       this.ready=true;
-      this.warmTransport();
+      if(this.transportMode==='always')this.warmTransport();
       this.supervisorHeartbeatTimer=setInterval(()=>{void this.heartbeatViewers();},this.supervisorHeartbeatMs);
       this.supervisorHeartbeatTimer.unref();
       return this;
@@ -161,7 +179,7 @@ export class DesktopController {
       return{ready:true,profile:this.profile,cdpUrl:this.runtime.cdpUrl,browserGeneration:status.browserGeneration||status.displayGeneration,displayGeneration:status.displayGeneration,recoveryRequired:false};
     });
   }
-  health(){return{ready:this.ready===true&&!this.gate.poisonReason,profile:this.profile,cdpUrl:this.runtime.cdpUrl,recoveryRequired:!!this.gate.poisonReason};}
+  health(){return{ready:this.ready===true&&!this.gate.poisonReason,profile:this.profile,cdpUrl:this.runtime.cdpUrl,recoveryRequired:!!this.gate.poisonReason,publicTransport:this.transportMode==='always'?'always-on':'on-demand'};}
   heartbeatCurrent(id,actor){
     const row=this.ledger.leases[id],session=this.gateway.sessions.get(id);
     return this.ready===true&&!this.gateway.closed&&this.actors.get(id)===actor&&
@@ -267,12 +285,13 @@ export class DesktopController {
     })();
     // A promise is process-local and must never enter the durable JSON journal.
     Object.defineProperty(row,'retirement',{value:retirement,writable:true,configurable:true,enumerable:false});
-    try{return await retirement;}finally{delete row.retirement;}
+    try{return await retirement;}finally{delete row.retirement;this.scheduleTransportIdle();}
   }
   async ended(session,status){
     const row=this.ledger.leases[session.id];if(!row)return;row.reason=session.reason||row.reason||'ended';
     if(status?.mode==='cleanup_failed'){row.state='recovery_required';row.recoveryStage ||= 'gateway_cleanup';this.poison();}
     try{await this.persist();}catch(error){row.state='recovery_required';row.recoveryStage='completion_persistence';row.recoveryCode='journal_persistence';this.poison();await this.persist().catch(()=>{});throw error;}
+    finally{this.scheduleTransportIdle();}
   }
   // Read-only, so it skips the runtime queue: a tap's focus check must not wait behind input retirement.
   async focus(id){const row=this.ledger.leases[id];if(!row||row.state!=='control'||this.gate.holder!==id||this.gate.poisonReason)throw new Error('Focus requires current human control');return this.readFocus(this.runtime);}
@@ -334,6 +353,7 @@ export class DesktopController {
         if(!['watch','control'].includes(params.permission)||!Number.isInteger(params.ttlSeconds)||params.ttlSeconds<30||params.ttlSeconds>1800)throw new Error('Invalid invitation permission or lifetime');
         if(params.targetId!==undefined&&(typeof params.targetId!=='string'||!params.targetId||params.targetId.length>256))throw new Error('Invalid task target');
         this.creating=params;const generation=this.createGeneration;
+        clearTimeout(this.transportIdleTimer);this.transportIdleTimer=undefined;
         const activationId=params.targetId?'activation:' + randomBytes(16).toString('hex'):undefined;
         let activationWaiting=false;
         const cancelActivation=()=>{if(activationWaiting)this.gate.release(activationId);};
@@ -353,7 +373,7 @@ export class DesktopController {
           current();const result=await this.gateway.createProbe({ttlSeconds:params.ttlSeconds,permission:params.permission});
           try{current();}catch(error){const session=this.gateway.sessions.get(result.id);if(session)await this.gateway.end(session,error.handoffReason||'plugin_stop');throw error;}
           return{...result,...this.status(this.ledger.leases[result.id])};
-        }finally{context.signal?.removeEventListener('abort',cancelActivation);if(activationId)this.gate.release(activationId);this.creating=undefined;}
+        }finally{context.signal?.removeEventListener('abort',cancelActivation);if(activationId)this.gate.release(activationId);this.creating=undefined;this.scheduleTransportIdle();}
       }
       case 'status':return this.status(this.owned(params.owner,params.id));
       case 'wait':{
@@ -377,5 +397,5 @@ export class DesktopController {
       default:throw new Error('Unsupported controller RPC method');
     }
   }
-  async close(){if(this.closePromise)return this.closePromise;clearInterval(this.supervisorHeartbeatTimer);clearTimeout(this.transportWarmTimer);this.ready=false;this.closePromise=(async()=>{await this.gateway.close();if(Object.keys(this.ledger.calls).length)this.poison();if(this.rpc.lockHolder&&!this.rpc.lockHolder.lost)await this.persist().catch(()=>{});await this.rpc.close();await this.transport.close();})();return this.closePromise;}
+  async close(){if(this.closePromise)return this.closePromise;clearInterval(this.supervisorHeartbeatTimer);clearTimeout(this.transportWarmTimer);clearTimeout(this.transportIdleTimer);this.ready=false;this.closePromise=(async()=>{await this.gateway.close();if(Object.keys(this.ledger.calls).length)this.poison();if(this.rpc.lockHolder&&!this.rpc.lockHolder.lost)await this.persist().catch(()=>{});await this.rpc.close();await this.transport.close();})();return this.closePromise;}
 }

@@ -86,8 +86,12 @@ and paste between your clipboard and the agent's browser.
   browser is its own Chrome on a hidden screen, not your everyday browser.
 - **Links are one-use and private.** One device can open a link, and it expires
   after five minutes by default. Don't forward it.
-- **The first link after a restart can take up to a minute** while the secure
-  tunnel comes up. Later links are quick.
+- **The first link can take up to a minute** while the secure tunnel comes up.
+  The tunnel runs only while you need it: a link starts it, and it stops ten
+  minutes after the last handoff ends, so the viewer isn't reachable from the
+  internet the rest of the time. Links within those ten minutes are quick. See
+  `--tunnel` in [the install guide](docs/install.md#setup-options) to change
+  that.
 - **You do the step yourself.** Clawser never solves CAPTCHAs, types passwords
   you haven't given, or promises a site will accept the result.
 - **Use a machine you don't share.** Other accounts on the same machine can

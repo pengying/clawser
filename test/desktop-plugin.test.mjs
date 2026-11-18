@@ -773,3 +773,27 @@ test('stopping hot noVNC activation with pending health prevents late publicatio
   assert.equal(f.requests.filter(r => r.method === 'completions').length, 0); assert.equal(runtime.events.length, 0); assert.equal(runtime.wakes.length, 0);
   await assert.rejects(tools[0].create(ownerContext()).execute('late', { action: 'tabs' }), /unavailable|stopped/i);
 });
+
+test('activation reports the controller tunnel mode as the public transport', async t => {
+  for (const [reported, expected] of [[undefined, 'on-demand'], ['on-demand', 'on-demand'], ['always-on', 'always-on']]) {
+    const diagnostics = [];
+    const f = setup({ activationWriteDiagnostic: async value => { diagnostics.push(value); },
+      request: async (method, params, options, defaults) => method === 'health' ? { ...await defaults(method), ...reported ? { publicTransport: reported } : {} } : defaults(method) });
+    await f.services[0].start(); t.after(() => f.services[0].stop());
+    await eventually(() => assert.equal(diagnostics.at(-1)?.phase, 'active'));
+    assert.equal(diagnostics.at(-1).publicTransport, expected, String(reported));
+    await f.services[0].stop();
+  }
+});
+
+test('desktop mode warns once about plugin settings only the CDP viewer reads', async () => {
+  const { ignoredDesktopSettings } = await import('../src/desktop-plugin.mjs');
+  assert.deepEqual(ignoredDesktopSettings({ desktop: { enabled: true }, cloudflare: { enabled: false } }), [], 'setup writes cloudflare.enabled=false itself');
+  assert.deepEqual(ignoredDesktopSettings({ port: 19798, comparisonProxyUrl: 'http://127.0.0.1:1', funnel: { enabled: true }, cloudflare: { enabled: true }, publicBaseUrl: 'https://x.example' }),
+    ['port', 'publicBaseUrl', 'comparisonProxyUrl', 'funnel', 'cloudflare']);
+  const warnings = [];
+  setup({ configure: api => { api.pluginConfig.port = 19798; api.pluginConfig.comparisonProxyUrl = 'http://127.0.0.1:19799'; api.logger.warn = message => warnings.push(message); } });
+  setup({ configure: api => { api.pluginConfig.port = 29798; api.pluginConfig.comparisonProxyUrl = 'http://127.0.0.1:19799'; api.logger.warn = message => warnings.push(message); } });
+  assert.equal(warnings.length, 1, 'one warning for the same settings across reloads');
+  assert.match(warnings[0], /desktop mode ignores plugin settings port, comparisonProxyUrl: the noVNC controller serves the viewer/);
+});
