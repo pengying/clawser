@@ -598,3 +598,21 @@ test('local active diagnostic reports Cloudflare warming then ready without bloc
   for (let attempt = 0; attempt < 100 && diagnostics.at(-1).publicTransport !== 'ready'; attempt++) await new Promise(setImmediate);
   assert.equal(diagnostics.at(-1).publicTransport, 'ready'); assert.equal(diagnostics.at(-1).phase, 'active');
 });
+
+test('a superseded existing-browser generation releases its listener and its tunnel', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'handoff-supersede-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const closed = [];
+  const tunnel = name => () => Object.assign(new EventEmitter(), { ensure: async () => 'https://' + name + '.trycloudflare.com', close: async () => { closed.push(name); } });
+  const old = setup({ cloudflareFactory: tunnel('old') });
+  old.api.pluginConfig.cloudflare = { enabled: true, binaryPath: '/fixture/cloudflared' };
+  await old.services[0].start({ stateDir });
+  const replacement = setup({ cloudflareFactory: tunnel('new') });
+  replacement.api.pluginConfig.cloudflare = { enabled: true, binaryPath: '/fixture/cloudflared' };
+  await replacement.services[0].start({ stateDir }); t.after(() => replacement.services[0].stop());
+  for (let attempt = 0; attempt < 200 && old.getServer().server.listening; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(old.getServer().server.listening, false, 'the old listener would hold the port the new generation needs');
+  assert.deepEqual(closed, ['old']);
+  assert.equal(replacement.getServer().server.listening, true);
+  await old.services[0].stop();
+});

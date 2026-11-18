@@ -817,3 +817,47 @@ test('ended-session suppression entries expire, stay bounded and clear', async (
   set.clear();
   assert.equal(set.size, 0);
 });
+
+// The activation registry is keyed by the service state folder: a second start there supersedes the first without stopping it.
+const supersedeScope = '/clawser-test/superseded-generation';
+
+test('a superseded generation stops polling and closes its idle controller connection', async t => {
+  const old = setup({ runtime: wakeRuntime(), request: async (method, params, options, defaults) => method === 'completions' ? { completions: [] } : defaults(method) });
+  await old.services[0].start({ stateDir: supersedeScope });
+  await eventually(() => assert.ok(old.requests.some(r => r.method === 'completions')));
+  const replacement = setup({ runtime: wakeRuntime() });
+  await replacement.services[0].start({ stateDir: supersedeScope }); t.after(() => replacement.services[0].stop());
+  await eventually(() => assert.equal(old.clients[0].closed, true));
+  const polls = old.requests.filter(r => r.method === 'completions').length;
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  assert.equal(old.requests.filter(r => r.method === 'completions').length, polls, 'the retired poll timer is gone');
+  assert.equal(replacement.clients[0].closed, false);
+});
+
+test('a superseded generation keeps a connection that carries an admitted call until that call is released on it', async t => {
+  const old = setup();
+  await old.services[0].start({ stateDir: supersedeScope });
+  assert.equal(await old.hooks.get('before_tool_call')(browserEvent, invocation()), undefined);
+  const replacement = setup();
+  await replacement.services[0].start({ stateDir: supersedeScope }); t.after(() => replacement.services[0].stop());
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const oldClient = old.clients[0];
+  assert.equal(oldClient.closed, false, 'closing it would turn the running call into uncertain input');
+  await old.hooks.get('after_tool_call')(browserEvent, invocation());
+  const leave = old.requests.find(r => r.method === 'automationLeave');
+  assert.equal(leave.client, oldClient, 'released where it was admitted');
+  assert.equal(oldClient.closed, true);
+});
+
+test('a drifted generation closes its connection only after the drift revocation finishes on it', async t => {
+  let tick, release;
+  const scheduler = { setInterval(fn) { tick = fn; return { unref() {} }; }, clearInterval() {} };
+  const f = setup({ bindingMonitorScheduler: scheduler, request: async (method, params, options, defaults) => method === 'revokeAll' && !release ? new Promise(resolve => { release = resolve; }) : defaults(method) });
+  await f.services[0].start(); t.after(() => f.services[0].stop());
+  f.api.config.browser.profiles.handoff.attachOnly = false; tick();
+  await eventually(() => assert.equal(typeof release, 'function'));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(f.clients[0].closed, false);
+  release({ revoked: 0, allRetired: true, recoveryRequired: false });
+  await eventually(() => assert.equal(f.clients[0].closed, true));
+});
