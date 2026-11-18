@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { dirname, isAbsolute, join } from 'node:path';
 import { captureSetupActivation, waitForSetupActivation } from './setup-activation.mjs';
-import { cdpUrlFor, chromeArgs, renderUnits, unitNames } from './host-units.mjs';
+import { BROWSER_LAUNCHERS, LAUNCHER_SCRIPT, cdpUrlFor, chromeArgs, renderUnits, unitNames } from './host-units.mjs';
 import { freeDisplay, xauthorityEntry } from './host-display.mjs';
 import { classifyOwner, findBrowserBinary, portHolder, portInUse, showProperties } from './host-browser.mjs';
 import { describeHostPlan, installHostDeps, planHostDeps, verifyHostDeps } from './host-deps.mjs';
@@ -44,7 +44,7 @@ export function hostLocations(o, d) {
     marker: join(o.stateDir, 'setup.json'), config: join(o.stateDir, 'controller.json'), xauthority: join(o.stateDir, 'xauthority'),
     openboxConfig: join(o.stateDir, 'openbox/rc.xml'), openboxMenu: join(o.stateDir, 'openbox/menu.xml'), profileDir: join(o.stateDir, 'browser/profile'),
     state, socket: join(state, 'desktop.sock'), runtime, supervisorConfig: join(runtime, 'supervisor.json'), control: join(runtime, 'control.sock'), vncDir: join(runtime, 'vnc'),
-    binary: join(o.stateDir, 'bin/cloudflared'), assets: join(o.stateDir, 'vendor/novnc-1.7.0'),
+    binary: join(o.stateDir, 'bin/cloudflared'), assets: join(o.stateDir, 'vendor/novnc-1.7.0'), launchers: join(o.stateDir, 'launchers'),
     unitDir: join(configRoot, 'systemd/user'), names: unitNames(o.stateDir),
     supervisorScript: join(desktop, 'supervisor.py'), openboxScript: join(desktop, 'openbox_config.py'), controllerScript: join(d.packageDir, 'bin/desktop-controller.mjs'),
   };
@@ -148,6 +148,33 @@ export async function wmPredatesConfig(status, path, d) {
   return info.mtimeMs > enteredAt + 1000;
 }
 
+// The browser's stand-ins for xdg-open and friends (see BROWSER_LAUNCHERS). They close Chrome's own one-click routes
+// out of the browser. Someone deliberately saving files over them through Chrome's Save dialog could undo that, but
+// that same dialog can already write any file the owner can (see SECURITY.md); doctor reports a changed stand-in.
+export async function launchersState(dir, d, h) {
+  await h.noSymlinks(dir, d);
+  const info = await h.stat(dir, d);
+  if (!info) return 'write';
+  if (!info.isDirectory() || info.uid !== d.uid) throw new Error(`${dir} is not a folder of this user; move it aside, then rerun setup`);
+  if ((info.mode & 0o777) !== 0o700) return 'write';
+  const names = (await d.fs.readdir(dir)).sort();
+  if (names.join('/') !== [...BROWSER_LAUNCHERS].sort().join('/')) return 'write';
+  for (const name of names) {
+    const file = await d.fs.lstat(join(dir, name));
+    if (!file.isFile() || file.uid !== d.uid || (file.mode & 0o777) !== 0o500 || await d.fs.readFile(join(dir, name), 'utf8') !== LAUNCHER_SCRIPT) return 'write';
+  }
+  return 'current';
+}
+
+async function writeLaunchers(dir, d, h) {
+  await h.noSymlinks(dir, d);
+  if (await h.stat(dir, d)) {
+    await d.fs.chmod(dir, 0o700);
+    for (const name of await d.fs.readdir(dir)) await d.fs.rm(join(dir, name), { recursive: true, force: true });
+  } else await d.fs.mkdir(dir, { mode: 0o700 });
+  for (const name of BROWSER_LAUNCHERS) await d.fs.writeFile(join(dir, name), LAUNCHER_SCRIPT, { mode: 0o500, flag: 'wx' });
+}
+
 async function openboxSource(openbox, d, h) {
   for (const path of d.openboxRcPaths ?? [join(dirname(dirname(openbox)), 'etc/xdg/openbox/rc.xml'), '/etc/xdg/openbox/rc.xml']) {
     if ((await h.stat(path, d))?.isFile()) return path;
@@ -191,7 +218,7 @@ export function renderHost({ p, display, cdpPort, port, profile, browser, bins, 
   const units = renderUnits({
     names: p.names, marker: p.marker, display, xauthority: p.xauthority, xvfb: bins.Xvfb.path, openbox: wm, openboxConfig: p.openboxConfig,
     python: bins.python3.path, supervisorScript: p.supervisorScript, supervisorConfig: p.supervisorConfig,
-    node: execPath, controllerScript: p.controllerScript, controllerConfig: p.config, browser,
+    node: execPath, controllerScript: p.controllerScript, controllerConfig: p.config, browser, launchers: p.launchers,
   });
   const controller = { stateDir: p.state, profile, port, socketPath: p.socket, noVncAssetsDir: p.assets,
     runtime: { stateDir: p.runtime, controlSocket: p.control, cdpUrl }, transport: { binaryPath: p.binary, startupTimeoutMs: 90_000,
@@ -241,6 +268,8 @@ export async function planHost(o, d, h) {
   const names = ROLES.map(role => p.names[role]).filter(name => units[name]);
   const files = [
     { path: p.xauthority, kind: 'xauthority', consumer: p.names.display },
+    // Chrome looks its launchers up on each use, so a rewritten folder needs no browser restart.
+    { path: p.launchers, kind: 'launchers' },
     // The empty menu goes first, so rc.xml never names a missing menu file.
     ...wm ? [{ path: p.openboxMenu, text: EMPTY_OPENBOX_MENU, key: 'openboxMenuDigest', recorded: v2?.openboxMenuDigest, consumer: p.names.windowManager },
       { path: p.openboxConfig, key: 'openboxDigest', recorded: v2?.openboxDigest, generator: OPENBOX_GENERATOR, consumer: p.names.windowManager }] : [],
@@ -251,7 +280,8 @@ export async function planHost(o, d, h) {
   ];
   // The v1 controller config and unit count as owned under their v1 digests, so classify verifies them too.
   for (const file of files) {
-    if (file.kind !== 'xauthority') file.state = await classify(file.path, file.text, file.recorded, d, h);
+    if (file.kind === 'launchers') file.state = await launchersState(file.path, d, h);
+    else if (file.kind !== 'xauthority') file.state = await classify(file.path, file.text, file.recorded, d, h);
     else if (await h.stat(file.path, d)) { await h.privatePath(file.path, 'file', d); file.state = 'current'; }
     else file.state = 'write';
     // An rc.xml an older generator wrote still binds menus and commands, so it is generated again.
@@ -378,6 +408,7 @@ export async function applyHost(plan, o, d, h) {
         if (file.text !== undefined && file.recorded !== sha256(file.text)) { record(saved, file, sha256(file.text)); await save(saved, p, d, h); }
         continue;
       }
+      if (file.kind === 'launchers') { await writeLaunchers(file.path, d, h); continue; }
       if (file.kind === 'xauthority') {
         await h.noSymlinks(file.path, d);
         await d.fs.writeFile(file.path, xauthorityEntry(plan.display, (d.randomBytes ?? randomBytes)(16)), { flag: 'wx', mode: 0o600 });

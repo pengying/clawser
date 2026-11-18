@@ -8,7 +8,7 @@ import { hostWorld, movePackage, systemctl } from './host-fixture.mjs';
 import { applyWorld, cookieDirs, cookieStore, exportsThree, userProfile } from './host-existing-fixture.mjs';
 
 const HOST_ROWS = ['installation', 'ownership', 'configuration', 'pinned assets', 'host dependencies', 'services', 'display', 'browser window',
-  'CDP origin', 'profile directory', 'linger', 'units current', 'window manager config', 'controller health', 'Gateway activation'];
+  'CDP origin', 'profile directory', 'linger', 'units current', 'browser launchers', 'window manager config', 'controller health', 'Gateway activation'];
 const LINGER = 'Linger is off, so these services stop when you log out. Run: loginctl enable-linger';
 const KEYRING = n => `${n} cookies are still encrypted with the desktop keyring, which Clawser's browser can't read; sign in again to sites that ask.`;
 const EXPORT = folders => `An earlier setup run saved cookies in ${folders.join(', ')}; rerun openclaw clawser setup to move them over and remove ${folders.length > 1 ? 'them' : 'it'}.`;
@@ -176,6 +176,16 @@ test('doctor fails while openbox still runs a config from before rc.xml was last
   assert.deepEqual(failed(result), ['window manager config']);
   w.entered.set(w.names.windowManager, Number(process.hrtime.bigint() / 1000n));
   assert.equal(row(await doctor(w), 'window manager config').ok, true);
+});
+
+test('a changed browser launcher stand-in fails doctor until setup reruns', async t => {
+  const w = await installed(t);
+  const dir = join(w.stateDir, 'launchers');
+  await fs.rm(join(dir, 'xdg-open'));
+  const result = await doctor(w);
+  assert.equal(result.ok, false);
+  assert.match(row(result, 'browser launchers').message, /launchers, which keeps the agent's browser from starting other programs, is missing or changed; rerun openclaw clawser setup --yes$/);
+  assert.deepEqual(failed(result), ['browser launchers']);
 });
 
 test('a moved plugin directory says to rerun setup', async t => {

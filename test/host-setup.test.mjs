@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { ARTIFACTS, setupHelpers as h } from '../src/setup.mjs';
 import { EMPTY_OPENBOX_MENU, OPENBOX_GENERATOR, applyHost, describeHost, hostLocations, planHost } from '../src/host-setup.mjs';
-import { unitNames } from '../src/host-units.mjs';
+import { BROWSER_LAUNCHERS, LAUNCHER_SCRIPT, unitNames } from '../src/host-units.mjs';
 import { xauthorityEntry } from '../src/host-display.mjs';
 import { SNAP_MESSAGE } from '../src/host-browser.mjs';
 import { activationFixture } from './setup-activation-fixture.mjs';
@@ -522,6 +522,36 @@ test('a window manager that started before rc.xml was last written is restarted'
   await applyHost(plan, x.o, x.d, h);
   assert.deepEqual(systemctl(x.calls, 'restart'), [x.names.windowManager]);
   assert.deepEqual((await x.plan()).restart, []);
+});
+
+// Review S1: Chrome starts xdg-open for Show in folder, an opened download and other protocols, and xdg-email for
+// mailto. On the virtual screen that put a file manager in front of a control link.
+test('the browser runs with refusing stand-ins for xdg-open and friends first on its PATH, and no session bus', async t => {
+  const x = await harness(t);
+  await x.install();
+  const dir = x.p.launchers, unit = await fs.readFile(join(x.unitDir, x.names.browser), 'utf8');
+  assert.match(unit, new RegExp(`^Environment="PATH=${dir}:/usr/local/bin:/usr/bin:/bin"$`, 'm'));
+  assert.match(unit, /^Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=\/dev\/null"$/m);
+  assert.match(unit, /^UnsetEnvironment=WAYLAND_DISPLAY$/m);
+  assert.equal((await fs.stat(dir)).mode & 0o777, 0o700);
+  assert.deepEqual((await fs.readdir(dir)).sort(), [...BROWSER_LAUNCHERS].sort());
+  for (const name of ['xdg-open', 'xdg-email', 'gnome-control-center', 'evince']) assert.ok(BROWSER_LAUNCHERS.includes(name), name);
+  for (const name of BROWSER_LAUNCHERS) {
+    assert.equal((await fs.stat(join(dir, name))).mode & 0o777, 0o500, name);
+    assert.equal(await fs.readFile(join(dir, name), 'utf8'), LAUNCHER_SCRIPT);
+  }
+  await assert.rejects(execute(join(dir, 'xdg-open'), ['/home']), error => error.code === 1 && /the agent's browser may not start xdg-open/.test(error.stderr));
+  assert.deepEqual((await x.plan()).writes, []);
+  // A stand-in replaced by a plain file (as Chrome's Save dialog would write it) is put back, with no browser restart.
+  await fs.rm(join(dir, 'xdg-open'));
+  await fs.writeFile(join(dir, 'xdg-open'), 'saved page', { mode: 0o600 });
+  await fs.writeFile(join(dir, 'extra'), '#!/bin/sh\n', { mode: 0o700 });
+  const plan = await x.plan();
+  assert.deepEqual([plan.writes.map(item => item.path), plan.start, plan.restart], [[dir], [], []]);
+  await applyHost(plan, x.o, x.d, h);
+  assert.equal(await x.plan().then(again => again.writes.length), 0);
+  assert.equal(await fs.readFile(join(dir, 'xdg-open'), 'utf8'), LAUNCHER_SCRIPT);
+  await assert.rejects(fs.access(join(dir, 'extra')));
 });
 
 test('an openbox menu changed outside Clawser is refused by path', async t => {

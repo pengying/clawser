@@ -100,6 +100,10 @@ and paste between your clipboard and the agent's browser.
   you haven't given, or promises a site will accept the result.
 - **Use a machine you don't share.** Other accounts on the same machine can
   reach the agent's browser.
+- **A control link can read and save your files.** Whoever takes control can
+  use the browser's own `file://` pages and Save and upload dialogs, which
+  reach any file your account can. Send control links only to people you
+  would trust with your account; a watch link only shows the screen.
 - **A restart in the middle of a task can pause the agent's browser.** Clawser
   clears that by itself once it can prove the old handoff or browser call is
   over. If it still reports recovery required, see [After a restart, crash or

@@ -3,7 +3,7 @@ import { isAbsolute, join } from 'node:path';
 import { resolveHandoffBrowser } from './browser-config.mjs';
 import { cookieEncryption, showProperties } from './host-browser.mjs';
 import { verifyHostDeps } from './host-deps.mjs';
-import { LINGER_OFF, OPENBOX_GENERATOR, ROLES, assertHealth, assertProfilePort, hostConfigPatch, hostLocations, lingerOn, readHostReceipt, renderHost, unitDirMoved, wmPredatesConfig } from './host-setup.mjs';
+import { LINGER_OFF, OPENBOX_GENERATOR, ROLES, assertHealth, assertProfilePort, hostConfigPatch, hostLocations, launchersState, lingerOn, readHostReceipt, renderHost, unitDirMoved, wmPredatesConfig } from './host-setup.mjs';
 import { chromeArgs } from './host-units.mjs';
 import { inspectSetupActivation, requireActiveActivation } from './setup-activation.mjs';
 
@@ -127,6 +127,10 @@ export async function diagnoseHost(o, d, h, checks) {
       // Setup refuses a unit file others can write, so doctor does too.
       await h.privatePath(path, 'file', d);
     }
+  });
+  // Without its stand-ins first on PATH, Chrome's Show in folder or a mailto: link can open a file manager or mail app on the screen.
+  await check('browser launchers', async () => {
+    if (await launchersState(p.launchers, d, h) !== 'current') throw new Error(`${p.launchers}, which keeps the agent's browser from starting other programs, is missing or changed; ${rerun} --yes`);
   });
   // An rc.xml from before the lockdown still offers openbox's menu, which opens a terminal, to anyone in control.
   if (saved.units?.[p.names.windowManager]) await check('window manager config', async () => {

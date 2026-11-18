@@ -6,9 +6,17 @@ const base = names => ({
   names, display: 99, xauthority: '/state/Xauthority', xvfb: '/usr/bin/Xvfb', openbox: '/usr/bin/openbox', openboxConfig: '/state/openbox.xml',
   browser: { path: '/usr/bin/google-chrome', args: ['--lang=fr', 'about:blank'], env: [['LANG', 'fr_FR.UTF-8']] },
   python: '/usr/bin/python3', supervisorScript: '/pkg/supervisor.py', supervisorConfig: '/state/sup.json',
-  node: '/usr/bin/node', controllerScript: '/pkg/controller.mjs', controllerConfig: '/state/config.json', marker: '/state/marker.json',
+  node: '/usr/bin/node', controllerScript: '/pkg/controller.mjs', controllerConfig: '/state/config.json', marker: '/state/marker.json', launchers: '/state/launchers',
 });
 const render = (over = {}) => { const i = { ...base(unitNames('/state')), ...over }; return renderUnits({ ...i, names: over.names ?? unitNames('/state') }); };
+
+test('a taken-over browser keeps its own PATH after the launcher stand-ins, and the folder must be a plain absolute path', () => {
+  const n = unitNames('/state');
+  const u = render({ browser: { path: '/usr/bin/google-chrome', args: [], env: [['PATH', '/opt/tools:/usr/bin'], ['LANG', 'C']] } })[n.browser];
+  assert.match(u, /^Environment="PATH=\/state\/launchers:\/opt\/tools:\/usr\/bin"$/m);
+  assert.equal(u.match(/^Environment="PATH=/gm).length, 1);
+  for (const launchers of ['relative/launchers', '/state/a:b', undefined]) assert.throws(() => render({ launchers }), /launcher folder/);
+});
 
 test('unit names are stable per state directory and keep the controller name', () => {
   assert.deepEqual(unitNames('/a'), unitNames('/a'));
@@ -55,7 +63,7 @@ test('the browser unit waits for the display and restarts always', () => {
   assert.match(u, new RegExp(`Requires=${n.display}`));
   assert.match(u, new RegExp(`After=.*${n.display}`));
   assert.match(u, new RegExp(`After=.*${n.windowManager}`));
-  for (const s of ['Environment="DISPLAY=:99"', 'Environment="XAUTHORITY=/state/Xauthority"', 'Environment="LANG=fr_FR.UTF-8"', 'UnsetEnvironment=WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS', 'Restart=always', 'RestartSec=5', 'TimeoutStopSec=15', '"--lang=fr"', '"about:blank"']) assert.ok(u.includes(s), s);
+  for (const s of ['Environment="DISPLAY=:99"', 'Environment="XAUTHORITY=/state/Xauthority"', 'Environment="LANG=fr_FR.UTF-8"', 'Environment="PATH=/state/launchers:/usr/local/bin:/usr/bin:/bin"', 'Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=/dev/null"', 'Restart=always', 'RestartSec=5', 'TimeoutStopSec=15', '"--lang=fr"', '"about:blank"']) assert.ok(u.includes(s), s);
   const pre = u.split('\n').find(l => l.startsWith('ExecStartPre='));
   assert.ok(pre.includes('/tmp/.X11-unix/X99'));
   assert.ok(pre.includes('$$'));

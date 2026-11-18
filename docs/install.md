@@ -218,10 +218,12 @@ comes from the state directory. Setup and doctor print the exact names.
 | Service | What it runs |
 | --- | --- |
 | display | Xvfb, a 1920x1080 virtual screen that listens on no network port |
-| wm | openbox, with a config file Clawser generates. It has no menu or command bindings, so a control link reaches only browser windows |
-| browser | the agent's Chrome on that screen |
+| wm | openbox, with a config file Clawser generates. It has no menu, command, close or show-desktop bindings, by key or mouse |
+| browser | the agent's Chrome on that screen. Stand-ins in `<stateDir>/launchers`, first on its `PATH`, refuse `xdg-open`, `xdg-email` and similar launchers, and it has no session bus, so Chrome can't open a file manager, mail app or other program there |
 | supervisor | one short-lived x11vnc per viewer session, on a private socket |
 | desktop | the controller and the phone viewer |
+
+A control link still reaches everything the browser itself can: see "What a control link can reach" in [SECURITY.md](../SECURITY.md).
 
 The `wm` service is left out when openbox is unavailable. User services stop
 when you log out unless lingering is on. When it's off, setup and doctor say:
@@ -330,6 +332,7 @@ Doctor is read-only. On a noVNC install it prints one row per check:
 | `profile directory` | The profile folder exists and only you can read it |
 | `linger` | Lingering is on |
 | `units current` | The unit files match what setup would write now |
+| `browser launchers` | The stand-ins that keep the browser from starting other programs are as setup wrote them |
 | `window manager config` | openbox's config comes from this version's generator, with no menus or commands, and openbox has restarted on it. An older one fails until `setup --yes` reruns, and until then the controller refuses control links |
 | `controller health` | The controller is ready |
 | `Gateway activation` | OpenClaw is running this setup |
