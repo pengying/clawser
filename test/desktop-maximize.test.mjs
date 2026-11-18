@@ -47,25 +47,31 @@ test('a resized or minimized browser window is maximized again, and only the obs
   let page;
   for (let n = 0; n < 50 && !page; n++) { page = (await pages())[0]; if (!page) await sleep(100); }
   const state = async targetId => (await cdp.send('Browser.getWindowForTarget', { targetId })).bounds;
+  // Openbox may start managing Chrome's windows after they appear (a slow runner starts it late), and its
+  // rule maximizes each browser window when it does. Wait for a state instead of assuming it after a sleep.
+  const settle = async (targetId, wanted, message) => {
+    for (let n = 0; n < 100 && (await state(targetId)).windowState !== wanted; n++) await sleep(100);
+    assert.equal((await state(targetId)).windowState, wanted, message);
+  };
   const { windowId } = await cdp.send('Browser.getWindowForTarget', { targetId: page.targetId });
+  await settle(page.targetId, 'maximized', 'openbox maximizes the browser window');
   // A second window, as a popup the person left open behind the observed one.
   const { targetId: other } = await cdp.send('Target.createTarget', { url: 'about:blank', newWindow: true });
   const otherWindow = (await cdp.send('Browser.getWindowForTarget', { targetId: other })).windowId;
   assert.notEqual(otherWindow, windowId);
+  await settle(other, 'maximized', 'openbox maximizes the second window too');
   await cdp.send('Browser.setWindowBounds', { windowId: otherWindow, bounds: { windowState: 'normal' } });
   await cdp.send('Browser.setWindowBounds', { windowId: otherWindow, bounds: { left: 10, top: 10, width: 320, height: 240 } });
+  await settle(other, 'normal');
   for (const shrink of [{ windowState: 'normal' }, { left: 40, top: 30, width: 300, height: 200 }]) await cdp.send('Browser.setWindowBounds', { windowId, bounds: shrink });
-  await sleep(300);
-  assert.equal((await state(page.targetId)).windowState, 'normal');
+  await settle(page.targetId, 'normal');
   assert.equal(await maximizeObservedWindow(runtime, page.targetId), true);
-  for (let n = 0; n < 30 && (await state(page.targetId)).windowState !== 'maximized'; n++) await sleep(100);
-  assert.equal((await state(page.targetId)).windowState, 'maximized');
+  await settle(page.targetId, 'maximized');
   assert.equal((await state(other)).windowState, 'normal', 'the other window is left as it was');
   assert.equal(await maximizeObservedWindow(runtime, page.targetId), false, 'already maximized: nothing to do');
   await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
-  await sleep(300);
+  await settle(page.targetId, 'minimized');
   assert.equal(await maximizeObservedWindow(runtime, page.targetId), true);
-  for (let n = 0; n < 30 && (await state(page.targetId)).windowState !== 'maximized'; n++) await sleep(100);
-  assert.equal((await state(page.targetId)).windowState, 'maximized', 'a minimized window comes back maximized');
+  await settle(page.targetId, 'maximized', 'a minimized window comes back maximized');
   assert.equal(await maximizeObservedWindow(runtime, 'not a target id!'), false);
 });

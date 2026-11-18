@@ -70,7 +70,12 @@ export async function maximizeObservedWindow(runtime,targetId){
     const state=window.bounds?.windowState;
     if(state==='maximized'||state==='fullscreen')return false;
     // Chrome draws its own minimize button; a minimized window comes back first, as when a link is created.
-    if(state==='minimized')await browser.send('Browser.setWindowBounds',{windowId:window.windowId,bounds:{windowState:'normal'}});
+    // Chrome refuses to maximize a window it still reports minimized, and the restore finishes only when the window
+    // manager has mapped it again, so wait for that (2 seconds at most) before asking for maximized.
+    if(state==='minimized'){
+      await browser.send('Browser.setWindowBounds',{windowId:window.windowId,bounds:{windowState:'normal'}});
+      for(let n=0;n<20&&(await browser.send('Browser.getWindowForTarget',{targetId})).bounds?.windowState==='minimized';n++)await new Promise(resolve=>setTimeout(resolve,100));
+    }
     await browser.send('Browser.setWindowBounds',{windowId:window.windowId,bounds:{windowState:'maximized'}});
     return true;
   }finally{browser.close();}
