@@ -515,7 +515,9 @@ test('a window manager that started before rc.xml was last written is restarted'
   const x = await harness(t);
   await x.install();
   assert.deepEqual((await x.plan()).restart, []);
-  x.entered.set(x.names.windowManager, Number(process.hrtime.bigint() / 1000n) - 120_000_000);
+  // Two minutes ago on systemd's monotonic clock, but no earlier than boot: a CI runner may be younger than that,
+  // and a start stamp of 0 or below means "unknown" to the check.
+  x.entered.set(x.names.windowManager, Math.max(1, Number(process.hrtime.bigint() / 1000n) - 120_000_000));
   const plan = await x.plan();
   assert.deepEqual([plan.writes, plan.restart, plan.disruptive], [[], [x.names.windowManager], true]);
   x.calls.length = 0;
