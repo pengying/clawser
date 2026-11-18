@@ -26,10 +26,11 @@ export function registerClawserCli(api, dependencies = {}) {
         .option('--migrate-cookies', "Copy logins into the agent's browser")
         .option('--no-migrate-cookies', 'Do not copy logins into the agent browser')
         .option('--tunnel <mode>', 'noVNC public tunnel: on-demand (default) or always')
-        .option('--tunnel-idle-minutes <minutes>', 'Minutes an on-demand tunnel stays up after the last handoff (default 10)');
+        .option('--tunnel-idle-minutes <minutes>', 'Minutes an on-demand tunnel stays up after the last handoff (default 10)')
+        .option('--viewer-idle-minutes <minutes>', 'Minutes a handoff may have no viewer open before it ends (default 3)');
       command.action(async options => {
         const argv = [name];
-        for (const [key, flag] of [['stateDir', '--state-dir'], ['browserProfile', '--browser-profile'], ['port', '--port'], ['tunnel', '--tunnel'], ['tunnelIdleMinutes', '--tunnel-idle-minutes']]) {
+        for (const [key, flag] of [['stateDir', '--state-dir'], ['browserProfile', '--browser-profile'], ['port', '--port'], ['tunnel', '--tunnel'], ['tunnelIdleMinutes', '--tunnel-idle-minutes'], ['viewerIdleMinutes', '--viewer-idle-minutes']]) {
           if (options[key] !== undefined) argv.push(flag, String(options[key]));
         }
         for (const [key, flag] of [['cdp', '--cdp'], ['novnc', '--novnc'], ['dryRun', '--dry-run'], ['yes', '--yes']]) if (options[key]) argv.push(flag);

@@ -66,6 +66,7 @@ async function setup(t, options = {}) {
     heartbeatMs: options.heartbeatMs,
     upstreamConnectMs: options.upstreamConnectMs,
     maxProbes: options.maxProbes,
+    abandonMs: options.abandonMs,
     ...(options.defaultUpstream ? {} : { upstreamConnect: options.upstreamConnect || (async () => {
       const socket = new MemoryVncSocket(); sockets.push(socket); return socket;
     }) }),
@@ -1168,4 +1169,42 @@ test('a drop after the handoff ended stops reconnecting and confirms cleanup', {
   await waitFor('fixture.doneCalls === 1 && /destroyed/i.test(document.querySelector("#status").textContent)', 'ended access is confirmed instead of retried');
   await pause(150);
   assert.deepEqual(await evaluate('({ rfbs: fixture.rfbs.length, credentials: fixture.credentialCalls })'), { rfbs: 1, credentials: 2 }, 'no reconnect after a definitive refusal');
+});
+
+test('a claimed handoff with no viewer attached ends as abandoned, while a reload inside the window keeps it', async (t) => {
+  let time = Date.now();
+  const ctx = await setup(t, { now: () => time, ttlSeconds: 1800, abandonMs: 180_000 });
+  const mode = () => ctx.gateway.status(ctx.invite.id).mode;
+  time += 600_000; await ctx.gateway.sweep();
+  assert.equal(mode(), 'unclaimed', 'a link nobody has opened yet waits for its expiry');
+  const cookie = await claim(ctx);
+  const first = openSocket(ctx, cookie, (await credentials(ctx, cookie)).body.generation);
+  assert.equal((await socketOutcome(first)).status, 101);
+  time += 600_000; await ctx.gateway.sweep();
+  assert.equal(mode(), 'watch', 'an attached viewer is never abandoned');
+  const closed = once(first, 'close'); first.close(); await closed;
+  await settledToWatch(ctx);
+  await ctx.gateway.sweep();
+  time += 179_000; await ctx.gateway.sweep();
+  assert.equal(mode(), 'watch');
+  // A reload: the same cookie fetches fresh credentials and attaches again, which resets the window.
+  const reloaded = openSocket(ctx, cookie, (await credentials(ctx, cookie)).body.generation);
+  assert.equal((await socketOutcome(reloaded)).status, 101);
+  await ctx.gateway.sweep();
+  time += 120_000; await ctx.gateway.sweep();
+  assert.equal(mode(), 'watch');
+  // A phone that sleeps drops the socket without a close handshake.
+  reloaded.terminate();
+  const session = ctx.gateway.sessions.get(ctx.invite.id);
+  for (let n = 0; n < 100 && (session.socket || mode() !== 'watch'); n++) await pause(5);
+  await settledToWatch(ctx);
+  await ctx.gateway.sweep();
+  time += 180_000; await ctx.gateway.sweep();
+  assert.equal(mode(), 'ended');
+  assert.equal(ctx.gateway.status(ctx.invite.id).reason, 'abandoned');
+  assert.ok(ctx.supervisor.calls.some(([name]) => name === 'destroy'), 'its x11vnc is retired');
+});
+
+test('the abandoned viewer timeout is validated', () => {
+  for (const abandonMs of [0, 999, 3_600_001, 1.5]) assert.throws(() => new NoVncProbeGateway({ supervisor: new FakeSupervisor(), abandonMs }), /abandoned viewer timeout/);
 });

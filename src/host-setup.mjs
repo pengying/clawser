@@ -22,7 +22,7 @@ export const OPENBOX_GENERATOR = 2;
 // openbox falls back to the system menu.xml, which opens a terminal, when its menu file is missing or invalid.
 export const EMPTY_OPENBOX_MENU = '<?xml version="1.0" encoding="UTF-8"?>\n<openbox_menu xmlns="http://openbox.org/3.4/menu"/>\n';
 // Host settings a setup flag changes. The receipt and controller.json hold only those that differ from these.
-export const HOST_SETTING_DEFAULTS = Object.freeze({ tunnel: 'on-demand', tunnelIdleMinutes: 10 });
+export const HOST_SETTING_DEFAULTS = Object.freeze({ tunnel: 'on-demand', tunnelIdleMinutes: 10, viewerIdleMinutes: 3 });
 /** The flags given now, else the receipt's, else the defaults; `saved` lists only the non-default ones. */
 export function hostSettings(o, receiptSettings = {}) {
   const effective = {}, saved = {};
@@ -182,7 +182,8 @@ export function renderHost({ p, display, cdpPort, port, profile, browser, bins, 
   const controller = { stateDir: p.state, profile, port, socketPath: p.socket, noVncAssetsDir: p.assets,
     runtime: { stateDir: p.runtime, controlSocket: p.control, cdpUrl }, transport: { binaryPath: p.binary, startupTimeoutMs: 90_000,
       ...settings.tunnel !== HOST_SETTING_DEFAULTS.tunnel ? { mode: settings.tunnel } : {},
-      ...settings.tunnelIdleMinutes !== HOST_SETTING_DEFAULTS.tunnelIdleMinutes ? { idleMs: settings.tunnelIdleMinutes * 60_000 } : {} } };
+      ...settings.tunnelIdleMinutes !== HOST_SETTING_DEFAULTS.tunnelIdleMinutes ? { idleMs: settings.tunnelIdleMinutes * 60_000 } : {} },
+    ...settings.viewerIdleMinutes !== HOST_SETTING_DEFAULTS.viewerIdleMinutes ? { viewer: { idleMs: settings.viewerIdleMinutes * 60_000 } } : {} };
   // The supervisor restarts an idle browser that a package upgrade replaced underneath it, found by this port.
   const supervisor = { display, xauthority: p.xauthority, controlSocket: p.control, vncDir: p.vncDir, cdpUrl, browserPort: Number(new URL(cdpUrl).port), x11vnc: bins.x11vnc.path };
   return { units, controller, supervisor };

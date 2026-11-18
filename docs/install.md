@@ -250,6 +250,7 @@ openclaw clawser doctor --help
 | `--novnc` | Default | Use the private virtual screen |
 | `--tunnel on-demand\|always` | `on-demand` | noVNC only. `on-demand` starts the public tunnel with a link and stops it after the idle period. `always` keeps it up while the controller runs, so every link is quick, but the viewer is reachable from the internet all the time |
 | `--tunnel-idle-minutes N` | `10` | noVNC only. How long an on-demand tunnel stays up after the last handoff ends, from 0 to 1440 |
+| `--viewer-idle-minutes N` | `3` | noVNC only. A handoff someone has opened ends, with reason `abandoned`, once no viewer has been attached for this long, from 1 to 30. A reload or a short network drop within it keeps the handoff |
 
 Use the same state directory for setup and doctor. Setup refuses a state
 directory whose socket paths would be longer than 107 bytes. For a new profile,
@@ -257,7 +258,7 @@ the first setup picks the first free CDP port from 18820 to 18829 and records
 it. Option B keeps the profile's own port. Setup refuses to start when another program
 holds the CDP port or the controller port, and it names that program.
 
-Setup remembers `--tunnel` and `--tunnel-idle-minutes` in its receipt, so a
+Setup remembers `--tunnel`, `--tunnel-idle-minutes` and `--viewer-idle-minutes` in its receipt, so a
 rerun without them keeps the last choice. Pass the default value to go back to
 it. A change rewrites the controller's configuration and restarts the
 controller.

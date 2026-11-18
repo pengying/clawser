@@ -163,6 +163,8 @@ test('tunnel flags are validated, noVNC-only and setup-only', async t => {
     [['--tunnel-idle-minutes', '1441'], /from 0 to 1440/],
     [['--tunnel-idle-minutes', '2.5'], /from 0 to 1440/],
     [['--tunnel', 'always', '--cdp'], /applies only to the noVNC desktop/],
+    [['--viewer-idle-minutes', '0'], /from 1 to 30/],
+    [['--viewer-idle-minutes', '31'], /from 1 to 30/],
   ]) await assert.rejects(runClawser([...h.args, ...args], h.deps), message, args.join(' '));
   await assert.rejects(runClawser(['doctor', '--tunnel', 'always'], h.deps), /--tunnel is a setup option/);
 });

@@ -445,20 +445,23 @@ test('the tunnel defaults to on demand and writes no tunnel settings', async t =
 test('tunnel flags reach controller.json and the receipt, survive a plain rerun and go back to the defaults', async t => {
   const x = await harness(t);
   await x.install();
-  Object.assign(x.o, { tunnel: 'always', tunnelIdleMinutes: 30 });
+  Object.assign(x.o, { tunnel: 'always', tunnelIdleMinutes: 30, viewerIdleMinutes: 5 });
   let plan = await x.plan();
   assert.ok(describeHost(plan).includes('Public tunnel: always on'));
   assert.deepEqual([plan.writes.map(item => item.path), plan.restart], [[x.p.config], [x.names.controller]]);
   await applyHost(plan, x.o, x.d, h);
-  assert.deepEqual(JSON.parse(await fs.readFile(x.p.config, 'utf8')).transport, { binaryPath: x.p.binary, startupTimeoutMs: 90_000, mode: 'always', idleMs: 1_800_000 });
-  assert.deepEqual((await x.receipt()).settings, { tunnel: 'always', tunnelIdleMinutes: 30 });
-  delete x.o.tunnel; delete x.o.tunnelIdleMinutes;
+  const written = JSON.parse(await fs.readFile(x.p.config, 'utf8'));
+  assert.deepEqual(written.transport, { binaryPath: x.p.binary, startupTimeoutMs: 90_000, mode: 'always', idleMs: 1_800_000 });
+  assert.deepEqual(written.viewer, { idleMs: 300_000 });
+  assert.deepEqual((await x.receipt()).settings, { tunnel: 'always', tunnelIdleMinutes: 30, viewerIdleMinutes: 5 });
+  delete x.o.tunnel; delete x.o.tunnelIdleMinutes; delete x.o.viewerIdleMinutes;
   plan = await x.plan();
   assert.deepEqual([plan.writes, plan.restart], [[], []], 'a rerun without the flags keeps them');
-  Object.assign(x.o, { tunnel: 'on-demand', tunnelIdleMinutes: 10 });
+  Object.assign(x.o, { tunnel: 'on-demand', tunnelIdleMinutes: 10, viewerIdleMinutes: 3 });
   plan = await x.plan();
   await applyHost(plan, x.o, x.d, h);
   assert.deepEqual(JSON.parse(await fs.readFile(x.p.config, 'utf8')).transport, { binaryPath: x.p.binary, startupTimeoutMs: 90_000 });
+  assert.equal(JSON.parse(await fs.readFile(x.p.config, 'utf8')).viewer, undefined);
   assert.equal((await x.receipt()).settings, undefined);
 });
 

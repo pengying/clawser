@@ -45,7 +45,7 @@ test('CLI registers the 0.7.0 options and drops the Docker desktop ones', async 
   const setup = root.children.get('setup'), doctor = root.children.get('doctor');
   assert.equal(setup.descriptionText, 'Give the agent its own browser on a private virtual screen (noVNC); --cdp keeps the CDP viewer');
   assert.equal(doctor.descriptionText, 'Check the configured browser backend without changing it');
-  assert.deepEqual(setup.options.sort(), ['--browser-profile', '--cdp', '--dry-run', '--migrate-cookies', '--no-migrate-cookies', '--novnc', '--port', '--state-dir', '--tunnel', '--tunnel-idle-minutes', '--yes']);
+  assert.deepEqual(setup.options.sort(), ['--browser-profile', '--cdp', '--dry-run', '--migrate-cookies', '--no-migrate-cookies', '--novnc', '--port', '--state-dir', '--tunnel', '--tunnel-idle-minutes', '--viewer-idle-minutes', '--yes']);
   assert.deepEqual(doctor.options.sort(), ['--browser-profile', '--cdp', '--novnc', '--port', '--state-dir']);
 });
 

@@ -140,7 +140,7 @@ export function registerDesktopPlugin(api, { desktopRpcFactory = defaultRpcFacto
         if (entry?.sessionId !== sessionId || entry.abortedLastRun === true || canceled(completion.owner, sessionKey)) { await ack(completion.id); continue; }
         const agentId = /^agent:([^:]+):/i.exec(sessionKey)[1];
         if (!notifications.has(notificationKey)) {
-          const reason = ['done', 'expired', 'disconnect', 'disconnected', 'revoke', 'revoked', 'tunnel_exit', 'heartbeat_timeout'].includes(completion.reason) ? completion.reason : 'ended';
+          const reason = ['done', 'expired', 'disconnect', 'disconnected', 'revoke', 'revoked', 'tunnel_exit', 'heartbeat_timeout', 'abandoned'].includes(completion.reason) ? completion.reason : 'ended';
           const safe = !fault && completion.resumeAllowed === true && completion.recoveryRequired !== true;
           const text = 'Browser Handoff ' + JSON.stringify(completion.id) + ' ended (' + reason + ') for profile ' + JSON.stringify(config.profile) + '. ' +
             (safe ? 'Input authority returned safely (resumeAllowed=true). Continue only if the original task remains pending. Take a fresh normal browser snapshot and check the actual outcome before continuing. '

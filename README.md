@@ -86,6 +86,10 @@ and paste between your clipboard and the agent's browser.
   browser is its own Chrome on a hidden screen, not your everyday browser.
 - **Links are one-use and private.** One device can open a link, and it expires
   after five minutes by default. Don't forward it.
+- **Closing the page ends the handoff after three minutes.** Reloading the page
+  or a short network drop is fine. Once no viewer has been open for three
+  minutes, for example after you close the tab or your phone sleeps, the
+  handoff ends and the agent hears about it.
 - **The first link can take up to a minute** while the secure tunnel comes up.
   The tunnel runs only while you need it: a link starts it, and it stops ten
   minutes after the last handoff ends, so the viewer isn't reachable from the

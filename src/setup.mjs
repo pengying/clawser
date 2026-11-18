@@ -29,7 +29,7 @@ const object = value => value && typeof value === 'object' && !Array.isArray(val
 const stateRoot = d => d.env.OPENCLAW_STATE_DIR || join(d.homeDir, '.openclaw');
 const REMOVED_FLAGS = ['--cdp-port', '--vnc-port', '--container-name', '--no-default-profile'];
 const TUNNEL_MODES = ['on-demand', 'always'];
-const HOST_SETTING_FLAGS = ['--tunnel', '--tunnel-idle-minutes'];
+const HOST_SETTING_FLAGS = ['--tunnel', '--tunnel-idle-minutes', '--viewer-idle-minutes'];
 
 export function execute(command, args, { input = '', timeoutMs = 30_000, combined = false, env } = {}) {
   return new Promise((accept, reject) => {
@@ -77,7 +77,7 @@ function options(argv, d) {
   if (['help', '--help', '-h'].includes(command)) return { command: 'help' };
   if (!['setup', 'doctor'].includes(command)) throw new Error('Unknown Clawser command: ' + `${command}`);
   const result = { command, stateDir: undefined, profile: undefined, port: undefined, dryRun: false, yes: false, cdp: false, migrateCookies: undefined };
-  const values = { '--state-dir': 'stateDir', '--browser-profile': 'profile', '--port': 'port', '--tunnel': 'tunnel', '--tunnel-idle-minutes': 'tunnelIdleMinutes' };
+  const values = { '--state-dir': 'stateDir', '--browser-profile': 'profile', '--port': 'port', '--tunnel': 'tunnel', '--tunnel-idle-minutes': 'tunnelIdleMinutes', '--viewer-idle-minutes': 'viewerIdleMinutes' };
   const switches = { '--dry-run': ['dryRun', true], '--yes': ['yes', true], '--cdp': ['cdp', true], '--novnc': [], '--migrate-cookies': ['migrateCookies', true], '--no-migrate-cookies': ['migrateCookies', false] };
   const seen = new Set();
   for (let i = 1; i < argv.length; i++) {
@@ -100,12 +100,15 @@ function options(argv, d) {
     } else if (key === 'tunnelIdleMinutes') {
       if (!/^\d+$/.test(value) || Number(value) > 1440) throw new Error('--tunnel-idle-minutes takes a whole number of minutes from 0 to 1440');
       result.tunnelIdleMinutes = Number(value);
+    } else if (key === 'viewerIdleMinutes') {
+      if (!/^\d+$/.test(value) || Number(value) < 1 || Number(value) > 30) throw new Error('--viewer-idle-minutes takes a whole number of minutes from 1 to 30');
+      result.viewerIdleMinutes = Number(value);
     } else result[key] = value;
   }
   if (seen.has('--novnc') && result.cdp) throw new Error('--novnc and --cdp cannot be used together');
   if (seen.has('--migrate-cookies') && seen.has('--no-migrate-cookies')) throw new Error('--migrate-cookies and --no-migrate-cookies cannot be used together');
   for (const flag of HOST_SETTING_FLAGS) if (command !== 'setup' && seen.has(flag)) throw new Error(''.concat(flag) + ' is a setup option');
-  for (const flag of HOST_SETTING_FLAGS) if (result.cdp && seen.has(flag)) throw new Error(''.concat(flag) + ' applies only to the noVNC desktop; the CDP viewer keeps its tunnel up while the plugin runs');
+  for (const flag of HOST_SETTING_FLAGS) if (result.cdp && seen.has(flag)) throw new Error(''.concat(flag) + ' applies only to the noVNC desktop');
   result.stateDir ??= join(stateRoot(d), result.cdp ? 'clawser-cdp' : 'clawser');
   result.profile ??= result.cdp ? 'handoff' : 'clawser';
   result.port ??= result.cdp ? 19410 : 19420;
@@ -393,7 +396,7 @@ export async function runClawser(argv, deps = {}) {
   }
   const o = options(argv, d);
   if (o.command === 'help') {
-    d.log('Usage: clawser <setup|doctor> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--novnc | --cdp] [--migrate-cookies | --no-migrate-cookies] [--tunnel on-demand|always] [--tunnel-idle-minutes <n>]\nDefault setup gives the agent its own browser on a private virtual screen that you view over noVNC. --cdp keeps the one-tab CDP viewer.\nThe noVNC tunnel starts with a link and stops --tunnel-idle-minutes (default 10) after the last one ends; --tunnel always keeps it up.');
+    d.log('Usage: clawser <setup|doctor> [--dry-run] [--yes] [--state-dir <path>] [--browser-profile <name>] [--port <n>] [--novnc | --cdp] [--migrate-cookies | --no-migrate-cookies] [--tunnel on-demand|always] [--tunnel-idle-minutes <n>] [--viewer-idle-minutes <n>]\nDefault setup gives the agent its own browser on a private virtual screen that you view over noVNC. --cdp keeps the one-tab CDP viewer.\nThe noVNC tunnel starts with a link and stops --tunnel-idle-minutes (default 10) after the last one ends; --tunnel always keeps it up. A handoff with no viewer attached for --viewer-idle-minutes (default 3) ends.');
     return { ok: true, command: 'help' };
   }
   let cdp = o.cdp;
