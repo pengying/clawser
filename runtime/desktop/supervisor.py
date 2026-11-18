@@ -165,22 +165,63 @@ def group_pids(pgid):
             except (FileNotFoundError,ProcessLookupError): pass
     return found
 
+# Generations start with the supervisor's boot UUID. Anything else names no boot, and so no earlier one either.
+def earlier_boot(generation):
+    if not isinstance(generation,str) or len(generation)>256: return False
+    boot=generation.split(':',1)[0]
+    return boot!=BOOT and re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',boot) is not None
+
+def keep_settlement(lease_id,result,pids):
+    settlements[lease_id]=result
+    settlement_pids[lease_id]=pids
+    if len(settlements)>32:
+        oldest=next(iter(settlements));del settlements[oldest];settlement_pids.pop(oldest,None)
+
+def orphan_settlement(lease_id,may_be_writable,generation):
+    # No actor and no settlement for this lease. A supervisor restart (or a reboot) loses both, while the
+    # controller still holds the lease. Its actor is provably gone when no x11vnc of ours runs at all: this
+    # supervisor killed an earlier one's at startup and has none of its own. A writable lease also needs
+    # held input released. Only a lease from an earlier boot can ask for that here, since on this boot a
+    # control actor always leaves a cached settlement.
+    global epoch,tainted
+    if tainted: raise RuntimeError('desktop settlement failed; quarantined')
+    if not isinstance(lease_id,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',lease_id): raise ValueError('invalid lease ID')
+    writable=may_be_writable is True
+    previous=earlier_boot(generation)
+    if writable and not previous: raise ValueError('active lease mismatch')
+    if strays(clipboard=False): raise RuntimeError('an x11vnc with no actor is still running')
+    try: result=proof(xproof.settle if writable else xproof.absent,[])
+    except Exception:
+        tainted=True
+        raise
+    epoch+=1
+    result.update(vncProcessesExited=True,readOnly=not writable,inputResetRequired=writable,displayGeneration=display_generation(),browserGeneration=browser_generation(),epoch=epoch,leaseId=lease_id,
+                  retirementReason='supervisor_restarted' if previous else 'no_actor',**({'previousGeneration':generation} if previous else {}))
+    keep_settlement(lease_id,result,[])
+    return result
+
 @serialized
-def retire(lease_id,may_be_writable=None,reason='controller_request'):
+def retire(lease_id,may_be_writable=None,reason='controller_request',generation=None):
     global actor,tainted,epoch,clipboard_owner
     if actor is None and lease_id in settlements:
         cached=settlements[lease_id]
         if may_be_writable is True and cached['readOnly']:
+            # A lease that had no actor on this boot was settled read-only on the controller's word alone. Turning
+            # that writable would settle a writable lease of this boot that this supervisor knows nothing about.
+            if cached.get('retirementReason')=='no_actor': raise ValueError('active lease mismatch')
+            if cached.get('retirementReason')=='supervisor_restarted' and strays(clipboard=False): raise RuntimeError('an x11vnc with no actor is still running')
             try: upgraded=proof(xproof.settle,settlement_pids[lease_id])
             except Exception:
                 tainted=True
                 raise
             epoch+=1
-            upgraded.update(vncProcessesExited=True,readOnly=False,inputResetRequired=True,displayGeneration=display_generation(),browserGeneration=browser_generation(),epoch=epoch,leaseId=lease_id)
+            upgraded.update(vncProcessesExited=True,readOnly=False,inputResetRequired=True,displayGeneration=display_generation(),browserGeneration=browser_generation(),epoch=epoch,leaseId=lease_id,
+                            **({key:cached[key] for key in ('retirementReason','previousGeneration')} if cached.get('retirementReason')=='supervisor_restarted' else {}))
             settlements[lease_id]=upgraded
             return upgraded
         return cached
-    if not actor or actor['leaseId']!=lease_id: raise ValueError('active lease mismatch')
+    if actor is None: return orphan_settlement(lease_id,may_be_writable,generation)
+    if actor['leaseId']!=lease_id: raise ValueError('active lease mismatch')
     current=actor
     reason=current.setdefault('reason',reason)
     process=current['process']
@@ -213,10 +254,7 @@ def retire(lease_id,may_be_writable=None,reason='controller_request'):
         result=proof(xproof.settle if reset_required else xproof.absent,sorted(pids))
         epoch+=1
         result.update(vncProcessesExited=True,readOnly=not reset_required,inputResetRequired=reset_required,displayGeneration=display_generation(),browserGeneration=browser_generation(),epoch=epoch,leaseId=lease_id,retirementReason=reason)
-        settlements[lease_id]=result
-        settlement_pids[lease_id]=sorted(pids)
-        if len(settlements)>32:
-            oldest=next(iter(settlements));del settlements[oldest];settlement_pids.pop(oldest,None)
+        keep_settlement(lease_id,result,sorted(pids))
         actor=None
         if process in children: children.remove(process)
         retry_delay[0]=.5
@@ -283,7 +321,7 @@ def dispatch(request):
         with lifecycle_lock:
             displayed=display_up()
             return {'ready':displayed and not tainted,'browserReady':browser_ready,'displayGeneration':display_generation(),'browserGeneration':browser_generation(),'epoch':epoch,'tainted':tainted,'heartbeatTimeoutMs':HEARTBEAT_TIMEOUT_MS,'viewer':None if not actor else {'leaseId':actor['leaseId'],'role':actor['role'],'pid':actor['process'].pid,'epoch':actor.get('epoch'),'expiresAt':actor['expiresAt'],'heartbeatDeadline':actor.get('heartbeatDeadline'),'retirementAttempts':actor.get('retries',0)},'isolation':'host-user-services','browserSandbox':'chrome-os-sandbox','egressFirewall':False}
-    if op=='stopViewerAndSettle': return retire(request.get('leaseId'),request.get('mayBeWritable'))
+    if op=='stopViewerAndSettle': return retire(request.get('leaseId'),request.get('mayBeWritable'),generation=request.get('displayGeneration'))
     with lifecycle_lock: healthy=display_identity() is not None and not tainted
     if not healthy: raise RuntimeError('desktop unavailable or quarantined; do not resume browser automation')
     if op=='heartbeatViewer': return heartbeat(request.get('leaseId'),request.get('epoch'))
@@ -493,7 +531,7 @@ def shutdown():
         except FileNotFoundError: pass
     raise SystemExit(0)
 
-def strays():
+def strays(clipboard=True):
     found=[]
     display=b'DISPLAY=:%d'%DISPLAY
     for name in os.listdir('/proc'):
@@ -503,7 +541,7 @@ def strays():
             with open('/proc/'+name+'/cmdline','rb') as file: argv=file.read().split(b'\0')
             if os.path.basename(argv[0])==b'x11vnc':
                 if b'-unixsock' in argv[:-1] and os.path.dirname(argv[argv.index(b'-unixsock')+1])==os.fsencode(VNC_DIR): found.append(int(name))
-            elif argv[1:3]==[os.fsencode(CLIPBOARD),b'own']:
+            elif clipboard and argv[1:3]==[os.fsencode(CLIPBOARD),b'own']:
                 with open('/proc/'+name+'/environ','rb') as file: env=file.read().split(b'\0')
                 if display in env: found.append(int(name))
         except (OSError,IndexError): continue

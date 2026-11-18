@@ -14,6 +14,11 @@ const validateActor=(actor,id,role)=>{if(actor?.leaseId!==id||actor.role!==role|
 const inputFenced=receipt=>receipt?.vncProcessesExited===true&&receipt?.xClientsAbsent===true&&((receipt.readOnly===true&&receipt.inputResetRequired===false)||receiptFlags.every(key=>receipt[key]===true));
 export const safeCompletion=row=>inputFenced(row.receipt)&&((row.mayBeWritable===false&&row.receipt.readOnly===true)||row.receipt.snapshotObserved===true);
 const terminal=row=>row.state==='ended'||row.state==='recovery_required';
+const bootOf=generation=>typeof generation==='string'&&generation?generation.split(':')[0]:undefined;
+const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+// A fence a restarted supervisor proved for a lease of its earlier boot. Generations and epochs restart with
+// the boot, so only this receipt may differ from the lease in them, and only when it names the lease's own.
+const supervisorRestarted=(row,receipt)=>receipt?.retirementReason==='supervisor_restarted'&&typeof row.displayGeneration==='string'&&receipt.previousGeneration===row.displayGeneration&&!!bootOf(receipt.displayGeneration)&&bootOf(receipt.displayGeneration)!==bootOf(row.displayGeneration);
 const ownerParts=value=>{let parts;try{parts=JSON.parse(value);}catch{}if(!Array.isArray(parts)||parts.length!==2||parts.some(x=>typeof x!=='string'||!x||x.length>1000))throw new Error('Invalid owner session');return parts;};
 const checkedKey=value=>{if(typeof value!=='string'||!value||value.length>4096)throw new Error('Invalid browser call key');return value;};
 const targetIdentity=tab=>typeof (tab.id||tab.targetId)==='string'&&/^[A-Za-z0-9_-]{1,256}$/.test(tab.id||tab.targetId)?tab.id||tab.targetId:undefined;
@@ -82,14 +87,15 @@ export class DesktopController {
   createGeneration=0;
   writes=Promise.resolve();
   runtimeQueue=Promise.resolve();
-  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,transportRewarmMs=5000,transportMode='on-demand',transportIdleMs=600_000,leaseRetentionMs=7*86_400_000,acknowledgedRetentionMs=3_600_000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
+  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,supervisorWaitMs=45_000,transportRewarmMs=5000,transportMode='on-demand',transportIdleMs=600_000,leaseRetentionMs=7*86_400_000,acknowledgedRetentionMs=3_600_000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
     if(!stateDir||!profile||!runtime||!transport)throw new Error('Desktop controller requires stateDir, profile, runtime and transport');
     if(!Number.isInteger(supervisorHeartbeatMs)||supervisorHeartbeatMs<1||supervisorHeartbeatMs>5000)throw new Error('Invalid supervisor heartbeat interval');
     if(!Number.isInteger(transportRewarmMs)||transportRewarmMs<0||transportRewarmMs>600_000)throw new Error('Invalid tunnel restart delay');
     if(!['on-demand','always'].includes(transportMode))throw new Error('Invalid tunnel mode');
     if(!Number.isInteger(transportIdleMs)||transportIdleMs<0||transportIdleMs>86_400_000)throw new Error('Invalid tunnel idle period');
     for(const value of [leaseRetentionMs,acknowledgedRetentionMs])if(!Number.isInteger(value)||value<0)throw new Error('Invalid lease retention');
-    Object.assign(this,{stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs,transportMode,transportIdleMs,leaseRetentionMs,acknowledgedRetentionMs});
+    if(!Number.isInteger(supervisorWaitMs)||supervisorWaitMs<0||supervisorWaitMs>300_000)throw new Error('Invalid supervisor wait');
+    Object.assign(this,{supervisorWaitMs,stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs,transportMode,transportIdleMs,leaseRetentionMs,acknowledgedRetentionMs});
     this.socketPath=socketPath||join(this.stateDir,'desktop.sock');
     this.transport.on?.('failure',()=>{void this.transportFailed();this.scheduleTransportWarm();});
     this.supervisor={create:params=>this.createActor(params),read:async id=>({state:this.actors.has(id)?'running':'stopped'}),register:params=>this.registration(params.ownedId),promote:params=>this.promote(params),cancelPromotion:id=>this.cancelPromotion(id),demote:params=>this.demote(params),destroy:(id,options)=>this.retire(id,options),verifyExited:async id=>this.ledger.leases[id]?.state==='ended'&&safeCompletion(this.ledger.leases[id]),clipboardRead:id=>this.clipboard(id),clipboardWrite:(id,text)=>this.clipboard(id,text),focusRead:id=>this.focus(id)};
@@ -97,6 +103,22 @@ export class DesktopController {
     this.rpc=new DesktopRpcServer({socketPath:this.socketPath,handler:(method,params,context)=>this.request(method,params,context),onDisconnect:keys=>this.disconnected(keys),onLockLost:()=>{this.poison();this.ready=false;void this.gateway.close();}});
   }
   poison(){this.gate.poison();this.gate.poisonReason=recoveryMessage;}
+  // A restarting supervisor is unreachable for a few seconds (its unit restarts after 3 s; at boot it first waits
+  // for the display), so the fence is retried for supervisorWaitMs before the lease counts as unproven.
+  async settleViewer(leaseId,mayBeWritable,displayGeneration){
+    const deadline=Date.now()+this.supervisorWaitMs;
+    for(;;){
+      try{return await this.runtimeOperation(()=>this.runtime.stopViewerAndSettle({leaseId,mayBeWritable,...(displayGeneration?{displayGeneration}:{})}));}
+      catch(error){if(!['ENOENT','ECONNREFUSED'].includes(error?.code)||Date.now()>=deadline||this.closePromise)throw error;await sleep(500);}
+    }
+  }
+  async supervisorBoot(){
+    for(const deadline=Date.now()+this.supervisorWaitMs;;){
+      const boot=bootOf((await this.runtime.status().catch(()=>undefined))?.displayGeneration);
+      if(boot||Date.now()>=deadline||this.closePromise)return boot;
+      await sleep(500);
+    }
+  }
   // The tunnel makes the viewer reachable from the internet, so by default it runs only on demand: a link starts
   // it, and it stops transportIdleMs after the last handoff ends, which keeps back-to-back links quick. A cold
   // tunnel takes up to a minute. transportMode 'always' starts it with the controller instead (the 1.0.0
@@ -162,6 +184,15 @@ export class DesktopController {
       const uncertain=Object.keys(this.ledger.calls).length>0;
       for(const row of Object.values(this.ledger.leases))if(!terminal(row)){
         row.reason='controller_restart';
+        await this.retire(row.id,{reconcile:true}).catch(()=>{});
+      }
+      // A recovery_required lease from an earlier supervisor boot is checked again: that supervisor and its
+      // actors are gone, and the current one proves a fresh fence (and a writable lease a fresh observation)
+      // before the lease may end. A read-only lease gets the same second chance on any boot. A writable lease
+      // that failed on this boot is left to the offline reconcile helper.
+      const healable=Object.values(this.ledger.leases).filter(row=>row.state==='recovery_required');
+      const boot=healable.some(row=>row.mayBeWritable!==false)?await this.supervisorBoot():undefined;
+      for(const row of healable)if(row.mayBeWritable===false||(boot&&bootOf(row.displayGeneration)&&bootOf(row.displayGeneration)!==boot)){
         await this.retire(row.id,{reconcile:true}).catch(()=>{});
       }
       this.gate.holder=null;
@@ -284,13 +315,20 @@ export class DesktopController {
         if(!readOnly&&!reconcile&&this.gate.holder!==id){if(this.gate.poisonReason&&this.gate.holder===null)this.gate.holder=id;else await this.gate.acquire(id);}
         row.state='retiring';row.recoveryStage='input_fence';recoveryCode='journal_persistence';await this.persist();
         recoveryCode='input_fence_rpc';
-        const receipt=await this.runtimeOperation(()=>this.runtime.stopViewerAndSettle({leaseId:id,mayBeWritable:!readOnly}));
+        const receipt=await this.settleViewer(id,!readOnly,row.displayGeneration);
         recoveryCode='input_fence_receipt';
-        if(!Number.isSafeInteger(receipt.epoch)||receipt.epoch<1||(Number.isSafeInteger(row.epoch)&&receipt.epoch<=row.epoch)||receipt.leaseId!==id||receipt.vncProcessesExited!==true||receipt.xClientsAbsent!==true||(readOnly?(receipt.readOnly!==true||receipt.inputResetRequired!==false):receiptFlags.some(key=>receipt[key]!==true))||!receipt.displayGeneration||(row.displayGeneration&&row.displayGeneration!==receipt.displayGeneration)||(row.browserGeneration&&receipt.browserGeneration&&row.browserGeneration!==receipt.browserGeneration))throw new Error('Input retirement was not proven');
+        const restarted=supervisorRestarted(row,receipt);
+        if(!Number.isSafeInteger(receipt.epoch)||receipt.epoch<1||(!restarted&&Number.isSafeInteger(row.epoch)&&receipt.epoch<=row.epoch)||receipt.leaseId!==id||receipt.vncProcessesExited!==true||receipt.xClientsAbsent!==true||(readOnly?(receipt.readOnly!==true||receipt.inputResetRequired!==false):receiptFlags.some(key=>receipt[key]!==true))||!receipt.displayGeneration||(!restarted&&row.displayGeneration&&row.displayGeneration!==receipt.displayGeneration)||(!restarted&&row.browserGeneration&&receipt.browserGeneration&&row.browserGeneration!==receipt.browserGeneration))throw new Error('Input retirement was not proven');
+        if(restarted&&[undefined,'controller_restart','supervisor_unavailable','retirement_failed'].includes(row.reason))row.reason='supervisor_restarted';
         row.receipt={leaseId:id,...Object.fromEntries(receiptFlags.map(key=>[key,receipt[key]===true])),readOnly,inputResetRequired:!readOnly,displayGeneration:receipt.displayGeneration,browserGeneration:receipt.browserGeneration,epoch:receipt.epoch,snapshotObserved:false};
         if(!readOnly){row.recoveryStage='browser_observation';recoveryCode='journal_persistence';await this.persist();
         recoveryCode='browser_observation';
-        const observation=await this.runtimeOperation(()=>this.observe(this.runtime,row));
+        // After a restart the browser may still be starting too, and no person can be waiting on this lease.
+        let observation;
+        for(const deadline=Date.now()+(restarted?this.supervisorWaitMs:0);;){
+          try{observation=await this.runtimeOperation(()=>this.observe(this.runtime,row));break;}
+          catch(error){if(Date.now()>=deadline||this.closePromise)throw error;await sleep(500);}
+        }
         if(observation?.snapshotObserved!==true||observation.displayGeneration!==receipt.displayGeneration||(receipt.browserGeneration&&observation.browserGeneration!==receipt.browserGeneration))throw new Error('Fresh browser observation was not proven');
         // Copy only nonsecret fence fields into the journal.
         row.receipt={leaseId:id,...Object.fromEntries(receiptFlags.map(key=>[key,true])),displayGeneration:receipt.displayGeneration,browserGeneration:observation.browserGeneration||receipt.displayGeneration,epoch:receipt.epoch,readOnly:false,inputResetRequired:true,snapshotObserved:true,...observedContext(observation)};}

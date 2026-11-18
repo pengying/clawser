@@ -164,7 +164,7 @@ test('on demand, a dropped tunnel comes back during a handoff or its idle grace,
   const{controller:c}=await setup(t,{controller:{transport,transportRewarmMs:0,transportIdleMs:200}});
   await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
   transport.emit('failure',new Error('owned tunnel exited'));
-  await settle();
+  for(let n=0;n<40&&transport.ports.length<2;n++)await settle(10);
   assert.equal(transport.ports.length,2,'restarted: the outage ended the handoff, and the idle grace is running');
   await settle(250);
   assert.deepEqual(transport.stops,[2]);
@@ -707,4 +707,71 @@ test('completions are oldest first and honour the limit',async t=>{
   assert.equal((await c.request('completions',{})).completions.length,50,'50 when the caller names no limit');
   const all=await c.request('completions',{limit:100});assert.equal(all.completions.length,100);
   for(const limit of [0,101,1.5,'5'])await assert.rejects(c.request('completions',{limit}),/completion limit/);
+});
+
+// A supervisor restart or a reboot: the new supervisor has no actor and no cached settlement for the lease,
+// and proves a fresh fence itself, naming the lease's own generation from its earlier boot.
+const restartedReceipt=({leaseId,mayBeWritable},previous='old-boot:1:2')=>({leaseId,epoch:1,displayGeneration:'new-boot:1:3',browserGeneration:'new-boot:guid',readOnly:mayBeWritable===false,inputResetRequired:mayBeWritable!==false,vncProcessesExited:true,xClientsAbsent:true,heldInputCleared:mayBeWritable!==false,xSyncComplete:true,retirementReason:'supervisor_restarted',previousGeneration:previous});
+async function restartedController(t,leases,{runtime={},controller={},calls={}}={}){
+  const{controller:first,stateDir,events}=await setup(t);
+  await first.close();
+  await writeFile(join(stateDir,'ledger.json'),JSON.stringify({version:1,calls,leases}));
+  const settled=[];
+  const base={...first.runtime,status:async()=>({ready:true,browserReady:true,displayGeneration:'new-boot:1:3',browserGeneration:'new-boot:guid'}),stopViewerAndSettle:async params=>{settled.push(params);return restartedReceipt(params);},...runtime};
+  const restarted=new DesktopController({stateDir,profile:'human',runtime:base,transport:first.transport,port:0,supervisorWaitMs:300,observe:async()=>({snapshotObserved:true,displayGeneration:'new-boot:1:3',browserGeneration:'new-boot:guid'}),...controller});
+  await restarted.start();t.after(()=>restarted.close());
+  return{controller:restarted,settled,events,stateDir};
+}
+const controlRow=(id,extra={})=>({id,owner,profile:'human',permission:'control',state:'control',mayBeWritable:true,epoch:7,displayGeneration:'old-boot:1:2',browserGeneration:'old-boot:guid',expiresAt:Date.now()+60_000,...extra});
+
+test('after a reboot, a lease from the old supervisor boot ends as supervisor_restarted without poisoning the gate',async t=>{
+  const{controller:c,settled}=await restartedController(t,{lease:controlRow('lease')});
+  assert.deepEqual(settled,[{leaseId:'lease',mayBeWritable:true,displayGeneration:'old-boot:1:2'}],'the old generation is named so the supervisor can tell its boot apart');
+  const status=await c.request('status',{owner,id:'lease'});
+  assert.equal(status.mode,'ended');assert.equal(status.reason,'supervisor_restarted');
+  assert.equal(status.resumeAllowed,true);assert.equal(status.inputFenced,true);assert.equal(status.snapshotObserved,true);
+  assert.equal(c.health().ready,true);
+  await c.request('automationEnter',{callKey:'after-reboot'});
+});
+
+test('a restarted-supervisor receipt must name the lease\'s own earlier generation',async t=>{
+  for(const previous of ['other-boot:1:2',undefined]){
+    const{controller:c}=await restartedController(t,{lease:controlRow('lease')},{runtime:{stopViewerAndSettle:async params=>({...restartedReceipt(params,previous),...previous===undefined?{previousGeneration:undefined}:{}})}});
+    assert.equal((await c.request('status',{owner,id:'lease'})).mode,'recovery_required',String(previous));
+    assert.equal(c.health().recoveryRequired,true);
+  }
+  // Same boot: generations must still match exactly.
+  const{controller:same}=await restartedController(t,{lease:controlRow('lease',{displayGeneration:'new-boot:1:2'})},{runtime:{stopViewerAndSettle:async params=>restartedReceipt(params,'new-boot:1:2')}});
+  assert.equal((await same.request('status',{owner,id:'lease'})).mode,'recovery_required');
+});
+
+test('the fence waits for a supervisor that is still starting, within supervisorWaitMs',async t=>{
+  let refusals=0;
+  const down=async params=>{if(refusals++<2)throw Object.assign(new Error('connect ENOENT'),{code:'ENOENT'});return restartedReceipt(params);};
+  const{controller:c}=await restartedController(t,{lease:controlRow('lease')},{runtime:{stopViewerAndSettle:down}});
+  assert.equal(refusals,3);
+  assert.equal((await c.request('status',{owner,id:'lease'})).mode,'ended');
+  const{controller:never}=await restartedController(t,{lease:controlRow('lease')},{runtime:{stopViewerAndSettle:async()=>{throw Object.assign(new Error('connect ECONNREFUSED'),{code:'ECONNREFUSED'});}}});
+  assert.equal((await never.request('status',{owner,id:'lease'})).mode,'recovery_required','a supervisor that never answers still leaves recovery required');
+});
+
+test('a browser still starting after a reboot is observed again before the lease ends',async t=>{
+  let observations=0;
+  const{controller:c}=await restartedController(t,{lease:controlRow('lease')},{controller:{observe:async()=>{if(observations++<2)throw new Error('Browser observation unavailable');return{snapshotObserved:true,displayGeneration:'new-boot:1:3',browserGeneration:'new-boot:guid'};}}});
+  assert.equal(observations,3);
+  assert.equal((await c.request('status',{owner,id:'lease'})).mode,'ended');
+});
+
+test('recovery_required leases from an earlier supervisor boot are checked again at start, a writable one from this boot is not',async t=>{
+  const old=controlRow('old',{state:'recovery_required',recoveryCode:'input_fence_rpc',reason:'retirement_failed'});
+  const watch={id:'watch',owner,profile:'human',permission:'watch',state:'recovery_required',mayBeWritable:false,epoch:3,displayGeneration:'new-boot:1:3',browserGeneration:'new-boot:guid'};
+  const{controller:c}=await restartedController(t,{old,watch},{runtime:{stopViewerAndSettle:async params=>{return params.leaseId==='watch'?{leaseId:'watch',epoch:9,displayGeneration:'new-boot:1:3',browserGeneration:'new-boot:guid',readOnly:true,inputResetRequired:false,vncProcessesExited:true,xClientsAbsent:true,heldInputCleared:false,xSyncComplete:true,retirementReason:'no_actor'}:restartedReceipt(params);}}});
+  assert.equal((await c.request('status',{owner,id:'old'})).reason,'supervisor_restarted');
+  assert.equal((await c.request('status',{owner,id:'old'})).mode,'ended');
+  assert.equal((await c.request('status',{owner,id:'watch'})).mode,'ended','a read-only lease gets a second chance on any boot');
+  assert.equal(c.health().ready,true);
+  const current=controlRow('current',{state:'recovery_required',displayGeneration:'new-boot:1:3',browserGeneration:'new-boot:guid'});
+  const{controller:kept,settled:none}=await restartedController(t,{current});
+  assert.deepEqual(none,[],'left to the offline reconcile helper');
+  assert.equal(kept.health().recoveryRequired,true);
 });
