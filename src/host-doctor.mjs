@@ -3,7 +3,7 @@ import { isAbsolute, join } from 'node:path';
 import { resolveHandoffBrowser } from './browser-config.mjs';
 import { cookieEncryption, showProperties } from './host-browser.mjs';
 import { verifyHostDeps } from './host-deps.mjs';
-import { LINGER_OFF, ROLES, assertHealth, assertProfilePort, hostConfigPatch, hostLocations, lingerOn, readHostReceipt, renderHost, unitDirMoved } from './host-setup.mjs';
+import { LINGER_OFF, OPENBOX_GENERATOR, ROLES, assertHealth, assertProfilePort, hostConfigPatch, hostLocations, lingerOn, readHostReceipt, renderHost, unitDirMoved } from './host-setup.mjs';
 import { chromeArgs } from './host-units.mjs';
 import { inspectSetupActivation, requireActiveActivation } from './setup-activation.mjs';
 
@@ -127,6 +127,10 @@ export async function diagnoseHost(o, d, h, checks) {
       // Setup refuses a unit file others can write, so doctor does too.
       await h.privatePath(path, 'file', d);
     }
+  });
+  // An rc.xml from before the lockdown still offers openbox's menu, which opens a terminal, to anyone in control.
+  if (saved.units?.[p.names.windowManager]) await check('window manager config', async () => {
+    if (saved.openboxGenerator !== OPENBOX_GENERATOR) throw new Error("openbox still has the menus and commands an older Clawser left in its config, and a control link can reach them; rerun openclaw clawser setup --yes");
   });
   await check('controller health', async () => assertHealth(await d.controllerHealth(p.socket), saved.cdpPort, saved.profile));
   await check('Gateway activation', async () => {

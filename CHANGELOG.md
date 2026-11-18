@@ -1,5 +1,9 @@
 # Changes
 
+## Unreleased
+
+- Fix a way out of the browser for whoever holds a control link. The window manager on Clawser's virtual screen kept openbox's default menus and shortcuts. A right-click on the bare screen opened openbox's menu, which falls back to the system menu with a terminal in it, and keys such as Super+D (show desktop), Super+E (run a program) and Alt+F4 (close) still worked, so a person in control could open a terminal as the owner. Clawser's openbox config now keeps only focus and raise on click, Alt+Tab between windows, and moving or resizing a window with the mouse. It has no menu, command, desktop-switching, show-desktop, close or minimize action, and its menu is an empty file of Clawser's own. Run `openclaw clawser setup --yes` once after upgrading: setup writes the new config and restarts the window manager, which leaves the browser and its tabs open. Until then `doctor` fails its new `window manager config` row.
+
 ## 1.0.1
 
 - New ClawHub and plugin descriptions that say what Clawser is for.

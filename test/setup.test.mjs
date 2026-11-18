@@ -482,8 +482,8 @@ test('doctor validates an owned installation without downloads or mutations', as
   const result = await runClawser(['doctor', '--state-dir', h.stateDir], h.deps);
   assert.equal(result.ok, true, JSON.stringify(result.checks));
   assert.deepEqual(Object.keys(result).sort(), ['activation', 'backend', 'checks', 'command', 'display', 'ok', 'pending', 'stateDir', 'units']);
-  assert.deepEqual(result.checks.map(row => row.name).slice(-14), ['installation', 'ownership', 'configuration', 'pinned assets', 'host dependencies', 'services', 'display', 'browser window',
-    'CDP origin', 'profile directory', 'linger', 'units current', 'controller health', 'Gateway activation']);
+  assert.deepEqual(result.checks.map(row => row.name).slice(-15), ['installation', 'ownership', 'configuration', 'pinned assets', 'host dependencies', 'services', 'display', 'browser window',
+    'CDP origin', 'profile directory', 'linger', 'units current', 'window manager config', 'controller health', 'Gateway activation']);
   assert.deepEqual(h.mutations(), []);
   assert.equal(h.calls.some(call => call.command === 'fetch'), false);
 });

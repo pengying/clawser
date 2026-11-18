@@ -218,7 +218,7 @@ comes from the state directory. Setup and doctor print the exact names.
 | Service | What it runs |
 | --- | --- |
 | display | Xvfb, a 1920x1080 virtual screen that listens on no network port |
-| wm | openbox, with a config file Clawser generates |
+| wm | openbox, with a config file Clawser generates. It has no menu or command bindings, so a control link reaches only browser windows |
 | browser | the agent's Chrome on that screen |
 | supervisor | one short-lived x11vnc per viewer session, on a private socket |
 | desktop | the controller and the phone viewer |
@@ -294,6 +294,7 @@ Doctor is read-only. On a noVNC install it prints one row per check:
 | `profile directory` | The profile folder exists and only you can read it |
 | `linger` | Lingering is on |
 | `units current` | The unit files match what setup would write now |
+| `window manager config` | openbox's config comes from this version's generator, with no menus or commands. An older one fails until `setup --yes` reruns |
 | `controller health` | The controller is ready |
 | `Gateway activation` | OpenClaw is running this setup |
 | `cookie store` | Option B only: a warning when keyring cookies remain |

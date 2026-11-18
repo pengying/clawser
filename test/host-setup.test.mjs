@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { ARTIFACTS, setupHelpers as h } from '../src/setup.mjs';
-import { applyHost, describeHost, hostLocations, planHost } from '../src/host-setup.mjs';
+import { EMPTY_OPENBOX_MENU, OPENBOX_GENERATOR, applyHost, describeHost, hostLocations, planHost } from '../src/host-setup.mjs';
 import { unitNames } from '../src/host-units.mjs';
 import { xauthorityEntry } from '../src/host-display.mjs';
 import { SNAP_MESSAGE } from '../src/host-browser.mjs';
@@ -167,6 +167,10 @@ test('option A creates a private profile, a cookie and five owned units, then ma
   assert.equal(saved.configDigest, digest(await fs.readFile(x.p.config)));
   assert.equal(saved.supervisorConfigDigest, digest(await fs.readFile(x.p.supervisorConfig)));
   assert.equal(saved.openboxDigest, digest(await fs.readFile(x.p.openboxConfig)));
+  assert.equal(saved.openboxGenerator, OPENBOX_GENERATOR);
+  assert.equal(await fs.readFile(x.p.openboxMenu, 'utf8'), EMPTY_OPENBOX_MENU);
+  assert.equal(await mode(x.p.openboxMenu), 0o600);
+  assert.equal(saved.openboxMenuDigest, digest(EMPTY_OPENBOX_MENU));
   assert.match(saved.assetsDigest, /^[a-f0-9]{64}$/);
   assert.deepEqual(saved.hostDeps, { binaries: x.binaries });
   const supervisor = JSON.parse(await fs.readFile(x.p.supervisorConfig, 'utf8'));
@@ -427,6 +431,34 @@ test('a file already matching the plan with no receipt digest is current and the
   assert.deepEqual([plan.writes, plan.start, plan.restart], [[], [], []]);
   await applyHost(plan, x.o, x.d, h);
   assert.equal((await x.receipt()).units[x.names.browser], digest(await fs.readFile(join(x.unitDir, x.names.browser))));
+});
+
+// Before the lockdown, rc.xml kept openbox's menus and commands, and no menu.xml of Clawser's own existed.
+test('a rerun over an rc.xml an older generator wrote regenerates it, writes the empty menu and restarts only the window manager', async t => {
+  const x = await harness(t);
+  await x.install();
+  await fs.rm(x.p.openboxMenu);
+  await rewriteReceipt(x, saved => { delete saved.openboxGenerator; delete saved.openboxMenuDigest; });
+  const plan = await x.plan();
+  assert.deepEqual(plan.writes.map(item => item.path), [x.p.openboxMenu, x.p.openboxConfig]);
+  assert.deepEqual([plan.start, plan.restart, plan.disruptive], [[], [x.names.windowManager], true]);
+  x.calls.length = 0;
+  await applyHost(plan, x.o, x.d, h);
+  assert.equal(x.calls.filter(call => String(call.args?.[0]).endsWith('/openbox_config.py')).length, 1);
+  assert.deepEqual(systemctl(x.calls, 'restart'), [x.names.windowManager]);
+  const saved = await x.receipt();
+  assert.equal(saved.openboxGenerator, OPENBOX_GENERATOR);
+  assert.equal(saved.openboxDigest, digest(await fs.readFile(x.p.openboxConfig)));
+  assert.equal(await fs.readFile(x.p.openboxMenu, 'utf8'), EMPTY_OPENBOX_MENU);
+  const again = await x.plan();
+  assert.deepEqual([again.writes, again.restart], [[], []]);
+});
+
+test('an openbox menu changed outside Clawser is refused by path', async t => {
+  const x = await harness(t);
+  await x.install();
+  await fs.writeFile(x.p.openboxMenu, '<openbox_menu><item label="Terminal"/></openbox_menu>\n');
+  await assert.rejects(x.plan(), error => error.message === changedOutside(x.p.openboxMenu));
 });
 
 test('an openbox config changed outside Clawser is refused by path', async t => {

@@ -70,6 +70,14 @@ the viewer origin.
   machine you don't share.
 - **A link shows every tab.** Whoever opens a noVNC link sees every tab in the
   agent's browser, not just the one the agent was using.
+- **Control reaches only browser windows.** Whoever holds control can send any
+  key or click to the virtual screen. Clawser's openbox config therefore
+  offers no menu, command, desktop switching, show-desktop, close or minimize
+  action, by key or by mouse, and its menu file is an empty one of Clawser's
+  own, so openbox can't fall back to the system menu, which opens a terminal.
+  Clicks still focus and raise windows, Alt+Tab moves between them, and an
+  Alt-drag moves one. Installs set up by 1.0.1 or earlier get this config on the next
+  `setup --yes`; until then doctor fails its `window manager config` row.
 - **Cookies are protected by file permissions only.** Clawser's browser uses
   Chrome's basic password store, so it starts signed in after a reboot with
   nobody at the machine. Cookies are stored unencrypted on disk. The profile

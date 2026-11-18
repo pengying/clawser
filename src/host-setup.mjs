@@ -17,6 +17,10 @@ const json = value => JSON.stringify(value, null, 2) + '\n';
 const fieldsMatch = (current, wanted) => object(current) && Object.entries(wanted).every(([key, value]) => current[key] === value) && Object.keys(current).every(key => own(wanted, key));
 const profileConfig = cdpPort => ({ cdpUrl: cdpUrlFor(cdpPort), driver: 'openclaw', engine: 'chromium', attachOnly: true });
 export const ROLES = ['display', 'windowManager', 'browser', 'supervisor', 'controller'];
+// Bumped whenever openbox_config.py changes what a control link can reach, so setup regenerates an rc.xml an older one wrote.
+export const OPENBOX_GENERATOR = 2;
+// openbox falls back to the system menu.xml, which opens a terminal, when its menu file is missing or invalid.
+export const EMPTY_OPENBOX_MENU = '<?xml version="1.0" encoding="UTF-8"?>\n<openbox_menu xmlns="http://openbox.org/3.4/menu"/>\n';
 const CDP_PORTS = Array.from({ length: 10 }, (_, i) => 18820 + i);
 const resolver = d => d.hostResolver ?? { plan: planHostDeps, install: installHostDeps, verify: verifyHostDeps, describe: describeHostPlan };
 
@@ -26,7 +30,7 @@ export function hostLocations(o, d) {
   const state = join(o.stateDir, 'state'), runtime = join(state, 'runtime'), desktop = join(d.packageDir, 'runtime/desktop');
   return {
     marker: join(o.stateDir, 'setup.json'), config: join(o.stateDir, 'controller.json'), xauthority: join(o.stateDir, 'xauthority'),
-    openboxConfig: join(o.stateDir, 'openbox/rc.xml'), profileDir: join(o.stateDir, 'browser/profile'),
+    openboxConfig: join(o.stateDir, 'openbox/rc.xml'), openboxMenu: join(o.stateDir, 'openbox/menu.xml'), profileDir: join(o.stateDir, 'browser/profile'),
     state, socket: join(state, 'desktop.sock'), runtime, supervisorConfig: join(runtime, 'supervisor.json'), control: join(runtime, 'control.sock'), vncDir: join(runtime, 'vnc'),
     binary: join(o.stateDir, 'bin/cloudflared'), assets: join(o.stateDir, 'vendor/novnc-1.7.0'),
     unitDir: join(configRoot, 'systemd/user'), names: unitNames(o.stateDir),
@@ -208,7 +212,9 @@ export async function planHost(o, d, h) {
   const names = ROLES.map(role => p.names[role]).filter(name => units[name]);
   const files = [
     { path: p.xauthority, kind: 'xauthority', consumer: p.names.display },
-    ...wm ? [{ path: p.openboxConfig, key: 'openboxDigest', recorded: v2?.openboxDigest, consumer: p.names.windowManager }] : [],
+    // The empty menu goes first, so rc.xml never names a missing menu file.
+    ...wm ? [{ path: p.openboxMenu, text: EMPTY_OPENBOX_MENU, key: 'openboxMenuDigest', recorded: v2?.openboxMenuDigest, consumer: p.names.windowManager },
+      { path: p.openboxConfig, key: 'openboxDigest', recorded: v2?.openboxDigest, generator: OPENBOX_GENERATOR, consumer: p.names.windowManager }] : [],
     { path: p.supervisorConfig, text: json(supervisor), key: 'supervisorConfigDigest', recorded: v2?.supervisorConfigDigest, consumer: p.names.supervisor },
     { path: p.config, text: json(controller), key: 'configDigest', recorded: (v2 ?? v1)?.configDigest, consumer: p.names.controller },
     ...names.map(name => ({ path: unitPath(p, name), text: units[name], unit: name, consumer: name,
@@ -219,6 +225,8 @@ export async function planHost(o, d, h) {
     if (file.kind !== 'xauthority') file.state = await classify(file.path, file.text, file.recorded, d, h);
     else if (await h.stat(file.path, d)) { await h.privatePath(file.path, 'file', d); file.state = 'current'; }
     else file.state = 'write';
+    // An rc.xml an older generator wrote still binds menus and commands, so it is generated again.
+    if (file.generator && file.state === 'current' && v2?.openboxGenerator !== file.generator) file.state = 'rewrite';
   }
   const status = {};
   for (const name of names) status[name] = await unitStatus(name, p, d);
@@ -271,7 +279,7 @@ export function assertHealth(health, cdpPort, profile) {
   if (health?.ready !== true || health.recoveryRequired === true || health.profile !== profile || health.cdpUrl !== cdpUrlFor(cdpPort)) throw new Error('Controller health or profile identity is not ready; inspect its user-service journal before retrying');
 }
 
-const record = (saved, file, digest) => { if (file.unit) saved.units[file.unit] = digest; else if (file.key) saved[file.key] = digest; };
+const record = (saved, file, digest) => { if (file.unit) saved.units[file.unit] = digest; else if (file.key) saved[file.key] = digest; if (file.generator) saved.openboxGenerator = file.generator; };
 const save = (saved, p, d, h) => h.atomicPrivate(p.marker, json(saved), d);
 
 const browserRecord = plan => ({ path: plan.browser.path, existingArgs: plan.browser.existingArgs, env: plan.browser.env });
