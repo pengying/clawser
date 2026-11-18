@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { unitNames } from './host-units.mjs';
 
 // Bumped whenever openbox_config.py changes what a control link can reach, so setup regenerates an rc.xml an older one wrote.
-export const OPENBOX_GENERATOR = 2;
+export const OPENBOX_GENERATOR = 3;
 const RECEIPT_IDENTITY = 'clawser-setup-v2';
 
 export const STALE_WINDOW_MANAGER = "Control links are unavailable: the window manager on the agent's screen still runs a config from before Clawser's lockdown, and a person in control could open its menu or a terminal from it. Run openclaw clawser setup --yes, then create the link again. Watch links still work.";

@@ -151,3 +151,113 @@ test('openbox loads the generated config and its empty menu without falling back
   wm.kill('SIGTERM');
   await new Promise(resolve => wm.exitCode === null ? wm.once('exit', resolve) : resolve());
 });
+
+// Review V6: the generator matched only namespaced tags, so a source without xmlns kept every binding, exit 0.
+test('a source without the openbox namespace is locked down the same way', async () => {
+  const bare = await generate(source.replace(' xmlns="http://openbox.org/3.4/rc"', ''));
+  const namespaced = await generate();
+  try {
+    await assertLockedDown(bare.out);
+    assert.equal(await fs.readFile(bare.out, 'utf8'), (await fs.readFile(namespaced.out, 'utf8')).replace(join(namespaced.dir, 'menu.xml'), join(bare.dir, 'menu.xml')));
+  } finally { await fs.rm(bare.dir, { recursive: true, force: true }); await fs.rm(namespaced.dir, { recursive: true, force: true }); }
+});
+
+// Review S2: with no keyboard or mouse section openbox applies its built-in bindings, among them Alt+F4.
+test('keyboard and mouse sections are always written, empty if the source has none', async () => {
+  const { dir, out } = await generate('<?xml version="1.0"?>\n<openbox_config xmlns="http://openbox.org/3.4/rc"><desktops><number>2</number></desktops></openbox_config>\n');
+  try {
+    assert.deepEqual((await query(out, './o:keyboard')).map(([tag]) => tag), ['keyboard']);
+    assert.deepEqual((await query(out, './o:mouse')).map(([tag]) => tag), ['mouse']);
+    assert.deepEqual(await query(out, './o:keyboard/*'), []);
+    assert.deepEqual(await query(out, './/o:action'), []);
+    assert.deepEqual(await query(out, './o:desktops/o:number'), [['number', '', '1']]);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('a Root context loses even its allowed actions, and a stray top-level action goes too', async () => {
+  const { dir, out } = await generate(`<openbox_config xmlns="http://openbox.org/3.4/rc"><action name="Execute"><command>xterm</command></action>
+<keyboard/><mouse><context name="Root"><mousebind button="Left" action="Press"><action name="Focus"/></mousebind></context></mouse></openbox_config>`);
+  try {
+    assert.deepEqual(await query(out, './/o:action'), []);
+    assert.deepEqual(await query(out, './o:mouse/o:context'), []);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('the generator refuses a file that is not an openbox config and writes nothing', async () => {
+  const dir = await fs.mkdtemp(join(tmpdir(), 'clawser-openbox-'));
+  try {
+    await fs.writeFile(join(dir, 'source.xml'), '<menu><item label="Terminal"/></menu>');
+    await assert.rejects(execute('python3', [script, join(dir, 'source.xml'), join(dir, 'rc.xml')]), error => error.code === 1 && /not an openbox rc\.xml/.test(error.stderr));
+    await assert.rejects(fs.access(join(dir, 'rc.xml')));
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+// The independent check that runs before every write: anything outside the allowlist fails the run.
+test('the final check names every action, section or menu outside the allowlist', async () => {
+  const check = xml => execute('python3', ['-c', `
+import importlib.util,sys,json,xml.etree.ElementTree as E
+spec=importlib.util.spec_from_file_location('openbox_config',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+print(json.dumps(m.leftovers(E.fromstring(sys.argv[2]),'/s/rc.xml')))
+`, script, xml]).then(r => JSON.parse(r.stdout));
+  const ok = '<keyboard><keybind key="A-Tab"><action name="NextWindow"/></keybind></keyboard><mouse><context name="Client"><mousebind button="Left" action="Press"><action name="Focus"/></mousebind></context></mouse><menu><file>/s/menu.xml</file></menu>';
+  const wrap = body => `<openbox_config xmlns="http://openbox.org/3.4/rc">${body}</openbox_config>`;
+  assert.deepEqual(await check(wrap(ok)), []);
+  assert.deepEqual(await check(wrap(ok.replace('NextWindow', 'Execute'))), ['action Execute']);
+  assert.deepEqual(await check(wrap(ok.replace('Focus', 'Close'))), ['action Close']);
+  assert.deepEqual(await check(wrap(ok.replace('NextWindow', 'Move'))), ['action Move'], 'a key may not move a window');
+  assert.deepEqual(await check(wrap(ok.replace(/<mouse>.*<\/mouse>/, ''))), ['0 mouse sections']);
+  assert.deepEqual(await check(wrap(ok + '<keyboard/>')), ['2 keyboard sections']);
+  assert.deepEqual(await check(wrap(ok.replace('/s/menu.xml', '/etc/xdg/openbox/menu.xml'))), ["a menu file other than Clawser's empty one"]);
+  assert.deepEqual(await check(wrap(ok.replace('name="Client"', 'name="Root"'))), ['a binding on the bare desktop']);
+  assert.deepEqual(await check(wrap(ok + '<action name="ShowMenu"/>')), ['action ShowMenu']);
+  assert.deepEqual(await check(wrap(ok).replace(' xmlns="http://openbox.org/3.4/rc"', '').replace('NextWindow', 'Execute')), ['action Execute'], 'judged by local names');
+});
+
+// A live probe on a throwaway display: the distribution config opens menus and closes windows, the generated one does neither.
+const probeTools = ['openbox', 'xdotool', 'xmessage', 'xwininfo'].filter(bin => !has(bin));
+test('on a live openbox, a root click and the default keys do nothing under the generated config', { skip: noX || (probeTools.length ? 'needs ' + probeTools.join(', ') : false) }, async t => {
+  const x = await startX();
+  t.after(() => x.stop());
+  const run = (command, args) => execute(command, args, { env: x.env }).then(r => r.stdout.trim(), () => '');
+  const visible = async () => (await run('xdotool', ['search', '--onlyvisible', '--name', '.*'])).split('\n').filter(Boolean).length;
+  const mapState = async id => (await run('xwininfo', ['-id', id])).match(/Map State: (\S+)/)?.[1];
+  async function probe(config) {
+    const wm = spawn('openbox', ['--config-file', config], { env: x.env, stdio: 'ignore' });
+    const win = spawn('xmessage', ['-geometry', '200x80+300+300', 'clawser probe'], { env: x.env, stdio: 'ignore' });
+    try {
+      let id = '';
+      for (let n = 0; n < 50 && !id; n++) { await sleep(100); id = (await run('xdotool', ['search', '--onlyvisible', '--class', 'xmessage'])).split('\n')[0]; }
+      assert.ok(id, 'the probe window appeared');
+      await sleep(500);
+      const seen = {}, base = await visible();
+      const opens = async keys => { await keys(); await sleep(400); const more = await visible() > base; await run('xdotool', ['key', 'Escape']); await sleep(200); return more; };
+      seen.rootRight = await opens(() => run('xdotool', ['mousemove', '10', '10', 'click', '3']));
+      seen.rootMiddle = await opens(() => run('xdotool', ['mousemove', '10', '10', 'click', '2']));
+      seen.clientMenu = await opens(async () => { await run('xdotool', ['windowfocus', id]); await run('xdotool', ['key', 'alt+space']); });
+      await run('xdotool', ['windowfocus', id]); await run('xdotool', ['key', 'super+d']); await sleep(400);
+      seen.showDesktop = await mapState(id) !== 'IsViewable';
+      if (seen.showDesktop) { await run('xdotool', ['key', 'super+d']); await sleep(300); }
+      await run('xdotool', ['windowfocus', id]); await run('xdotool', ['key', 'alt+F4']);
+      for (let n = 0; n < 8 && win.exitCode === null; n++) await sleep(100);
+      seen.close = win.exitCode !== null || win.signalCode !== null;
+      return seen;
+    } finally {
+      for (const child of [win, wm]) if (child.exitCode === null && child.signalCode === null) { child.kill('SIGKILL'); await new Promise(resolve => child.once('exit', resolve)); }
+    }
+  }
+  const unlocked = await fs.access(distroRc).then(() => distroRc, () => undefined);
+  const dir = await fs.mkdtemp(join(tmpdir(), 'clawser-openbox-live-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  // The probe must be able to see each escape, or its silence below would prove nothing.
+  const raw = join(dir, 'raw.xml');
+  await fs.writeFile(raw, unlocked ? await fs.readFile(unlocked, 'utf8') : source);
+  const before = await probe(raw);
+  assert.equal(before.rootRight, true, 'the unlocked config opens its root menu');
+  assert.equal(before.close, true, 'the unlocked config closes a window on Alt+F4');
+  for (const input of [unlocked ? await fs.readFile(unlocked, 'utf8') : source, source.replace(' xmlns="http://openbox.org/3.4/rc"', ''), '<openbox_config xmlns="http://openbox.org/3.4/rc"/>']) {
+    const { dir: out, out: config } = await generate(input);
+    t.after(() => fs.rm(out, { recursive: true, force: true }));
+    await fs.writeFile(join(out, 'menu.xml'), EMPTY_OPENBOX_MENU, { mode: 0o600 });
+    assert.deepEqual(await probe(config), { rootRight: false, rootMiddle: false, clientMenu: false, showDesktop: false, close: false });
+  }
+});
