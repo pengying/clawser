@@ -539,8 +539,8 @@ def strays(clipboard=True):
         try:
             if os.stat('/proc/'+name).st_uid!=os.getuid(): continue
             with open('/proc/'+name+'/cmdline','rb') as file: argv=file.read().split(b'\0')
-            if os.path.basename(argv[0])==b'x11vnc':
-                if b'-unixsock' in argv[:-1] and os.path.dirname(argv[argv.index(b'-unixsock')+1])==os.fsencode(VNC_DIR): found.append(int(name))
+            # By its socket in our VNC folder, whatever its argv[0] says: a wrapped or renamed x11vnc counts too.
+            if b'-unixsock' in argv[:-1] and os.path.dirname(argv[argv.index(b'-unixsock')+1])==os.fsencode(VNC_DIR): found.append(int(name))
             elif clipboard and argv[1:3]==[os.fsencode(CLIPBOARD),b'own']:
                 with open('/proc/'+name+'/environ','rb') as file: env=file.read().split(b'\0')
                 if display in env: found.append(int(name))

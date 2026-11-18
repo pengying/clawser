@@ -594,6 +594,37 @@ test('a restarted supervisor fences a lease of its earlier boot afresh, and refu
   assert.equal((await h.rpc('status')).tainted, false);
 });
 
+// Review: the stray scan is the only evidence behind vncProcessesExited in an orphan settlement.
+test('an orphan settlement is refused while an x11vnc of ours runs, found by its socket whatever its name', opts, async t => {
+  const h = await desktop(t);
+  const sock = join(h.vncDir, 'vnc-0123456789abcdef.sock');
+  const stray = argv0 => {
+    // python3 stands in for x11vnc; only argv[0] and the -unixsock argument differ between the two.
+    const child = spawn('python3', ['-c', 'import time; time.sleep(60)', '-unixsock', sock], { argv0, detached: true, stdio: 'ignore' });
+    h.track(child.pid);
+    return child;
+  };
+  for (const argv0 of ['x11vnc', '/opt/wrapped/vnc-server']) {
+    const child = stray(argv0);
+    await until(async () => (await fs.readFile(`/proc/${child.pid}/cmdline`, 'utf8')).includes('-unixsock'), 3000, 'the stray to start');
+    await assert.rejects(h.rpc('stopViewerAndSettle', { leaseId: 'orphan-' + argv0.length, mayBeWritable: false }), /an x11vnc with no actor is still running/, argv0);
+    child.kill('SIGKILL');
+    await until(() => !alive(child.pid) || fs.readFile(`/proc/${child.pid}/stat`, 'utf8').then(stat => stat.split(') ')[1]?.startsWith('Z'), () => true), 3000, 'the stray to exit');
+  }
+  assert.equal((await h.rpc('status')).tainted, false, 'a refusal is not a fault');
+  assert.equal((await h.rpc('stopViewerAndSettle', { leaseId: 'orphan-after', mayBeWritable: false })).retirementReason, 'no_actor');
+});
+
+test('a tainted supervisor or a lost display refuses an orphan settlement', opts, async t => {
+  const h = await desktop(t);
+  process.kill(h.x.pid, 'SIGTERM');
+  // Racing the monitor: either the proof fails on the dead display and taints, or the monitor tainted first.
+  await assert.rejects(h.rpc('stopViewerAndSettle', { leaseId: 'display-gone', mayBeWritable: false }));
+  await until(async () => (await h.rpc('status')).tainted, 5000, 'the supervisor to quarantine itself');
+  await assert.rejects(h.rpc('stopViewerAndSettle', { leaseId: 'after-taint', mayBeWritable: false }), /quarantined/);
+  await assert.rejects(h.rpc('stopViewerAndSettle', { leaseId: 'after-taint', mayBeWritable: true, displayGeneration: randomUUID() + ':1' }), /quarantined/, 'not even an earlier boot');
+});
+
 test('clipboard round-trips for the control lease only', opts, async t => {
   const h = await desktop(t);
   await assert.rejects(h.rpc('clipboardRead'), /control lease/);

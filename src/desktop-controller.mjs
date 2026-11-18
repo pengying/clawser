@@ -53,6 +53,29 @@ export async function activateDesktopTarget(runtime,targetId){
   return{targetId};
 }
 
+// A person in control may Alt-drag or resize the browser window; the agent gets it back maximized. Only the window
+// of the page the handback observed, which is the one the person left in front, so no other window is raised and
+// the human-selected context stays. Best effort: only window bounds change, never a page.
+export async function maximizeObservedWindow(runtime,targetId){
+  if(typeof targetId!=='string'||!/^[A-Za-z0-9_-]{1,256}$/.test(targetId))return false;
+  const origin=validateCdpUrl(runtime.cdpUrl).origin;
+  const response=await fetch(origin + '/json/version',{redirect:'error',signal:AbortSignal.timeout(5000)});
+  if(!response.ok)throw new Error('Browser unavailable');
+  const endpoint=new URL((await response.json()).webSocketDebuggerUrl);
+  if(endpoint.protocol!=='ws:'||endpoint.host!==new URL(origin).host||endpoint.username||endpoint.password)throw new Error('Invalid local CDP endpoint');
+  const browser=await new CdpConnection({commandTimeoutMs:3000}).connect(endpoint.href);
+  try{
+    const window=await browser.send('Browser.getWindowForTarget',{targetId});
+    if(!Number.isInteger(window?.windowId))return false;
+    const state=window.bounds?.windowState;
+    if(state==='maximized'||state==='fullscreen')return false;
+    // Chrome draws its own minimize button; a minimized window comes back first, as when a link is created.
+    if(state==='minimized')await browser.send('Browser.setWindowBounds',{windowId:window.windowId,bounds:{windowState:'normal'}});
+    await browser.send('Browser.setWindowBounds',{windowId:window.windowId,bounds:{windowState:'maximized'}});
+    return true;
+  }finally{browser.close();}
+}
+
 // This connection observes state only. The resumed agent still needs a normal
 // browser snapshot and task-specific success check before issuing more input.
 export async function observeDesktop(runtime, row) {
@@ -95,7 +118,7 @@ export class DesktopController {
   createGeneration=0;
   writes=Promise.resolve();
   runtimeQueue=Promise.resolve();
-  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,supervisorWaitMs=45_000,processInfo=readProcessInfo,windowManager,transportRewarmMs=5000,transportMode='on-demand',transportIdleMs=600_000,leaseRetentionMs=7*86_400_000,acknowledgedRetentionMs=3_600_000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
+  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,supervisorWaitMs=45_000,processInfo=readProcessInfo,windowManager,transportRewarmMs=5000,transportMode='on-demand',transportIdleMs=600_000,leaseRetentionMs=7*86_400_000,acknowledgedRetentionMs=3_600_000,observe=observeDesktop,activateTarget=activateDesktopTarget,maximize,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
     if(!stateDir||!profile||!runtime||!transport)throw new Error('Desktop controller requires stateDir, profile, runtime and transport');
     if(!Number.isInteger(supervisorHeartbeatMs)||supervisorHeartbeatMs<1||supervisorHeartbeatMs>5000)throw new Error('Invalid supervisor heartbeat interval');
     if(!Number.isInteger(transportRewarmMs)||transportRewarmMs<0||transportRewarmMs>600_000)throw new Error('Invalid tunnel restart delay');
@@ -103,7 +126,7 @@ export class DesktopController {
     if(!Number.isInteger(transportIdleMs)||transportIdleMs<0||transportIdleMs>86_400_000)throw new Error('Invalid tunnel idle period');
     for(const value of [leaseRetentionMs,acknowledgedRetentionMs])if(!Number.isInteger(value)||value<0)throw new Error('Invalid lease retention');
     if(!Number.isInteger(supervisorWaitMs)||supervisorWaitMs<0||supervisorWaitMs>300_000)throw new Error('Invalid supervisor wait');
-    Object.assign(this,{supervisorWaitMs,processInfo,windowManager,stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs,transportMode,transportIdleMs,leaseRetentionMs,acknowledgedRetentionMs});
+    Object.assign(this,{supervisorWaitMs,processInfo,windowManager,maximize,stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs,transportMode,transportIdleMs,leaseRetentionMs,acknowledgedRetentionMs});
     this.socketPath=socketPath||join(this.stateDir,'desktop.sock');
     // The outage ends every handoff first. Rewarming only afterwards finds the idle grace already running; a timer
     // set at once could fire after a lease ended but before its grace began, and leave the tunnel down.
@@ -384,6 +407,8 @@ export class DesktopController {
         if(resume){row.state='settled';delete row.recoveryStage;delete row.recoveryCode;recoveryCode='journal_persistence';await this.persist();this.actors.delete(id);return;}
         row.state='ended';delete row.recoveryStage;delete row.recoveryCode;row.completedAt=Date.now();row.reason||='ended';
         recoveryCode='journal_persistence';await this.persist();this.actors.delete(id);
+        // Control has ended and is fenced; give the agent its window back the way setup made it.
+        if(!readOnly&&typeof this.maximize==='function'&&row.receipt?.observedTargetId)void this.runtimeOperation(()=>this.maximize(this.runtime,row.receipt.observedTargetId)).catch(()=>{});
         if(!reconcile)this.gate.release(id);
       }catch(error){row.state='recovery_required';row.recoveryCode=recoveryCode;row.reason||='retirement_failed';row.completedAt=Date.now();this.poison();await this.persist().catch(()=>{});throw new Error(recoveryMessage);}
     })();

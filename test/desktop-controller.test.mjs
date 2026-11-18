@@ -878,3 +878,24 @@ test('a completion acknowledged long after it ended is kept for an hour after th
   c.ledger.leases.legacy={id:'legacy',owner,profile:'human',permission:'watch',state:'ended',mayBeWritable:false,acknowledged:true,completedAt:Date.now()-2*3_600_000,receipt:{leaseId:'legacy',vncProcessesExited:true,xClientsAbsent:true,readOnly:true,inputResetRequired:false}};
   assert.equal(c.pruneLeases(),1);
 });
+
+// Review nit: Alt-drag Move and Resize stay allowed in control, so the agent gets its window back maximized.
+test('the observed window is maximized again once control ends, never after a watch link, and a failure changes nothing',async t=>{
+  const calls=[];let fail=false;
+  const{controller:c}=await setup(t,{controller:{maximize:async(runtime,targetId)=>{calls.push([runtime,targetId]);if(fail)throw new Error('no window');return true;},
+    observe:async()=>({snapshotObserved:true,displayGeneration:'g1',browserGeneration:'g1',observedTargetId:'tab-7'})}});
+  const watch=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  await c.request('revoke',{owner,id:watch.id});
+  await settle(20);
+  assert.equal(calls.length,0);
+  for(fail of [false,true]){
+    const lease=await c.request('create',{owner,profile:'human',permission:'control',ttlSeconds:30});
+    c.ledger.leases[lease.id].mayBeWritable=true;
+    await c.request('revoke',{owner,id:lease.id});
+    await settle(20);
+    const status=await c.request('status',{owner,id:lease.id});
+    assert.equal(status.mode,'ended');
+    assert.equal(status.resumeAllowed,true,'a failed maximize leaves the handback alone');
+  }
+  assert.deepEqual(calls.map(([runtime,targetId])=>[runtime===c.runtime,targetId]),[[true,'tab-7'],[true,'tab-7']]);
+});

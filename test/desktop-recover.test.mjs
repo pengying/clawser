@@ -108,3 +108,12 @@ test('calls that name no Gateway are explained without assuming their version', 
   const text = describeRecovery(await recoverDesktopCalls({ stateDir, dryRun: true }, { processInfo }), 'u').join('\n');
   assert.match(text, /1 call\(s\) name no Gateway: Clawser 1\.0\.1 or earlier recorded none, and a Gateway whose process Clawser couldn't check \(one in another PID namespace, for example\) records none either\./);
 });
+
+test('recover refuses a state folder others can read, as the controller does', async t => {
+  const { stateDir } = await fixture(t);
+  await chmod(stateDir, 0o750);
+  const before = await readFile(join(stateDir, 'ledger.json'), 'utf8');
+  await assert.rejects(recoverDesktopCalls({ stateDir }, { processInfo }), /is not a private folder of this user; recover refuses to use it/);
+  assert.equal(await readFile(join(stateDir, 'ledger.json'), 'utf8'), before);
+  await chmod(stateDir, 0o700);
+});

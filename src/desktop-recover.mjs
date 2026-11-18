@@ -24,6 +24,9 @@ export async function recoverDesktopCalls({ stateDir, abandonCalls = false, dryR
   const fromConfig = value => isAbsolute(value) ? value : resolve(dirname(configPath), value);
   const ledgerDir = fromConfig(config.stateDir);
   const socketPath = config.socketPath ? fromConfig(config.socketPath) : join(ledgerDir, 'desktop.sock');
+  // The same owner-only folder check the controller makes before it takes this lock.
+  const socketDir = await lstat(dirname(socketPath)).catch(() => undefined);
+  if (!socketDir?.isDirectory() || socketDir.uid !== process.getuid() || (socketDir.mode & 0o077)) throw new Error(`${dirname(socketPath)} is not a private folder of this user; recover refuses to use it`);
   const controller = controllerFactory({ stateDir: ledgerDir, profile: config.profile, socketPath, runtime: { cdpUrl: config.runtime?.cdpUrl },
     transport: { ensure: async () => { throw new Error('recover opens no tunnel'); }, close: async () => {} } });
   try { await controller.rpc.acquireLock(); }
