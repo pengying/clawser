@@ -82,13 +82,14 @@ export class DesktopController {
   createGeneration=0;
   writes=Promise.resolve();
   runtimeQueue=Promise.resolve();
-  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,transportRewarmMs=5000,transportMode='on-demand',transportIdleMs=600_000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
+  constructor({stateDir,profile,runtime,transport,port=19420,socketPath,noVncAssetsDir,supervisorHeartbeatMs=5000,transportRewarmMs=5000,transportMode='on-demand',transportIdleMs=600_000,leaseRetentionMs=7*86_400_000,acknowledgedRetentionMs=3_600_000,observe=observeDesktop,activateTarget=activateDesktopTarget,readFocus=readBrowserFocus,gatewayFactory=options=>new NoVncProbeGateway(options),...gatewayOptions}={}) {
     if(!stateDir||!profile||!runtime||!transport)throw new Error('Desktop controller requires stateDir, profile, runtime and transport');
     if(!Number.isInteger(supervisorHeartbeatMs)||supervisorHeartbeatMs<1||supervisorHeartbeatMs>5000)throw new Error('Invalid supervisor heartbeat interval');
     if(!Number.isInteger(transportRewarmMs)||transportRewarmMs<0||transportRewarmMs>600_000)throw new Error('Invalid tunnel restart delay');
     if(!['on-demand','always'].includes(transportMode))throw new Error('Invalid tunnel mode');
     if(!Number.isInteger(transportIdleMs)||transportIdleMs<0||transportIdleMs>86_400_000)throw new Error('Invalid tunnel idle period');
-    Object.assign(this,{stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs,transportMode,transportIdleMs});
+    for(const value of [leaseRetentionMs,acknowledgedRetentionMs])if(!Number.isInteger(value)||value<0)throw new Error('Invalid lease retention');
+    Object.assign(this,{stateDir:resolve(stateDir),profile,runtime,transport,port,observe,activateTarget,readFocus,supervisorHeartbeatMs,transportRewarmMs,transportMode,transportIdleMs,leaseRetentionMs,acknowledgedRetentionMs});
     this.socketPath=socketPath||join(this.stateDir,'desktop.sock');
     this.transport.on?.('failure',()=>{void this.transportFailed();this.scheduleTransportWarm();});
     this.supervisor={create:params=>this.createActor(params),read:async id=>({state:this.actors.has(id)?'running':'stopped'}),register:params=>this.registration(params.ownedId),promote:params=>this.promote(params),cancelPromotion:id=>this.cancelPromotion(id),demote:params=>this.demote(params),destroy:(id,options)=>this.retire(id,options),verifyExited:async id=>this.ledger.leases[id]?.state==='ended'&&safeCompletion(this.ledger.leases[id]),clipboardRead:id=>this.clipboard(id),clipboardWrite:(id,text)=>this.clipboard(id,text),focusRead:id=>this.focus(id)};
@@ -123,6 +124,21 @@ export class DesktopController {
     this.transportWarmTimer=setTimeout(()=>this.warmTransport(),this.transportRewarmMs);
     this.transportWarmTimer.unref?.();
   }
+  // The whole ledger is rewritten and fsynced on every change, and completions must fit one RPC frame, so ended
+  // leases do not stay forever. A lease goes once it has ended with a proven fence and its viewer session is gone:
+  // an hour after the plugin acknowledged its completion, or after a week if nothing ever did. A
+  // recovery_required lease is the durable record of a poisoned gate and is never pruned.
+  pruneLeases(now=Date.now()){
+    let pruned=0;
+    for(const [id,row] of Object.entries(this.ledger.leases)){
+      if(row?.state!=='ended'||!safeCompletion(row)||row.retirement)continue;
+      const session=this.gateway.sessions.get(id);
+      if(session&&session.mode!=='ended')continue;
+      const age=now-(row.completedAt??row.createdAt??0);
+      if((row.acknowledged===true&&age>=this.acknowledgedRetentionMs)||age>=this.leaseRetentionMs){delete this.ledger.leases[id];pruned++;}
+    }
+    return pruned;
+  }
   runtimeOperation(operation){const next=this.runtimeQueue.then(operation);this.runtimeQueue=next.catch(()=>{});return next;}
   async persist(){
     if(!this.rpc?.lockHolder||this.rpc.lockHolder.lost){this.poison();throw new Error('Controller authority lock is unavailable; persistence denied');}
@@ -149,6 +165,7 @@ export class DesktopController {
         await this.retire(row.id,{reconcile:true}).catch(()=>{});
       }
       this.gate.holder=null;
+      this.pruneLeases();
       if(uncertain||Object.values(this.ledger.leases).some(row=>row.state==='recovery_required'))this.poison();
       await this.persist();
       await this.gateway.start({port:this.port});
@@ -296,7 +313,7 @@ export class DesktopController {
   // Read-only, so it skips the runtime queue: a tap's focus check must not wait behind input retirement.
   async focus(id){const row=this.ledger.leases[id];if(!row||row.state!=='control'||this.gate.holder!==id||this.gate.poisonReason)throw new Error('Focus requires current human control');return this.readFocus(this.runtime);}
   async clipboard(id,text){const row=this.ledger.leases[id];if(!row||row.state!=='control'||this.gate.holder!==id||this.gate.poisonReason)throw new Error('Clipboard requires current human control');return this.runtimeOperation(async()=>{if(row.state!=='control')throw new Error('Clipboard authority ended');return text===undefined?this.runtime.clipboardRead({leaseId:id,epoch:row.epoch}):this.runtime.clipboardWrite(text,{leaseId:id,epoch:row.epoch});});}
-  owned(owner,id){ownerParts(owner);const row=this.ledger.leases[id];if(!row||row.owner!==owner)throw new Error('Lease belongs to another owner session');return row;}
+  owned(owner,id){ownerParts(owner);const row=this.ledger.leases[id];if(!row)throw new Error('Unknown browser handoff; an ended one is kept for an hour after its completion is delivered');if(row.owner!==owner)throw new Error('Lease belongs to another owner session');return row;}
   status(row){
     const gatewaySession=this.gateway.sessions.get(row.id);
     const mode=row.state==='recovery_required'?'recovery_required':row.state==='ended'?'ended':gatewaySession?.mode||row.state;
@@ -352,6 +369,7 @@ export class DesktopController {
         ownerParts(params.owner);if(this.revocationWork)throw new Error('Browser invitations are stopped during bulk retirement');if(this.creating||Object.values(this.ledger.leases).some(row=>!terminal(row)))throw new Error('A browser invitation is already active');
         if(!['watch','control'].includes(params.permission)||!Number.isInteger(params.ttlSeconds)||params.ttlSeconds<30||params.ttlSeconds>1800)throw new Error('Invalid invitation permission or lifetime');
         if(params.targetId!==undefined&&(typeof params.targetId!=='string'||!params.targetId||params.targetId.length>256))throw new Error('Invalid task target');
+        if(this.pruneLeases())await this.persist();
         this.creating=params;const generation=this.createGeneration;
         clearTimeout(this.transportIdleTimer);this.transportIdleTimer=undefined;
         const activationId=params.targetId?'activation:' + randomBytes(16).toString('hex'):undefined;
@@ -392,8 +410,14 @@ export class DesktopController {
       case 'revokeOwner':{
         const work=[];for(const row of Object.values(this.ledger.leases)){const [key,id]=ownerParts(row.owner);if(key===params.sessionKey&&(params.sessionId===undefined||params.sessionId===id)&&!terminal(row))work.push(this.request('revoke',{owner:row.owner,id:row.id}));}await Promise.all(work);return{revoked:work.length};
       }
-      case 'completions':return{completions:Object.values(this.ledger.leases).filter(row=>terminal(row)&&!row.acknowledged).map(row=>({...this.status(row),owner:row.owner,completedAt:row.completedAt}))};
-      case 'acknowledgeCompletion':{const row=this.ledger.leases[params.id];if(!row||!terminal(row))throw new Error('Completion is unavailable');row.acknowledged=true;await this.persist();return{acknowledged:true};}
+      case 'completions':{
+        // Oldest first, and never more than the caller asked for, so one reply stays far below the 1 MB frame.
+        const limit=params.limit??50;
+        if(!Number.isInteger(limit)||limit<1||limit>100)throw new Error('Invalid completion limit');
+        const pending=Object.values(this.ledger.leases).filter(row=>terminal(row)&&!row.acknowledged).sort((a,b)=>(a.completedAt??0)-(b.completedAt??0));
+        return{completions:pending.slice(0,limit).map(row=>({...this.status(row),owner:row.owner,completedAt:row.completedAt})),...(pending.length>limit?{more:true}:{})};
+      }
+      case 'acknowledgeCompletion':{const row=this.ledger.leases[params.id];if(!row||!terminal(row))throw new Error('Completion is unavailable');row.acknowledged=true;this.pruneLeases();await this.persist();return{acknowledged:true};}
       default:throw new Error('Unsupported controller RPC method');
     }
   }

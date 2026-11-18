@@ -140,7 +140,7 @@ export class NoVncProbeGateway {
   sessions = new Map();
   creations = new Set();
   upgradeSockets = new Set();
-  constructor({ supervisor, publicBaseUrl, allowLanHttp = false, noVncAssetsDir, upstreamConnect = defaultUpstreamConnect, now = Date.now, monotonicNow = () => performance.now(), promotionMs = 10_000, heartbeatMs = 10_000, upstreamConnectMs = 5_000, maxProbes = 8, prefix = PREFIX, completionDisposition, capabilities = {}, onEnded, closeGraceMs = 2000, abandonMs = 180_000 } = {}) {
+  constructor({ supervisor, publicBaseUrl, allowLanHttp = false, noVncAssetsDir, upstreamConnect = defaultUpstreamConnect, now = Date.now, monotonicNow = () => performance.now(), promotionMs = 10_000, heartbeatMs = 10_000, upstreamConnectMs = 5_000, maxProbes = 8, prefix = PREFIX, completionDisposition, capabilities = {}, onEnded, closeGraceMs = 2000, abandonMs = 180_000, endedRetentionMs = 600_000 } = {}) {
     for (const method of ['create', 'read', 'register', 'destroy', 'verifyExited']) {
       if (typeof supervisor?.[method] !== 'function') throw new Error(`Probe supervisor requires ${method}()`);
     }
@@ -169,6 +169,8 @@ export class NoVncProbeGateway {
     this.closeGraceMs = closeGraceMs;
     if (!Number.isInteger(abandonMs) || abandonMs < 1000 || abandonMs > 3_600_000) throw new Error('Invalid abandoned viewer timeout');
     this.abandonMs = abandonMs;
+    if (!Number.isInteger(endedRetentionMs) || endedRetentionMs < 0) throw new Error('Invalid ended session retention');
+    this.endedRetentionMs = endedRetentionMs;
     this.wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: MAX_BUFFERED });
     this.server = createServer((req, res) => { void this.handle(req, res); });
     this.server.headersTimeout = 10_000;
@@ -706,6 +708,7 @@ export class NoVncProbeGateway {
       try { await this.onEnded?.(session, { ...this.status(session.id), mode }); }
       catch { verified = false; }
       session.mode = verified ? 'ended' : 'cleanup_failed';
+      if (verified) session.endedAt = this.now();
     })();
     session.cleanupInFlight = attempt;
     try { await attempt; }
@@ -731,6 +734,8 @@ export class NoVncProbeGateway {
   async sweep() {
     const work = [], now = this.now();
     for (const session of this.sessions.values()) {
+      // An ended session answers a late Done or page load with "ended" for a while, then goes. A cleanup_failed one stays retryable.
+      if (session.mode === 'ended') { session.endedAt ??= now; if (now - session.endedAt >= this.endedRetentionMs) this.sessions.delete(session.id); continue; }
       if (['ending', 'ended', 'cleanup_failed'].includes(session.mode)) continue;
       if (session.expiresAt <= now) { work.push(this.end(session, 'expired')); continue; }
       if (!this.unattended(session)) { delete session.unattendedSince; continue; }

@@ -1208,3 +1208,22 @@ test('a claimed handoff with no viewer attached ends as abandoned, while a reloa
 test('the abandoned viewer timeout is validated', () => {
   for (const abandonMs of [0, 999, 3_600_001, 1.5]) assert.throws(() => new NoVncProbeGateway({ supervisor: new FakeSupervisor(), abandonMs }), /abandoned viewer timeout/);
 });
+
+test('an ended session leaves the session map after its retention, a cleanup_failed one stays', async (t) => {
+  let time = Date.now();
+  const supervisor = new FakeSupervisor();
+  const gateway = new NoVncProbeGateway({ supervisor, now: () => time, endedRetentionMs: 600_000, upstreamConnect: async () => new MemoryVncSocket() });
+  await gateway.start({ port: 0 });
+  t.after(() => gateway.close());
+  const done = await gateway.createProbe({ ttlSeconds: 60 });
+  await gateway.end(gateway.sessions.get(done.id), 'done');
+  supervisor.verify = false;
+  const failed = await gateway.createProbe({ ttlSeconds: 60 });
+  await gateway.end(gateway.sessions.get(failed.id), 'done');
+  assert.equal(gateway.status(failed.id).mode, 'cleanup_failed');
+  time += 599_000; await gateway.sweep();
+  assert.equal(gateway.status(done.id).mode, 'ended', 'a late Done still hears "ended"');
+  time += 1_000; await gateway.sweep();
+  assert.equal(gateway.sessions.has(done.id), false);
+  assert.equal(gateway.sessions.has(failed.id), true);
+});

@@ -672,3 +672,39 @@ test('focus answers come from the browser only while the lease holds control',as
   await viewer.post('done');
   await assert.rejects(c.supervisor.focusRead(lease.id),/human control/i);
 });
+
+test('ended leases are pruned an hour after acknowledgement or after a week, never a recovery_required one',async t=>{
+  const{controller:c,stateDir}=await setup(t,{controller:{acknowledgedRetentionMs:1000,leaseRetentionMs:60_000}});
+  const first=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  await c.request('revoke',{owner,id:first.id});
+  await c.request('acknowledgeCompletion',{id:first.id});
+  assert.ok(c.ledger.leases[first.id],'kept while the agent may still read its status');
+  const second=await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  await c.request('revoke',{owner,id:second.id});
+  const now=Date.now();
+  // Neither is old enough yet; then the acknowledged one passes its hour and the other its week.
+  assert.equal(c.pruneLeases(now),0);
+  assert.equal(c.pruneLeases(now+2000),1);
+  assert.equal(c.ledger.leases[first.id],undefined);
+  await assert.rejects(c.request('status',{owner,id:first.id}),/Unknown browser handoff/);
+  c.ledger.leases.broken={id:'broken',owner,profile:'human',permission:'control',state:'recovery_required',mayBeWritable:true,completedAt:0};
+  c.ledger.leases.running={id:'running',owner,profile:'human',permission:'watch',state:'watch',createdAt:0};
+  assert.equal(c.pruneLeases(now+120_000),1);
+  assert.deepEqual(Object.keys(c.ledger.leases).sort(),['broken','running']);
+  assert.equal(c.ledger.leases[second.id],undefined,'unacknowledged, but older than the week');
+  await c.persist();
+  const saved=JSON.parse(await readFile(join(stateDir,'ledger.json'),'utf8'));
+  assert.deepEqual(Object.keys(saved.leases).sort(),['broken','running']);
+});
+
+test('completions are oldest first and honour the limit',async t=>{
+  const{controller:c}=await setup(t);
+  const base={owner,profile:'human',permission:'watch',state:'ended',mayBeWritable:false,receipt:{vncProcessesExited:true,xClientsAbsent:true,readOnly:true,inputResetRequired:false}};
+  for(let n=0;n<130;n++)c.ledger.leases['l'+n]={...base,id:'l'+n,completedAt:1000+(130-n)};
+  const first=await c.request('completions',{limit:50});
+  assert.equal(first.completions.length,50);assert.equal(first.more,true);
+  assert.deepEqual(first.completions.slice(0,2).map(row=>row.id),['l129','l128']);
+  assert.equal((await c.request('completions',{})).completions.length,50,'50 when the caller names no limit');
+  const all=await c.request('completions',{limit:100});assert.equal(all.completions.length,100);
+  for(const limit of [0,101,1.5,'5'])await assert.rejects(c.request('completions',{limit}),/completion limit/);
+});
