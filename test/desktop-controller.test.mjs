@@ -173,6 +173,19 @@ test('on demand, a dropped tunnel comes back during a handoff or its idle grace,
   assert.equal(transport.ports.length,2,'not restarted once idle');
 });
 
+test('after an outage, the tunnel comes back for the idle grace even when ending the handoff is slow',async t=>{
+  const {EventEmitter}=await import('node:events');const transport=Object.assign(new EventEmitter(),countingTransport());
+  delete transport.on;
+  const{controller:c}=await setup(t,{controller:{transport,transportRewarmMs:150,transportIdleMs:2000}});
+  await c.request('create',{owner,profile:'human',permission:'watch',ttlSeconds:30});
+  // Each journal write takes 100 ms, so a rewarm timer set at the outage fires after the lease ended, before its grace.
+  const persist=c.persist.bind(c);c.persist=async()=>{await settle(100);return persist();};
+  transport.emit('failure',new Error('owned tunnel exited'));
+  for(let n=0;n<100&&transport.ports.length<2;n++)await settle(10);
+  assert.equal(transport.ports.length,2,'rewarmed for the idle grace');
+  assert.ok(c.transportIdleTimer,'the idle grace is running');
+});
+
 test('with transportMode always, the controller starts the public tunnel when it starts and never stops it',async t=>{
   const transport=countingTransport();
   const{controller:c}=await setup(t,{controller:{transport,transportMode:'always',transportIdleMs:0}});
